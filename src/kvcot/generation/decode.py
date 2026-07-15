@@ -14,11 +14,11 @@ mask to supply.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
-from kvcot.generation.sampling import sample_next_token, greedy_next_token
+from kvcot.generation.sampling import sample_next_token
 
 
 @dataclass
@@ -27,6 +27,35 @@ class GenerationResult:
     cap_hit: bool
     wall_time_seconds: float
     final_absolute_position: int
+    # Number of real R-KV compaction EVENTS during this generation (one count,
+    # NOT events * n_layers). 0 for FullKV / patched-noop-that-never-fired.
+    compaction_count: int = 0
+    # Absolute token positions (index into the prompt+generated stream, i.e.
+    # `self.length` at the forward call that fired the event) at which each
+    # compaction event occurred — the same convention replay_and_snapshot
+    # records, so base and replay agree. Length == compaction_count.
+    compaction_event_steps: list[int] = field(default_factory=list)
+
+
+def _rkv_layer_event_counts(model) -> list[int]:
+    """Per-R-KV-layer count of recorded compaction events
+    (`len(kv_cluster.kept_token_indices)`), for layers that actually track it.
+    Empty for stock FullKV. All R-KV layers share one compression schedule and
+    identical key lengths (modeling.py: one `compression` flag set for every
+    layer at once, per-step), so these counts must all be equal — the caller
+    asserts that and takes a single representative value rather than summing
+    across layers (summing is exactly the ×n_layers inflation bug)."""
+    counts: list[int] = []
+    for layer in model.model.layers:
+        kv_cluster = getattr(layer.self_attn, "kv_cluster", None)
+        if kv_cluster is not None and getattr(kv_cluster, "record_kept_token_indices", False):
+            counts.append(len(kv_cluster.kept_token_indices))
+    return counts
+
+
+def _representative_event_count(model) -> int:
+    counts = _rkv_layer_event_counts(model)
+    return counts[0] if counts else 0
 
 
 def prefill(model, cache, prompt_token_ids: list[int], device: str) -> tuple[torch.Tensor, int]:
@@ -89,6 +118,15 @@ def generate_base(
     start = time.monotonic()
     logits, absolute_position = prefill(model, cache, prompt_token_ids, device)
 
+    # Compaction-event tracking (§8.3/§12). One count, recorded at the absolute
+    # position of the forward call that fired it — never events * n_layers. A
+    # single forward call can fire at most one event per layer (kept_token_
+    # indices grows by 1), and all R-KV layers fire together, so tracking one
+    # representative count is sufficient; final consistency is asserted below.
+    compaction_event_steps: list[int] = []
+    prev_event_count = _representative_event_count(model)  # events fired during prefill
+    compaction_event_steps.extend([absolute_position] * prev_event_count)
+
     generated: list[int] = []
     cap_hit = True
     for _ in range(max_new_tokens):
@@ -100,6 +138,19 @@ def generate_base(
             break
         logits = decode_step(model, cache, token_id, absolute_position, device)
         absolute_position += 1
+        cur_event_count = _representative_event_count(model)
+        if cur_event_count > prev_event_count:
+            compaction_event_steps.extend([absolute_position] * (cur_event_count - prev_event_count))
+            prev_event_count = cur_event_count
+
+    layer_counts = _rkv_layer_event_counts(model)
+    if len(set(layer_counts)) > 1:
+        raise AssertionError(
+            f"R-KV layers disagree on compaction event count ({sorted(set(layer_counts))}) — "
+            "they share one per-step compression schedule and must all fire the same events "
+            "(modeling.py CausalLM_forward sets the compression flag for every layer at once)."
+        )
+    compaction_count = layer_counts[0] if layer_counts else 0
 
     wall_time = time.monotonic() - start
     return GenerationResult(
@@ -107,34 +158,6 @@ def generate_base(
         cap_hit=cap_hit,
         wall_time_seconds=wall_time,
         final_absolute_position=absolute_position,
+        compaction_count=compaction_count,
+        compaction_event_steps=compaction_event_steps,
     )
-
-
-def generate_probe_answer(
-    model,
-    cache,
-    last_token_id: int,
-    absolute_position: int,
-    max_new_tokens: int,
-    eos_token_id: int,
-    device: str,
-) -> list[int]:
-    """Greedy decoding for the 48-token answer probe (§4). `last_token_id`
-    is the final token already fed into the model (the last token of the
-    teacher-forced control suffix); this function performs the first
-    forward call to get its logits' successor, matching the same
-    single-token call shape as `decode_step`.
-    """
-    logits = decode_step(model, cache, last_token_id, absolute_position, device)
-    absolute_position += 1
-
-    generated: list[int] = []
-    for _ in range(max_new_tokens):
-        next_id = greedy_next_token(logits)
-        token_id = int(next_id.item())
-        generated.append(token_id)
-        if token_id == eos_token_id:
-            break
-        logits = decode_step(model, cache, token_id, absolute_position, device)
-        absolute_position += 1
-    return generated

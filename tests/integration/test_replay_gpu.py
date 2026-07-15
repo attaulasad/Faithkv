@@ -94,13 +94,25 @@ def _generate_and_collect(model, tokenizer, device: str) -> dict:
                 frozenset(t.flatten().tolist()) for t in kv_cluster.kept_token_indices
             ]
 
+    # Number of real compaction EVENTS = the per-layer count of recorded
+    # kept-index tensors, NOT summed across layers. All R-KV layers share one
+    # per-step compression schedule, so every layer must record the same number
+    # of events; assert that and take one representative value. (Summing across
+    # layers is the ×n_layers inflation that made `assert n_compactions >= 2`
+    # vacuously true on a single real event.)
+    per_layer_event_counts = [len(v) for v in kept_sets_per_layer.values()]
+    assert len(set(per_layer_event_counts)) <= 1, (
+        f"R-KV layers disagree on compaction event count: {sorted(set(per_layer_event_counts))}"
+    )
+    n_compactions = per_layer_event_counts[0] if per_layer_event_counts else 0
+
     return {
         "prompt_ids": prompt_ids,
         "continuation_ids": continuation_ids,
         "final_absolute_position": pos,
         "cache_shapes": cache_shapes,
         "kept_sets_per_layer": kept_sets_per_layer,
-        "n_compactions": sum(len(v) for v in kept_sets_per_layer.values()),
+        "n_compactions": n_compactions,
     }
 
 
@@ -153,7 +165,8 @@ def test_replay_reproduces_identical_tokens_and_compaction_events(attn_impl):
     base = _generate_and_collect(model, tokenizer, device)
     replayed = _replay(model, tokenizer, base, device)
 
-    # HARD GATE: >=2 real compactions fired in the original generation.
+    # HARD GATE: >=2 real compaction EVENTS fired in the original generation
+    # (per-layer event count, not events*n_layers — see _generate_and_collect).
     assert base["n_compactions"] >= 2
 
     # HARD GATE: identical compaction event count via replay (exact step
@@ -216,10 +229,15 @@ def test_restoring_same_snapshot_twice_yields_identical_probe_tokens():
 
     suffix_ids = tokenizer.encode(render_control_suffix(), add_special_tokens=False)
 
-    # `restore_snapshot` (called inside `branch_and_probe`) overwrites the
-    # passed-in cache's key/value/query_cache in place from the snapshot's
-    # own cloned tensors, so a fresh DynamicCache per branch call is enough
-    # — it does not need to already hold anything.
+    # A fresh DynamicCache per branch call is required (and sufficient):
+    # `restore_snapshot` (inside `branch_and_probe`) POPULATES the cache from
+    # the snapshot via the public `cache.update(...)` path, which grows
+    # `cache.layers` and lazily initializes each layer. It does NOT item-assign
+    # into `cache.key_cache[i]` — on transformers 4.55.4 that would IndexError,
+    # because a fresh DynamicCache pre-creates only one layer and `key_cache`
+    # is a growth-free `KeyValuesWrapper` property. Because `update` appends,
+    # the cache MUST be fresh here (a reused cache would concatenate, not
+    # overwrite); constructing a new one per call is exactly that guarantee.
     probe_1 = branch_and_probe(
         model, DynamicCache(), snap, close_ids, suffix_ids, 48, tokenizer.eos_token_id, device
     )
@@ -312,11 +330,14 @@ def test_streaming_replay_vs_bulk_prefill_negative_control():
     cache = reset_patched_state(model, lambda: DynamicCache())
     full_sequence = base["prompt_ids"] + base["continuation_ids"]
     prefill(model, cache, full_sequence, device)
-    bulk_events = 0
-    for layer in model.model.layers:
-        kv_cluster = getattr(layer.self_attn, "kv_cluster", None)
-        if kv_cluster is not None:
-            bulk_events += len(kv_cluster.kept_token_indices)
+    # Per-layer event count (representative), same convention as
+    # _generate_and_collect — never summed across layers.
+    bulk_per_layer = [
+        len(layer.self_attn.kv_cluster.kept_token_indices)
+        for layer in model.model.layers
+        if getattr(layer.self_attn, "kv_cluster", None) is not None
+    ]
+    bulk_events = bulk_per_layer[0] if bulk_per_layer else 0
 
     assert streaming_events >= 2
     assert bulk_events != streaming_events, (

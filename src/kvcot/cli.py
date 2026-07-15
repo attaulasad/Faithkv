@@ -47,6 +47,33 @@ def _load_manifest_filtered(stage, args) -> list[dict]:
     return rows
 
 
+def _build_method_config(condition: str, policy):
+    """Build the record's MethodConfig (§9/§12: *configured*, not measured,
+    parameters). For R-KV/patched-noop, copy the concrete budget/window/etc.
+    off the policy so a base record fully records the operating point it ran
+    under, not just the method name. Realized retention stays a separate,
+    measured concept (RetentionSummary) — never derived from these."""
+    from kvcot.schemas import MethodConfig
+
+    if condition == "full":
+        return MethodConfig(method="fullkv")
+    mc = getattr(policy, "method_config", None)
+    method = "patched_noop" if condition == "patched_noop" else "rkv"
+    if mc is None:
+        return MethodConfig(method=method)
+    return MethodConfig(
+        method=method,
+        budget=mc.budget,
+        window_size=mc.window_size,
+        mix_lambda=mc.mix_lambda,
+        retain_ratio=mc.retain_ratio,
+        retain_direction=mc.retain_direction,
+        divide_method=mc.divide_method,
+        divide_length=mc.divide_length,
+        compression_content=mc.compression_content,
+    )
+
+
 def _resolve_seeds_for_run(stage, lock, args) -> list[int]:
     seeds = stage.resolve_seeds(lock)
     if args.seed is not None:
@@ -139,7 +166,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     from kvcot.utils.hashing import question_hash as qhash
     from kvcot.utils.io import JsonlWriter
     from kvcot.schemas import (
-        BaseRunRecord, DatasetProvenance, MethodConfig, ProvenanceState, ThinkSpanInfo,
+        BaseRunRecord, DatasetProvenance, ProvenanceState, ThinkSpanInfo,
     )
     from transformers.cache_utils import DynamicCache
     from transformers import AutoTokenizer
@@ -183,12 +210,12 @@ def cmd_generate(args: argparse.Namespace) -> int:
                 answer.normalized_value == row["normalized_gold"] if answer.normalized_value is not None else None
             )
 
-            compaction_event_steps: list[int] = []
+            # Compaction counts come from generate_base, which tracks EVENTS
+            # (one count, at absolute positions) during the decode loop —
+            # never events * n_layers, and never a per-layer index enumeration.
+            compaction_event_steps = result.compaction_event_steps
+            compaction_count = result.compaction_count
             cache_lengths = [cache.key_cache[i].shape[-2] for i in range(len(model.model.layers))]
-            for layer in model.model.layers:
-                kv_cluster = getattr(layer.self_attn, "kv_cluster", None)
-                if kv_cluster is not None:
-                    compaction_event_steps.extend(range(len(kv_cluster.kept_token_indices)))
 
             record = BaseRunRecord(
                 record_id=record_id,
@@ -203,12 +230,15 @@ def cmd_generate(args: argparse.Namespace) -> int:
                 tokenizer_revision=lock.model.tokenizer_revision,
                 dataset=DatasetProvenance(
                     dataset_name=Path(stage.dataset_manifest).stem,
+                    dataset_config=row.get("dataset_config"),
+                    dataset_revision=row.get("dataset_revision"),
+                    dataset_fingerprint=row.get("dataset_fingerprint"),
                     source_row_index=row["source_row_index"],
                     question_hash=row["question_hash"],
                     normalized_gold=row["normalized_gold"],
                 ),
                 condition=condition,
-                method_config=MethodConfig(method="fullkv" if condition == "full" else ("patched_noop" if condition == "patched_noop" else "rkv")),
+                method_config=_build_method_config(condition, policy),
                 global_seed=seed,
                 derived_seed=derived_seed,
                 prompt_text=user_message,
@@ -228,7 +258,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
                 cap_hit=result.cap_hit,
                 wall_time_seconds=result.wall_time_seconds,
                 generated_token_count=len(result.generated_token_ids),
-                compaction_count=len(compaction_event_steps),
+                compaction_count=compaction_count,
                 compaction_event_steps=compaction_event_steps,
                 cache_length_final_per_layer=cache_lengths,
             )
@@ -291,8 +321,18 @@ def cmd_replay_probe(args: argparse.Namespace) -> int:
             think_parse_status=base["think_span"]["think_parse_status"],
             generation_prompt_preopened_think=base["think_span"]["generation_prompt_preopened_think"],
         )
+        # Absolute index into the (prompt + generated) token stream at which
+        # to snapshot for each fraction, matching replay_and_snapshot's
+        # documented contract EXACTLY: len(prompt) + absolute_cut_position(f),
+        # where absolute_cut_position = think_start_index + floor(f * L). The
+        # earlier `- span.think_start_index` term made every snapshot land
+        # think_start_index tokens too early for any non-preopened ("ok")
+        # trace; it was masked only because this model's chat template
+        # pre-opens <think> (think_start_index == 0). cmd_replay_probe accepts
+        # both "ok" and "generation_prompt_preopened_ok" traces, so the bug was
+        # reachable — fixed here rather than relying on the template invariant.
         cut_positions = {
-            f: len(base["prompt_token_ids"]) + absolute_cut_position(span, f) - span.think_start_index
+            f: len(base["prompt_token_ids"]) + absolute_cut_position(span, f)
             for f in lock.probes.fractions_all
         }
         snapshots = replay_and_snapshot(
@@ -322,7 +362,9 @@ def cmd_replay_probe(args: argparse.Namespace) -> int:
                 condition=args.condition,
                 fraction=fraction,
                 think_span_length=span.think_token_count,
-                cut_index=cut_positions[fraction] - len(base["prompt_token_ids"]),
+                # Relative cut index the schema documents as floor(fraction*L),
+                # i.e. absolute cut position minus the think-span start.
+                cut_index=cut_positions[fraction] - len(base["prompt_token_ids"]) - span.think_start_index,
                 control_suffix_token_ids=suffix_ids,
                 probe_decoding_max_new_tokens=lock.probes.max_new_tokens,
                 probe_output_token_ids=result.probe_output_token_ids,
@@ -358,19 +400,66 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         write_attrition_funnel_csv,
         write_primary_analysis_json,
     )
-    from kvcot.utils.io import read_jsonl
+    from kvcot.analysis.pipeline import (
+        build_pair_results,
+        count_answer_changed_at_any_scored_fraction,
+        discover_conditions,
+        funnel_records,
+        load_condition_records,
+        paired_accuracy_inputs,
+        problem_level_delta_eas,
+    )
 
     output_dir = Path(stage.output_dir)
+
     if stage.stage_name == "stage1a_measurability":
-        full_records = list(read_jsonl(output_dir / "full.jsonl"))
-        n_total = sum(1 for r in full_records if r.get("is_correct"))
-        n_changed = 0  # populated once probe records exist; requires replay-probe to have run first
-        decision = build_stage1a_measurability_decision(n_total=max(n_total, 1), n_answer_changed_at_any_scored_fraction=n_changed)
+        full = load_condition_records(output_dir / "full.jsonl", output_dir / "full_probes.jsonl", "full")
+        n_total, n_changed = count_answer_changed_at_any_scored_fraction(full)
+        decision = build_stage1a_measurability_decision(
+            n_total=max(n_total, 1), n_answer_changed_at_any_scored_fraction=n_changed
+        )
         write_json("results/decisions/stage1a_baseline_measurability.json", decision)
-        print(f"wrote results/decisions/stage1a_baseline_measurability.json: recommendation={decision['recommendation']}")
+        print(
+            f"wrote results/decisions/stage1a_baseline_measurability.json: "
+            f"n_eligible={n_total} n_changed={n_changed} recommendation={decision['recommendation']}"
+        )
         return 0
 
-    print(f"analyze: stage {stage.stage_name} has no CPU-runnable data yet on this build machine (GPU validation pending)")
+    # Stage 2 (and any full+rkv stage): the frozen primary analysis (§8.5).
+    full_cond, rkv_cond = discover_conditions(output_dir)
+    full = load_condition_records(
+        output_dir / f"{full_cond}.jsonl", output_dir / f"{full_cond}_probes.jsonl", full_cond
+    )
+    rkv = load_condition_records(
+        output_dir / f"{rkv_cond}.jsonl", output_dir / f"{rkv_cond}_probes.jsonl", rkv_cond
+    )
+
+    # Attrition funnel first — it must always be emitted (§8.4), even if too few
+    # problems survive to run the primary tests.
+    funnel_rows = build_attrition_funnel_table(funnel_records(full), funnel_records(rkv))
+    write_attrition_funnel_csv(funnel_rows, "results/tables/attrition_funnel.csv")
+    print("wrote results/tables/attrition_funnel.csv")
+
+    pairs = build_pair_results(full, rkv)
+    _aggregates, primary_values = problem_level_delta_eas(pairs)
+    if not primary_values:
+        print(
+            "analyze: no problem reached the >=2-eligible-seeds bar, so the primary "
+            "tests have no problem-level Delta_EAS to run on — see the attrition funnel "
+            "for where problems were lost. (This is a real outcome, not an error.)"
+        )
+        return 0
+
+    full_acc, rkv_acc = paired_accuracy_inputs(full, rkv)
+    summary = build_primary_analysis_summary(primary_values, full_acc, rkv_acc)
+    write_primary_analysis_json(summary, "results/decisions/stage2_primary_analysis.json")
+    print(
+        f"wrote results/decisions/stage2_primary_analysis.json: "
+        f"n_problems_primary={summary.n_problems_primary} "
+        f"delta_eas_mean={summary.delta_eas_bootstrap_ci.point_estimate:.4f} "
+        f"CI=[{summary.delta_eas_bootstrap_ci.ci_low:.4f}, {summary.delta_eas_bootstrap_ci.ci_high:.4f}] "
+        f"wilcoxon_pratt_p={summary.wilcoxon_pratt.p_value:.4g}"
+    )
     return 0
 
 
@@ -457,9 +546,18 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from kvcot.runtime import OperatingPointMissingError
+
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except OperatingPointMissingError as e:
+        # Stage 2 prerequisite missing (§10). Report cleanly — including under
+        # --dry-run, whose whole purpose is to surface exactly this before GPU
+        # time is spent — instead of dumping a raw traceback.
+        print(f"error: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

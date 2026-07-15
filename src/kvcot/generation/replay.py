@@ -73,15 +73,31 @@ def _sync_layer_after_call(
     kv_cluster = _has_kv_cluster(model, layer_idx)
     if kv_cluster is not None:
         n_after = len(kv_cluster.kept_token_indices)
-        evicted_by_bookkeeping = n_after > kept_indices_lengths.get(layer_idx, 0)
-        assert evicted_by_length == evicted_by_bookkeeping, (
-            f"compaction-detection signals disagree at layer {layer_idx}, "
-            f"absolute_position={absolute_position_after}: "
-            f"cache-length says evicted={evicted_by_length}, "
-            f"kept_token_indices says evicted={evicted_by_bookkeeping}"
-        )
+        event_fired = n_after > kept_indices_lengths.get(layer_idx, 0)
+        # `kept_token_indices` growth is the GROUND TRUTH for "a compaction
+        # event ran"; the physical cache length is a one-directional
+        # DIAGNOSTIC cross-check, not the event definition. Upstream records
+        # an event (appends to kept_token_indices, evicted_token_num +=
+        # kv_cache_len - budget) whenever kv_cache_len >= budget. At the exact
+        # boundary kv_cache_len == budget, `topk(budget - window)` selects all
+        # of the budget - window pre-window candidates, so the compressed
+        # cache stays at `budget`: a real, recorded compaction event that
+        # evicts zero tokens (evicted_token_num += 0). That is legitimate, not
+        # a bug — do NOT assert event_fired == evicted_by_length (an earlier
+        # `assert` here crashed the whole run on that boundary, reachable at
+        # prefill when a tokenized prompt lands exactly on `budget`, e.g. the
+        # B128 arm). Only the REVERSE disagreement is a genuine invariant
+        # violation: the cache shrank with no recorded event, which stock
+        # attention can never do.
+        if evicted_by_length and not event_fired:
+            raise AssertionError(
+                f"cache at layer {layer_idx} shrank ({actual_len} < "
+                f"{expected_len_if_no_evict}) but kv_cluster recorded no compaction "
+                f"event at absolute_position={absolute_position_after} — the "
+                "compaction-detection invariant (docs/UPSTREAM_AUDIT.md H3-H5) is wrong."
+            )
         kept_indices_lengths[layer_idx] = n_after
-        if evicted_by_bookkeeping:
+        if event_fired:
             model_provenance.layers[layer_idx].adopt_upstream_kept_indices(
                 kv_cluster.kept_token_indices[-1]
             )
@@ -172,6 +188,17 @@ def replay_and_snapshot(
                 compaction=compaction, absolute_position_after=absolute_position,
             )
         maybe_snapshot(absolute_position)
+        # Stop as soon as every requested snapshot has been captured. Every
+        # snapshot position is <= think_end (f=1.0 maps to think_end_index),
+        # so the trailing tokens (the closing </think>, the natural answer,
+        # and the terminal EOS) are never needed for any snapshot. Not feeding
+        # them keeps replay symmetric with base generation, which appends but
+        # never *feeds* its terminal EOS (decode.py:generate_base breaks before
+        # the EOS decode_step) — otherwise replay would make one extra forward
+        # call and could record a spurious post-think compaction event that the
+        # base run never saw. It is also strictly less work.
+        if len(snapshots) == len(snapshot_absolute_positions):
+            break
 
     missing = set(snapshot_absolute_positions) - set(snapshots)
     if missing:
@@ -237,9 +264,34 @@ def capture_snapshot(
     )
 
 
+def _populate_fresh_cache(cache, snapshot: ModelStateSnapshot, num_layers: int) -> None:
+    """Fill a *freshly constructed* Cache with the snapshot's per-layer
+    key/value tensors, via the public `cache.update(...)` path.
+
+    Why not the obvious `cache.key_cache[i] = snapshot.key_cache[i].clone()`?
+    On transformers 4.55.4 (the pinned version, requirements.txt) a brand-new
+    `DynamicCache()` pre-creates exactly ONE layer, and `key_cache` is a
+    deprecated `@property` returning a `KeyValuesWrapper` whose `__setitem__`
+    does `setattr(self.layers[idx], "keys", ...)` with NO list growth. So the
+    old code succeeded at `i=0` and then raised `IndexError` at `i=1` — the
+    probe stage could never run. `cache.update(key, value, layer_idx)` instead
+    calls `append_new_layers(layer_idx)` to grow `cache.layers`, then lazily
+    initializes each layer's dtype/device before storing the tensor. For a
+    fresh cache each layer starts empty, so `update` stores exactly the passed
+    tensor (concatenation with an empty tensor). This REQUIRES a fresh cache:
+    `update` concatenates, so populating a non-empty cache here would append
+    instead of overwrite — every caller (branch_and_probe) passes a fresh
+    `DynamicCache()`, which is the contract.
+    """
+    for i in range(num_layers):
+        cache.update(snapshot.key_cache[i].clone(), snapshot.value_cache[i].clone(), i)
+    cache.query_cache = {i: t.clone() for i, t in snapshot.query_cache.items()}
+
+
 def restore_snapshot(model, cache, snapshot: ModelStateSnapshot) -> ModelProvenance:
     """Restore live model/cache state from a deep-cloned snapshot, for
-    branching (§6 step 8). Always restores from a *fresh clone* of the
+    branching (§6 step 8). `cache` must be a *freshly constructed* Cache (see
+    `_populate_fresh_cache`). Always restores from a *fresh clone* of the
     snapshot's tensors (never the snapshot's own tensors directly), so
     restoring the same snapshot twice cannot let the two branches share
     mutable storage — combined with `capture_snapshot`'s own `.clone()`
@@ -247,10 +299,7 @@ def restore_snapshot(model, cache, snapshot: ModelStateSnapshot) -> ModelProvena
     every reuse of a snapshot.
     """
     num_layers = len(model.model.layers)
-    for i in range(num_layers):
-        cache.key_cache[i] = snapshot.key_cache[i].clone()
-        cache.value_cache[i] = snapshot.value_cache[i].clone()
-    cache.query_cache = {i: t.clone() for i, t in snapshot.query_cache.items()}
+    _populate_fresh_cache(cache, snapshot, num_layers)
 
     for i in range(num_layers):
         model.model.layers[i].self_attn.config.compression = _compression_flag_from_str(
