@@ -53,9 +53,8 @@ def _sync_layer_after_call(
     model_provenance: ModelProvenance,
     kept_indices_lengths: dict[int, int],
     expected_len_if_no_evict: int,
-    compaction: CompactionTracker,
     absolute_position_after: int,
-) -> None:
+) -> bool:
     """Shared post-forward-call bookkeeping step, used identically after
     the prefill call and after every single-token decode call (no separate
     "prefill sync" vs "decode sync" code paths, to keep this in exactly one
@@ -66,6 +65,19 @@ def _sync_layer_after_call(
     policies.py) — and fails loudly on disagreement rather than silently
     trusting one, since a disagreement would mean our understanding of the
     upstream mechanism (docs/UPSTREAM_AUDIT.md H3-H5) is wrong.
+
+    Updates this LAYER's own provenance positions (genuinely per-layer data)
+    but does NOT record the compaction event itself — that is the caller's
+    job, called ONCE per forward call after every layer has been synced (see
+    `_note_event_once`), not once per layer. A single real compaction event
+    fires identically across every R-KV layer in one forward call (they share
+    one per-step schedule, modeling.py's `CausalLM_forward`), so recording it
+    here — inside this per-layer loop — would append the same absolute
+    position once per layer (28x here) into `compaction.event_steps`, which
+    is exactly the "events x n_layers" inflation bug this repository's own
+    convention (§12: absolute event steps, one entry per real event) forbids.
+    Returns whether AN EVENT FIRED AT THIS LAYER, for the caller to
+    cross-check that every layer agrees before recording it once.
     """
     actual_len = cache.key_cache[layer_idx].shape[-2]
     evicted_by_length = actual_len < expected_len_if_no_evict
@@ -101,7 +113,7 @@ def _sync_layer_after_call(
             model_provenance.layers[layer_idx].adopt_upstream_kept_indices(
                 kv_cluster.kept_token_indices[-1]
             )
-            compaction.note_event(absolute_position_after)
+        return event_fired
     elif evicted_by_length:
         # No kv_cluster (stock FullKV) but cache shrank — should be
         # structurally impossible (stock attention never evicts), so this
@@ -110,6 +122,27 @@ def _sync_layer_after_call(
             f"layer {layer_idx} has no kv_cluster but its cache length decreased "
             f"({actual_len} < {expected_len_if_no_evict}) — stock FullKV must never evict."
         )
+    return False
+
+
+def _note_event_once(
+    per_layer_event_fired: list[bool], compaction: CompactionTracker, absolute_position_after: int
+) -> None:
+    """Record AT MOST ONE compaction event for this forward call, after every
+    R-KV layer has been synced. All R-KV layers share one per-step
+    compression schedule (modeling.py `CausalLM_forward` sets the
+    `compression` flag for every layer at once, from one shared `self.length`
+    counter), so a real event fires at every R-KV layer simultaneously or at
+    none of them — cross-check that here rather than trusting it silently."""
+    if not per_layer_event_fired:
+        return
+    if len(set(per_layer_event_fired)) > 1:
+        raise AssertionError(
+            f"R-KV layers disagree on whether a compaction event fired at "
+            f"absolute_position={absolute_position_after}: {per_layer_event_fired}"
+        )
+    if per_layer_event_fired[0]:
+        compaction.note_event(absolute_position_after)
 
 
 def replay_and_snapshot(
@@ -165,12 +198,15 @@ def replay_and_snapshot(
     logits, absolute_position = prefill(model, cache, prompt_token_ids, device)
     for lp in model_provenance.layers.values():
         lp.append_new_tokens_prefill(list(range(prompt_length)))
-    for layer_idx in range(num_layers):
+    per_layer_event_fired = [
         _sync_layer_after_call(
             model, cache, layer_idx, model_provenance, kept_indices_lengths,
             expected_len_if_no_evict=prompt_length,
-            compaction=compaction, absolute_position_after=absolute_position,
+            absolute_position_after=absolute_position,
         )
+        for layer_idx in range(num_layers)
+    ]
+    _note_event_once(per_layer_event_fired, compaction, absolute_position)
     maybe_snapshot(absolute_position)  # covers fraction==0 when the think span starts at the prompt boundary
 
     # --- decode: one single-token call per recorded generated token ---
@@ -181,12 +217,15 @@ def replay_and_snapshot(
         absolute_position += 1
         for lp in model_provenance.layers.values():
             lp.append_new_token(fed_position)
-        for layer_idx in range(num_layers):
+        per_layer_event_fired = [
             _sync_layer_after_call(
                 model, cache, layer_idx, model_provenance, kept_indices_lengths,
                 expected_len_if_no_evict=len_before[layer_idx] + 1,
-                compaction=compaction, absolute_position_after=absolute_position,
+                absolute_position_after=absolute_position,
             )
+            for layer_idx in range(num_layers)
+        ]
+        _note_event_once(per_layer_event_fired, compaction, absolute_position)
         maybe_snapshot(absolute_position)
         # Stop as soon as every requested snapshot has been captured. Every
         # snapshot position is <= think_end (f=1.0 maps to think_end_index),

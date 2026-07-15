@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from kvcot.analysis.pipeline import (
+    agreement_curve_by_fraction,
     build_pair_results,
     count_answer_changed_at_any_scored_fraction,
     funnel_records,
@@ -169,6 +170,32 @@ def test_funnel_and_stage1a_counts(tmp_path):
     n_eligible, n_changed = count_answer_changed_at_any_scored_fraction(full)
     assert n_eligible == 2
     assert n_changed == 2  # both seeds changed at f=0.25
+
+
+def test_agreement_curve_by_fraction_reports_per_fraction_match_rate(tmp_path):
+    full_ans = {f: "42" for f in PROBE_FRACTIONS_ALL}
+    for f in (0.25, 0.5):
+        full_ans[f] = "99"  # mismatches at 2 of 9 fractions
+    rkv_ans = {f: "42" for f in PROBE_FRACTIONS_ALL}
+    full, rkv = _make_run(tmp_path, full_probe_answers=full_ans, rkv_probe_answers=rkv_ans, seeds=(13, 42))
+
+    curve = agreement_curve_by_fraction(full, PROBE_FRACTIONS_ALL)
+    assert set(curve) == set(PROBE_FRACTIONS_ALL)
+    assert curve[0.25] == 0.0  # mismatched on both seeds
+    assert curve[0.5] == 0.0
+    assert curve[0.0] == 1.0  # untouched fractions still match
+
+    rkv_curve = agreement_curve_by_fraction(rkv, PROBE_FRACTIONS_ALL)
+    assert all(v == 1.0 for v in rkv_curve.values())  # rkv never mismatches in this fixture
+
+
+def test_agreement_curve_by_fraction_missing_probes_report_zero_not_crash(tmp_path):
+    full_ans = {f: "42" for f in PROBE_FRACTIONS_ALL}
+    rkv_ans = {f: "42" for f in PROBE_FRACTIONS_ALL}
+    full, _rkv = _make_run(tmp_path, full_probe_answers=full_ans, rkv_probe_answers=rkv_ans)
+    empty = load_condition_records(tmp_path / "does_not_exist.jsonl", tmp_path / "also_missing.jsonl", "full")
+    curve = agreement_curve_by_fraction(empty, PROBE_FRACTIONS_ALL)
+    assert all(v == 0.0 for v in curve.values())
 
 
 # --- tiny JSONL helpers used only by the rewrite-based tests above ---

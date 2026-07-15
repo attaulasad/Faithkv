@@ -29,7 +29,7 @@ from kvcot.analysis.metrics import (
     compute_match,
     think_parsed_ok,
 )
-from kvcot.config import PROBE_FRACTIONS_SCORED
+from kvcot.config import PROBE_FRACTIONS_ALL, PROBE_FRACTIONS_SCORED
 from kvcot.utils.io import read_jsonl
 
 F1_FRACTION = 1.0
@@ -247,3 +247,30 @@ def count_answer_changed_at_any_scored_fraction(
         if any(m is False for m in matches.values()):
             n_changed += 1
     return n_eligible, n_changed
+
+
+def agreement_curve_by_fraction(
+    cond: ConditionRecords, fractions: tuple[float, ...] = PROBE_FRACTIONS_ALL
+) -> dict[float, float]:
+    """Descriptive match-rate curve for ONE condition across all 9 probe
+    fractions (`kvcot.analysis.plots.plot_agreement_curve`'s input shape) —
+    f=0 and f=1 are included here even though they're excluded from EAS
+    (§8.1): this curve is meant to show the whole picture, not the scored
+    subset. Every base record in the condition contributes independently
+    (not paired against the other condition — that pairing only matters for
+    Delta_EAS); a fraction with no defined matches at all reports 0.0 rather
+    than raising, since this is a descriptive plot input, not a primary
+    statistic (compute_eas is what enforces "undefined must not be silently
+    coerced," and that gate isn't bypassed by this function existing)."""
+    curve: dict[float, float] = {}
+    for f in fractions:
+        matches: list[bool] = []
+        for base_rec in cond.base_by_key.values():
+            probes = cond.probes_by_base.get(base_rec["record_id"], {})
+            if f not in probes:
+                continue
+            m = compute_match(probes[f].get("normalized_probe_answer"), base_rec["extracted_answer"])
+            if m is not None:
+                matches.append(m)
+        curve[f] = (sum(1.0 for m in matches if m) / len(matches)) if matches else 0.0
+    return curve

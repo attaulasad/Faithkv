@@ -27,8 +27,8 @@ test-gpu:
 
 dry-run:
 	kvcot generate --config configs/stage0_smoke.yaml --condition full --dry-run
-	kvcot generate --config configs/stage0_smoke.yaml --condition rkv --dry-run
-	kvcot replay-probe --config configs/stage0_smoke.yaml --condition rkv --dry-run
+	kvcot generate --config configs/stage0_smoke.yaml --condition rkv_b96 --dry-run
+	kvcot replay-probe --config configs/stage0_smoke.yaml --condition rkv_b96 --dry-run
 	kvcot analyze --config configs/stage1a_measurability.yaml --dry-run
 	kvcot calibrate-budget --config-dir configs --dry-run
 	kvcot generate --config configs/stage2_main.yaml --condition full --dry-run

@@ -5,6 +5,76 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-15 — Second pre-GPU audit: orchestration/pipeline completeness (no frozen §4 setting changed)
+
+A second audit found the orchestration layer (CLI commands and the shell
+scripts driving them) incomplete in ways that would have made the frozen
+`scripts/run_stage1b.sh`/`run_stage2.sh` fail outright or silently skip
+work, independent of the generation/replay correctness fixes above.
+
+- **`kvcot calibrate-budget` was a stub** that always printed "no results
+  exist" and returned failure. Implemented for real: reads each candidate
+  budget's `results/decisions/stage1b_budget_<N>.json` (now actually written
+  by a new `cmd_analyze` branch for `stage1b_budget_*` stages, using only
+  `generate` output — Stage 1B's calibration decision never needed probes),
+  reports the smallest budget passing both gates to
+  `results/decisions/stage1b_recommendation.json`, and deliberately does NOT
+  auto-write `configs/selected_operating_point.yaml` (§10: that stays a
+  manual, reviewed step).
+- **`replay-probe --condition rkv_selected` was broken** — `generate`
+  resolved the placeholder to `rkv_b{budget}`, but `replay-probe` never did,
+  so it looked for a nonexistent `rkv_selected.jsonl` and passed the literal
+  placeholder to `build_policy()`. Both commands now share one
+  `_resolve_condition` helper so this can't drift again.
+- **Compaction events were still recorded once per R-KV layer inside
+  `kvcot.generation.replay`'s `CompactionTracker`** (`compaction.note_event()`
+  was called inside the per-layer sync loop) — the same "events x n_layers"
+  inflation the first audit fixed in `cli.py`/`decode.py`, still present in
+  the replay path itself. `_sync_layer_after_call` now only reports whether
+  ITS layer fired; a new `_note_event_once` cross-checks all R-KV layers
+  agree and records the event exactly once.
+- **`--resume` never actually checked identity.** `kvcot.utils.io`'s own
+  docstring promises "schema-valid completed records with matching
+  config/model/upstream hashes"; the real logic only checked `record_id`
+  membership. Added `_verify_resumable_record_ids` (schema validation +
+  config/model/tokenizer/upstream-commit match, dotted-path comparison) and
+  wired it into both `generate` and `replay-probe`'s resume paths — a
+  mismatch now refuses loudly with a clear diagnostic instead of silently
+  mixing identities in one output file.
+- **Question hashes were computed but never checked.** `cmd_generate` now
+  re-hashes each manifest row's question text and compares it to the
+  manifest's own recorded `question_hash` before generating anything against
+  it (catches a corrupted/hand-edited manifest one layer earlier, §5).
+- **`RetentionSummary` was defined but never populated.** `cmd_generate` now
+  measures it at end of each R-KV/patched-noop base generation from data
+  already computed in that command (physical cache lengths, final absolute
+  position) — no extra GPU passes. `ProvenanceRetentionSummary` (prompt/
+  reasoning-token retention) and `BaseRunRecord.replay_state_hash` remain
+  unpopulated — computing them without extra GPU cost would require
+  restructuring `generate_base`'s hot decode loop to track full per-KV-head
+  provenance, which risked meaningfully increasing Stage 2 wall-clock; out
+  of scope for this pass, flagged here rather than silently left as a gap.
+- **The three snapshot hashes on `ProbeRunRecord` hashed proxies, not
+  content** (`snapshot_cache_hash` hashed only cache-length shapes;
+  `snapshot_provenance_hash` hashed only the event-step list;
+  `snapshot_state_hash` hashed two integers) — none would actually detect a
+  divergence in the data they're named after. `replay-probe` now hashes the
+  real K/V tensor bytes, the real per-layer/per-KV-head absolute source
+  positions, and the real scheduling/bookkeeping state respectively.
+- **`RunManifest` was imported but never constructed**; `kvcot.analysis.plots`
+  functions existed but were never called; the stage0_smoke.yaml-advertised
+  "throughput measurement + Stage 2 wall-clock extrapolation" didn't exist.
+  `generate`/`replay-probe` now write a `RunManifest` per invocation
+  (`{condition}_generate_manifest.json` / `{condition}_replay_probe_manifest.json`);
+  `analyze` now writes `results/figures/agreement_curve.png` and
+  `delta_eas_distribution.png` for stage2-shaped stages, and a rough
+  throughput/wall-clock extrapolation decision JSON for `stage0_smoke`.
+  `plot_realized_retention` remains unwired — no per-snapshot retention data
+  source exists without the schema change noted above.
+- **`Makefile`'s `dry-run` target used `--condition rkv`**, which is not a
+  condition any stage config defines (`stage0_smoke.yaml` defines `rkv_b96`)
+  — fixed to `rkv_b96`.
+
 ## 2026-07-15 — Pre-GPU correctness fixes (no frozen §4 setting changed)
 
 Bug fixes found in a pre-run audit against the pinned upstream + transformers

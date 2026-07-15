@@ -347,3 +347,45 @@ def test_streaming_replay_vs_bulk_prefill_negative_control():
         "if this genuinely holds on GPU, that assumption needs revising, not "
         "this test loosening."
     )
+
+
+@pytest.mark.gpu
+def test_note_event_once_records_exactly_one_entry_per_real_event():
+    """Pure-logic regression test for the "one event, not events x n_layers"
+    convention (§12): a real compaction event fires identically across every
+    R-KV layer in one forward call (they share one per-step schedule), so
+    `_note_event_once` must append exactly ONE entry to
+    `compaction.event_steps` per real event — not one per layer. Marked
+    `@pytest.mark.gpu` for import-safety consistency with every other test in
+    this file (kvcot.generation.replay imports torch at module scope by
+    design), even though this specific test never touches CUDA or a real
+    model — it exercises `_note_event_once`/`CompactionTracker` directly.
+    """
+    from kvcot.generation.replay import CompactionTracker, _note_event_once
+
+    compaction = CompactionTracker()
+
+    # All 28 layers agree an event fired at absolute_position=128 (the
+    # realistic case: one shared schedule, one shared cache length).
+    _note_event_once([True] * 28, compaction, absolute_position_after=128)
+    assert compaction.event_steps == [128], (
+        "one real event across 28 layers must append exactly one entry, not 28 "
+        f"(got {compaction.event_steps})"
+    )
+
+    # No layer fired -> no entry appended.
+    _note_event_once([False] * 28, compaction, absolute_position_after=200)
+    assert compaction.event_steps == [128]
+
+    # A second real event, later.
+    _note_event_once([True] * 28, compaction, absolute_position_after=256)
+    assert compaction.event_steps == [128, 256]
+
+    # Empty per-layer list (stock FullKV, zero R-KV layers) -> no-op, no crash.
+    _note_event_once([], compaction, absolute_position_after=300)
+    assert compaction.event_steps == [128, 256]
+
+    # Layers disagreeing on whether an event fired is a genuine invariant
+    # violation (they share one schedule) — must raise, not silently pick one.
+    with pytest.raises(AssertionError):
+        _note_event_once([True, False], compaction, absolute_position_after=400)
