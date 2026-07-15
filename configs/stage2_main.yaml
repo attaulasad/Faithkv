@@ -1,0 +1,21 @@
+# Stage 2 — main exploratory pilot (§10). Only runs after Stage 0, 1A, 1B
+# pass and configs/selected_operating_point.yaml exists (kvcot refuses to
+# start Stage 2 otherwise — see kvcot.runtime.require_operating_point).
+stage_name: stage2_main
+lock_config_path: configs/lock.yaml
+dataset_manifest: data/manifests/gsm8k_main_200.jsonl
+# The rkv_b{budget} condition here is a placeholder resolved at run time
+# from configs/selected_operating_point.yaml, not from this literal string —
+# kvcot.runtime substitutes it after reading that file. It is spelled out
+# here only so this config is self-documenting about which two conditions
+# Stage 2 compares.
+conditions: [full, rkv_selected]
+output_dir: results/raw/stage2_main
+limit: 200
+notes: >
+  seeds_override is intentionally absent: Stage 2 uses every seed in
+  lock.yaml (13, 42, 2026), per §10. Base traces and probes are generated
+  independently within each condition; R-KV probes branch only from
+  within-condition streaming replay snapshots (§6). Reports all examples
+  plus the predeclared both-correct/compression-active primary subset, the
+  attrition funnel (§8.4), and the paired accuracy delta with CI (§8.5).

@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kvcot"
+version = "0.1.0"
+description = "Measuring whether decoding-time R-KV compression changes early-answering sensitivity of a reasoning model's visible chain-of-thought (GSM8K, DeepSeek-R1-Distill-Qwen-1.5B)."
+readme = "README.md"
+requires-python = ">=3.10"
+# No `license` field: license choice is an open decision for the user (see
+# README.md "License" section and the final build report) and is deliberately
+# not picked silently.
+
+# GPU-path dependencies (torch, transformers, flash-attn) are pinned in
+# requirements.txt but intentionally NOT listed as install_requires here.
+# kvcot.analysis and kvcot.utils must import and run with none of them present
+# (enforced by tests/unit/test_no_analysis_torch_import.py); kvcot.generation
+# and kvcot.cli defer their torch/transformers imports to inside the specific
+# functions that need a GPU, so `--dry-run` and all CPU tests work without a
+# GPU-capable environment. See docs/GPU_VALIDATION_PLAN.md for the GPU-host
+# install path.
+dependencies = [
+    "pydantic>=2.6,<3",
+    "numpy>=1.26,<3",
+    "scipy>=1.11,<2",
+    "PyYAML>=6.0,<7",
+]
+
+[project.optional-dependencies]
+# Needed only for `kvcot freeze-manifests` (dataset text download, CPU-only)
+# and for tokenizer download used by docs/PROBE_PROTOCOL.md / think-span tests.
+cpu-tools = [
+    "datasets>=2.19,<4",
+    "huggingface_hub>=0.24",
+    "transformers>=4.48.1,<4.56",
+    "jinja2>=3.1",
+]
+# Needed only for kvcot.analysis.plots; analysis/metrics/stats do not require it.
+plots = [
+    "matplotlib>=3.8",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+]
+
+[project.scripts]
+kvcot = "kvcot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["kvcot*"]
+
+# pytest configuration lives in pytest.ini (not here) — see that file for the
+# `gpu` marker registration and auto-skip wiring in tests/conftest.py.

@@ -1,0 +1,19 @@
+# Stage 0 — correctness smoke (§10). Validates machinery, not science:
+# stock FullKV coherence, think parsing, answer extraction, cap reporting;
+# patched-noop parity on a deterministic fixture; R-KV with a deliberately
+# small test budget on a long trace so >=2 compactions fire; replay
+# identity and branch-state tests; f=1 probe stability; throughput
+# measurement + Stage 2 wall-clock extrapolation.
+stage_name: stage0_smoke
+lock_config_path: configs/lock.yaml
+dataset_manifest: data/manifests/gsm8k_smoke_20.jsonl
+conditions: [full, patched_noop, rkv_b96]
+output_dir: results/raw/stage0_smoke
+limit: 20
+seeds_override: [42]
+notes: >
+  rkv_b96 is a deliberately small smoke-test budget (below every Stage 1B
+  calibration candidate {128,256,512,1024}, and below divide_length=128 so
+  the very first schedule check at length=128 already exceeds budget)
+  chosen so >=2 compaction events reliably fire within a 20-row smoke set.
+  Pass criteria are in docs/EXPERIMENT.md Stage 0.

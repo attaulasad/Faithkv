@@ -1,0 +1,17 @@
+# Stage 1B — fixed-budget calibration, candidate budget=1024 (§10).
+stage_name: stage1b_budget_1024
+lock_config_path: configs/lock.yaml
+dataset_manifest: data/manifests/gsm8k_calibration_50.jsonl
+conditions: [full, rkv_b1024]
+rkv_budgets: [1024]
+output_dir: results/raw/stage1b_budget_1024
+limit: 50
+seeds_override: [42]
+notes: >
+  Compaction-activation gate (real, n=50 is ample): >=1 compaction in >=50%
+  of valid traces. Accuracy gate is a coarse_screen only (§10) — reject only
+  if this budget's calibration accuracy CI excludes FullKV's point estimate.
+  Never label it `equivalence`. docs/UPSTREAM_AUDIT.md's validation-README
+  citation reports budget=1024 rescuing 2/50 long traces at this exact
+  configuration upstream (84.0 vs 80.0 FullKV, n=50) — a reference point,
+  not a substitute for this repo's own calibration run.

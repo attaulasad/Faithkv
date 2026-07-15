@@ -1,0 +1,52 @@
+# Frozen settings (§4 of the build brief). Changing any value here requires
+# a dated CHANGELOG.md entry BEFORE the run, per the brief. Every stage
+# config loads this file rather than re-specifying these values, so there is
+# exactly one place to change them.
+
+model:
+  name: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+  # Resolved via the HF metadata API on 2026-07-15 (no weights downloaded):
+  #   huggingface_hub.HfApi().model_info("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B").sha
+  # See docs/REPRODUCIBILITY.md for the exact command and raw output.
+  revision: ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562
+  tokenizer_name: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+  tokenizer_revision: ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562
+  dtype: bfloat16
+
+upstream:
+  repo: https://github.com/Zefan-Cai/R-KV
+  commit: 45eaa7d69d20b7388321f077020a610d9afb65bd
+  submodule_path: third_party/R-KV
+
+attention:
+  # Fail loudly if flash_attention_2 is unavailable — never silently switch
+  # to sdpa mid-run (§4). sdpa is used only by the dedicated GPU determinism
+  # test (tests/integration/test_replay_gpu.py), never for real generation.
+  primary: flash_attention_2
+  determinism_test: sdpa
+
+generation:
+  batch_size: 1
+  base_temperature: 0.6
+  base_top_p: 0.95
+  # Controlled via max_new_tokens ONLY. Never max_length — see
+  # kvcot.generation.decode, which raises if anything tries to pass
+  # max_length to the token-by-token loop.
+  base_max_new_tokens: 6144
+
+seeds: [13, 42, 2026]
+
+rkv:
+  window_size: 8
+  mix_lambda: 0.1
+  retain_ratio: 0.2  # inert under retain_direction=last — see docs/UPSTREAM_AUDIT.md §6.3
+  retain_direction: last
+  divide_method: step_length
+  divide_length: 128
+  compression_content: all
+
+probes:
+  fractions_all: [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0]
+  fractions_scored: [0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875]  # f=0 and f=1 excluded, §8.1/§8.2
+  max_new_tokens: 48
+  decoding: greedy

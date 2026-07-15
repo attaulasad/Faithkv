@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local HF cache used only for build-time tokenizer/metadata probes
+.hf_cache_tmp/
+
+# Results / caches that must never be committed
+results/raw/
+*.safetensors
+*.bin
+*.pt
+*.ckpt
+
+# HF / dataset caches
+.cache/
+huggingface_cache/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+
+# Secrets
+.env
+*.pem
+hf_token.txt
+.netrc
+

@@ -1,0 +1,218 @@
+"""Pydantic record schemas (§12 of the build brief). Every JSONL record
+written by this repository is validated against one of these models before
+it is appended — see kvcot.utils.io.JsonlWriter. See docs/SCHEMA.md for the
+field-by-field rationale; this module is the executable source of truth,
+that document is the human-readable explanation of it.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Literal
+
+from pydantic import BaseModel, Field, field_validator
+
+SCHEMA_VERSION = "1.0.0"
+
+Condition = str  # "full" | "patched_noop" | f"rkv_b{budget}" — validated by callers against configs, not hardcoded here
+ThinkParseStatus = Literal[
+    "ok", "no_open_marker", "no_close_marker", "generation_prompt_preopened_ok", "malformed"
+]
+ExtractionMethod = Literal["boxed", "final_answer_marker", "final_number_fallback", "none"]
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class VersionInfo(BaseModel):
+    python: str
+    torch: str | None = None
+    cuda: str | None = None
+    transformers: str | None = None
+    flash_attn: str | None = None
+
+
+class ProvenanceState(BaseModel):
+    """Per-record book-keeping about the pinned upstream R-KV, needed to
+    tell records apart across code/upstream revisions on resume (§13)."""
+
+    upstream_rkv_commit: str
+    git_commit: str
+    git_dirty: bool
+
+
+class DatasetProvenance(BaseModel):
+    dataset_name: str
+    dataset_config: str | None = None
+    dataset_revision: str | None = None
+    dataset_fingerprint: str | None = None
+    source_row_index: int
+    question_hash: str
+    normalized_gold: str
+
+
+class MethodConfig(BaseModel):
+    """Configured (not measured) R-KV/FullKV parameters. Realized retention
+    is a separate, measured concept — see RetentionSummary. Never conflate
+    the two (§9)."""
+
+    method: Literal["fullkv", "patched_noop", "rkv"]
+    budget: int | None = None  # None for method == "fullkv"
+    window_size: int | None = None
+    mix_lambda: float | None = None
+    retain_ratio: float | None = None
+    retain_direction: Literal["last", "first", "last_percent", "first_percent"] | None = None
+    divide_method: Literal["newline", "step_length"] | None = None
+    divide_length: int | None = None
+    compression_content: Literal["think", "all"] | None = None
+
+    @field_validator("method")
+    @classmethod
+    def _no_ten_percent_style_naming(cls, v: str) -> str:
+        # This validator exists purely as a structural backstop; the real
+        # enforcement is the repo-wide grep in
+        # tests/unit/test_no_ten_percent_naming.py, since a percent string
+        # could appear anywhere (condition name, docs, configs), not just here.
+        return v
+
+
+class RetentionSummary(BaseModel):
+    """Measured, not configured (§9). `fullkv_equivalent_slots` is the
+    absolute count of tokens processed so far; `physical_cache_slots` is
+    what's actually resident post-compaction; their ratio is the realized
+    retention at this snapshot — never the static `budget` divided by
+    prompt length."""
+
+    fullkv_equivalent_slots: int
+    physical_cache_slots_per_layer: list[int]
+    instantaneous_retention_ratio: float
+    post_compaction_budget_tokens: int | None = None
+    tokens_since_last_compaction: int
+
+
+class ProvenanceRetentionSummary(BaseModel):
+    prompt_tokens_total: int
+    prompt_tokens_surviving_mean: float
+    think_tokens_total: int
+    think_tokens_surviving_mean: float
+    aggregation_method: str = "mean_over_layers_and_kv_heads"
+
+
+class ThinkSpanInfo(BaseModel):
+    think_start_index: int | None  # index into generated_token_ids, inclusive
+    think_end_index: int | None  # index into generated_token_ids, exclusive of the close-marker sequence
+    think_parse_status: ThinkParseStatus
+    generation_prompt_preopened_think: bool
+
+
+class BaseRunRecord(BaseModel):
+    schema_version: str = SCHEMA_VERSION
+    record_id: str
+    parent_record_id: str | None = None
+    record_type: Literal["base_generation"] = "base_generation"
+    timestamp_utc: str = Field(default_factory=utc_now_iso)
+
+    config_path: str
+    config_sha256: str
+    provenance: ProvenanceState
+    versions: VersionInfo
+    gpu_model: str | None = None
+
+    model_name: str
+    model_revision: str
+    tokenizer_name: str
+    tokenizer_revision: str
+
+    dataset: DatasetProvenance
+
+    condition: Condition
+    method_config: MethodConfig
+
+    global_seed: int
+    derived_seed: int
+
+    prompt_text: str
+    prompt_token_ids: list[int]
+    generated_token_ids: list[int]
+    decoded_output: str
+
+    think_span: ThinkSpanInfo
+
+    extracted_answer: str | None
+    extraction_method: ExtractionMethod
+    extraction_failure_reason: str | None = None
+    is_correct: bool | None  # None iff extraction failed (never coerced to False)
+    cap_hit: bool
+
+    wall_time_seconds: float
+    generated_token_count: int
+    peak_vram_bytes: int | None = None
+
+    compaction_count: int
+    compaction_event_steps: list[int]
+    cache_length_final_per_layer: list[int]
+    retention: RetentionSummary | None = None  # None for condition == "full"
+    provenance_retention: ProvenanceRetentionSummary | None = None
+
+    replay_state_hash: str | None = None  # filled in once replay validates this base run
+
+
+class ProbeRunRecord(BaseModel):
+    schema_version: str = SCHEMA_VERSION
+    record_id: str
+    parent_record_id: str  # the base_record_id this probe branched from
+    record_type: Literal["probe"] = "probe"
+    timestamp_utc: str = Field(default_factory=utc_now_iso)
+
+    config_path: str
+    config_sha256: str
+    provenance: ProvenanceState
+    versions: VersionInfo
+
+    base_record_id: str
+    condition: Condition
+    fraction: float  # one of the frozen probe fractions, §4
+    think_span_length: int = Field(description="L: number of tokens strictly inside the think span")
+    cut_index: int = Field(description="floor(fraction * L)")
+
+    control_suffix_token_ids: list[int]
+    probe_decoding_max_new_tokens: int
+
+    probe_output_token_ids: list[int]
+    probe_output_text: str
+    normalized_probe_answer: str | None
+    probe_extraction_status: ExtractionMethod
+
+    matches_own_condition_base_answer: bool | None  # None iff either side failed extraction
+    is_f1_stability_probe: bool
+
+    snapshot_cache_hash: str
+    snapshot_provenance_hash: str
+    snapshot_state_hash: str
+
+
+class RunManifest(BaseModel):
+    schema_version: str = SCHEMA_VERSION
+    command: str
+    config_path: str
+    config_sha256: str
+    git_commit: str
+    git_dirty: bool
+    versions: VersionInfo
+
+    start_time_utc: str
+    end_time_utc: str | None = None
+
+    n_attempted: int = 0
+    n_completed: int = 0
+    n_skipped_resumed: int = 0
+    n_failed: int = 0
+
+    total_generated_tokens: int = 0
+    n_cap_hits: int = 0
+    n_think_parse_failures: int = 0
+    n_extraction_failures: int = 0
+    total_compaction_events: int = 0
+
+    wall_time_seconds: float | None = None
+    peak_vram_bytes: int | None = None

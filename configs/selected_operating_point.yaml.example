@@ -1,0 +1,33 @@
+# Copy this to configs/selected_operating_point.yaml AFTER Stage 1B
+# completes and recommends a budget. kvcot.runtime.require_operating_point
+# refuses to start Stage 2 if configs/selected_operating_point.yaml is
+# absent (§10: "Stage 2 must refuse to start if this file is absent").
+#
+# This is an example/template, not a real decision — do not run Stage 2
+# against it. Populate every field from the actual Stage 1B decision JSON
+# at results/decisions/stage1b_budget_<N>.json.
+
+selected_budget: 128  # smallest candidate that passed both Stage 1B gates
+
+decision_basis:
+  compaction_activation_gate:
+    threshold: ">=1 compaction in >=50% of valid calibration traces"
+    observed_fraction: 0.00  # PLACEHOLDER — fill from stage1b decision JSON
+    passed: false
+
+  accuracy_coarse_screen:
+    # Label is `coarse_screen`, never `equivalence` — n=50 calibration CIs
+    # are far too wide (~±14pp) to support an equivalence claim (§10).
+    label: coarse_screen
+    fullkv_accuracy_point_estimate: 0.0  # PLACEHOLDER
+    candidate_accuracy_point_estimate: 0.0  # PLACEHOLDER
+    candidate_ci_excludes_fullkv_point_estimate: true  # PLACEHOLDER — must be false to pass
+    passed: false
+
+realized_retention_at_calibration:
+  definition: physical_cache_slots_per_layer / fullkv_equivalent_slots, per snapshot (§9)
+  mean_instantaneous_retention_ratio: 0.0  # PLACEHOLDER
+
+source_decision_json: results/decisions/stage1b_budget_128.json
+selected_on_utc: "1970-01-01T00:00:00+00:00"  # PLACEHOLDER
+selected_by: "PLACEHOLDER — fill in when this file is populated for real"

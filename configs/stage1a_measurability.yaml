@@ -1,0 +1,15 @@
+# Stage 1A — baseline measurability (§10). FullKV-only early answering
+# across all probe fractions on the calibration split, single seed. Checks
+# whether GSM8K has enough measurement range before spending the 200-row
+# main split; if not, the frozen MATH-500 backup manifest is used instead.
+stage_name: stage1a_measurability
+lock_config_path: configs/lock.yaml
+dataset_manifest: data/manifests/gsm8k_calibration_50.jsonl
+conditions: [full]
+output_dir: results/raw/stage1a_measurability
+limit: 50
+seeds_override: [42]
+notes: >
+  Emits results/decisions/stage1a_baseline_measurability.json with a
+  machine-readable `recommendation` field (proceed on GSM8K vs. switch to
+  math500_backup_100.jsonl). Do not hard-code a favorable result.

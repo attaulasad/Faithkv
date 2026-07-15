@@ -1,0 +1,18 @@
+# PLACEHOLDER — deliberately not generated on this machine.
+#
+# This file cannot be honestly produced without installing the full GPU
+# environment (torch, transformers, flash-attn, CUDA runtime) on the actual
+# target host, which this build machine does not have. Fabricating pinned
+# transitive-dependency versions here would misrepresent an environment that
+# was never actually resolved or tested.
+#
+# Generate it for real, on the rented GPU host, immediately after
+# `scripts/setup_vast.sh` completes:
+#
+#   source .venv/bin/activate   # or whatever venv setup_vast.sh created
+#   pip freeze > requirements-lock.txt
+#
+# Once this file exists and is committed, `kvcot validate-run` and
+# `scripts/verify_environment.sh` compare the running environment's installed
+# versions of state-critical packages (torch, transformers, flash-attn) against
+# this file and fail loudly on a mismatch — see docs/GPU_VALIDATION_PLAN.md.

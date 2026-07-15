@@ -1,0 +1,35 @@
+# Full environment for the GPU host (installed via scripts/setup_vast.sh).
+# This machine (build-only, no GPU) does NOT install torch/transformers with
+# a torch backend; see docs/GPU_VALIDATION_PLAN.md. The CPU-only subset used
+# during this build is pydantic/numpy/scipy/PyYAML (pyproject.toml core deps)
+# plus transformers (tokenizer-only, no torch backend) for docs/PROBE_PROTOCOL.md.
+
+# --- core (also in pyproject.toml [project.dependencies]) ---
+pydantic>=2.6,<3
+numpy>=1.26,<3
+scipy>=1.11,<2
+PyYAML>=6.0,<7
+
+# --- GPU host only ---
+# transformers upper bound is load-bearing, not cosmetic: the pinned R-KV
+# monkeypatch (third_party/R-KV/HuggingFace, commit
+# 45eaa7d69d20b7388321f077020a610d9afb65bd) replaces Qwen2Attention/
+# Qwen2ForCausalLM internals shaped for the 4.48-4.55 attention interface
+# (ALL_ATTENTION_FUNCTIONS, ...) and reaches into DynamicCache.key_cache/
+# value_cache directly. transformers>=4.56 restructures both and "produces
+# garbled output" per upstream's own requirements.txt comment. See
+# docs/UPSTREAM_AUDIT.md H6 and §3.6.
+transformers==4.55.4
+torch==2.6.0
+# FlashAttention-2 wheel is CUDA/torch/Python-ABI specific; exact wheel URL is
+# resolved on the GPU host by scripts/setup_vast.sh, not pinned here.
+flash-attn>=2.6,<3
+
+datasets>=2.19,<4
+huggingface_hub>=0.24
+jinja2>=3.1
+matplotlib>=3.8
+
+# --- dev/test ---
+pytest>=8.0
+pytest-cov>=5.0
