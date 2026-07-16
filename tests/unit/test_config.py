@@ -138,6 +138,18 @@ def test_fixed_trace_settings_rejects_zero_min_eligible_examples():
         FixedTraceSettings(min_eligible_examples=0)
 
 
+def test_fixed_trace_settings_require_boxed_extraction_cannot_be_disabled():
+    # § external review 2026-07-16: this was a plain `bool = True` field
+    # that no code ever actually read (kvcot.analysis.fixed_trace always
+    # required a boxed anchor regardless of this setting) -- a silent no-op
+    # toggle. It is now a frozen Literal[True]: settable to True (or left at
+    # its default), but never to False.
+    assert FixedTraceSettings().require_boxed_extraction is True
+    assert FixedTraceSettings(require_boxed_extraction=True).require_boxed_extraction is True
+    with pytest.raises(ValidationError):
+        FixedTraceSettings(require_boxed_extraction=False)
+
+
 def test_early_gap_configs_load_fixed_trace_settings():
     stage, _lock = load_stage_config("configs/early_gap_b512.yaml")
     assert stage.fixed_trace is not None

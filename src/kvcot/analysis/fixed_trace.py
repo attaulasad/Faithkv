@@ -212,7 +212,7 @@ class FixedTraceEligibility:
     the primary EAS pipeline does not enforce at the pairing stage.
 
     Protocol v2: gates on realized compression (`rkv_actual_compression_at_f1`,
-    `no_rkv_eviction_during_scored_probes`), never on a recorded compaction
+    `no_rkv_eviction_during_answer_probes`), never on a recorded compaction
     EVENT COUNT alone — see module docstring for why that changed.
     """
 
@@ -288,10 +288,28 @@ class FixedTraceRecords:
 
 
 def load_fixed_trace_records(path: str | Path, replay_condition: str) -> FixedTraceRecords:
+    """Read one fixed-trace probe JSONL file, grouped by
+    `(base_record_id, fraction)`. A duplicate `(base_record_id, fraction)`
+    pair is rejected outright (§ external review 2026-07-16) rather than
+    silently letting the later row overwrite the earlier one in
+    `probes_by_base` — `JsonlWriter` already refuses to append a duplicate
+    `record_id` within one run, so two rows sharing a `(base_record_id,
+    fraction)` key can only mean the file was corrupted, hand-edited, or
+    concatenated from two different runs, none of which should be silently
+    "resolved" by picking whichever row happened to come last."""
     probes_by_base: dict[str, dict[float, dict]] = {}
     trace_source_condition: str | None = None
     for rec in read_jsonl(path):
-        probes_by_base.setdefault(rec["base_record_id"], {})[float(rec["fraction"])] = rec
+        base_id, fraction = rec["base_record_id"], float(rec["fraction"])
+        group = probes_by_base.setdefault(base_id, {})
+        if fraction in group:
+            raise ValueError(
+                f"{path}: duplicate (base_record_id={base_id!r}, fraction={fraction}) — "
+                f"record_ids {group[fraction].get('record_id')!r} and {rec.get('record_id')!r} both "
+                "claim this key. Refusing to silently let one overwrite the other; the file is "
+                "corrupted, hand-edited, or concatenated from more than one run."
+            )
+        group[fraction] = rec
         if trace_source_condition is None:
             trace_source_condition = rec["trace_source_condition"]
         elif rec["trace_source_condition"] != trace_source_condition:
@@ -603,24 +621,34 @@ def build_fixed_trace_decision(
 
 
 def _record_identity(row: dict) -> tuple:
-    """(config_sha256, upstream_rkv_commit) — the two fields every record in
-    one coherent run must share, regardless of record type. Not model/
-    tokenizer revision (those live only on `BaseRunRecord`, not on probe
-    records) — see `_validate_base_records`/`_validate_fixed_trace_probe_records`
-    for the base-record-only model/tokenizer check."""
+    """(config_sha256, upstream_rkv_commit, model_revision, tokenizer_revision)
+    — the full identity every record in one coherent run must share,
+    regardless of record type. Both `BaseRunRecord` and `FixedTraceProbeRecord`
+    carry all four fields as of schema 1.3.0 (added to `FixedTraceProbeRecord`
+    specifically so this identity is directly comparable across the
+    canonical base file and both fixed-trace probe files — `config_sha256`
+    alone hashes only the STAGE yaml, never the `configs/lock.yaml` it
+    references, so it cannot by itself catch a model/tokenizer revision
+    drift between two runs of the identical stage yaml)."""
     provenance = row.get("provenance") or {}
-    return (row.get("config_sha256"), provenance.get("upstream_rkv_commit"))
+    return (
+        row.get("config_sha256"),
+        provenance.get("upstream_rkv_commit"),
+        row.get("model_revision"),
+        row.get("tokenizer_revision"),
+    )
 
 
-def _validate_base_records(rows: list[dict], path: Path) -> None:
+def _validate_base_records(rows: list[dict], path: Path) -> tuple | None:
     """Reject anything that isn't a schema-valid, current-protocol
-    `BaseRunRecord` — in particular, a stale protocol-v1 (`schema_version
-    "1.1.0"`) file fails the `Literal["1.2.0"]` check immediately, rather
+    `BaseRunRecord` — in particular, a stale protocol-v1/v2 (`schema_version`
+    below the current `Literal`) file fails validation immediately, rather
     than being silently read as plain dicts and analyzed as if it were
-    current data. Also requires every row to share one (config_sha256,
-    upstream_rkv_commit, model_revision, tokenizer_revision) identity —
+    current data. Also requires every row to share one `_record_identity` —
     a file mixing two runs (different config/model/upstream pin) is not a
-    single coherent trace source."""
+    single coherent trace source. Returns that shared identity (or `None` if
+    `rows` is empty) so the caller can additionally cross-check it against
+    the other two files this analysis reads (`_assert_consistent_identity`)."""
     identities: set[tuple] = set()
     for row in rows:
         try:
@@ -630,26 +658,29 @@ def _validate_base_records(rows: list[dict], path: Path) -> None:
                 f"{path}: base record {row.get('record_id')!r} failed schema validation against "
                 f"BaseRunRecord (schema_version={row.get('schema_version')!r}, expected "
                 f"{SCHEMA_VERSION!r}): {e} -- refusing to analyze. This usually means {path} was "
-                "produced under an old protocol version (e.g. protocol v1, schema 1.1.0) — "
-                "regenerate it under the current protocol into a fresh output_dir rather than "
-                "reusing old output."
+                "produced under an old protocol version — regenerate it under the current "
+                "protocol into a fresh output_dir rather than reusing old output."
             ) from e
-        identities.add((*_record_identity(row), row.get("model_revision"), row.get("tokenizer_revision")))
+        identities.add(_record_identity(row))
     if len(identities) > 1:
         raise ValueError(
             f"{path}: base records were produced under {len(identities)} different "
             f"(config_sha256, upstream_rkv_commit, model_revision, tokenizer_revision) identities "
             f"{sorted(identities)} -- refusing to analyze a file that mixes more than one run."
         )
+    return next(iter(identities), None)
 
 
-def _validate_fixed_trace_probe_records(records: FixedTraceRecords, path: Path) -> None:
+def _validate_fixed_trace_probe_records(records: FixedTraceRecords, path: Path) -> tuple | None:
     """Same discipline as `_validate_base_records`, for fixed-trace probe
-    files: schema-valid `FixedTraceProbeRecord` (rejects stale
-    `schema_version`) plus one shared (config_sha256, upstream_rkv_commit)
-    identity across every row."""
+    files: schema-valid `FixedTraceProbeRecord` (rejects a stale
+    `schema_version`) plus one shared `_record_identity` across every row.
+    Also rejects a duplicate `(base_record_id, fraction)` pair silently
+    overwriting an earlier row of the same key — `load_fixed_trace_records`
+    itself only ever keeps the LAST such row per key, which would otherwise
+    hide a corrupted/concatenated file instead of refusing to analyze it."""
     identities: set[tuple] = set()
-    for group in records.probes_by_base.values():
+    for base_id, group in records.probes_by_base.items():
         for row in group.values():
             try:
                 FixedTraceProbeRecord.model_validate(row)
@@ -665,9 +696,44 @@ def _validate_fixed_trace_probe_records(records: FixedTraceRecords, path: Path) 
     if len(identities) > 1:
         raise ValueError(
             f"{path}: fixed-trace probe records were produced under {len(identities)} different "
-            f"(config_sha256, upstream_rkv_commit) identities {sorted(identities)} -- refusing to "
-            "analyze a file that mixes more than one run."
+            f"(config_sha256, upstream_rkv_commit, model_revision, tokenizer_revision) identities "
+            f"{sorted(identities)} -- refusing to analyze a file that mixes more than one run."
         )
+    return next(iter(identities), None)
+
+
+def _assert_consistent_identity(
+    labeled_identities: list[tuple[str, tuple | None]],
+    expected: tuple | None = None,
+) -> None:
+    """Cross-file identity check (§ external review 2026-07-16):
+    `_validate_base_records`/`_validate_fixed_trace_probe_records` each only
+    check ONE file's own internal consistency — this additionally requires
+    every non-empty file's identity to agree with every other, and (when
+    `expected` is given — the config/lock this analysis was actually
+    invoked with) with that expected identity too. Without this, a base
+    file from one config/model/upstream pin could be silently paired
+    against fixed-trace probe files from a completely different run.
+
+    `None` entries (an empty file — e.g. a fixed-trace probe file with zero
+    records yet) are skipped, not treated as a mismatch; an empty file is a
+    legitimate "nothing written yet" state reported elsewhere (`n_shared=0`
+    in the decision JSON), not an identity conflict.
+    """
+    present = [(label, ident) for label, ident in labeled_identities if ident is not None]
+    if expected is not None:
+        present = present + [("current config/lock", expected)]
+    if len(present) < 2:
+        return
+    reference_label, reference = present[0]
+    for label, ident in present[1:]:
+        if ident != reference:
+            raise ValueError(
+                f"identity mismatch: {label} has (config_sha256, upstream_rkv_commit, "
+                f"model_revision, tokenizer_revision)={ident}, but {reference_label} has "
+                f"{reference} -- refusing to analyze data produced under different "
+                "configs/models/upstream pins as if it were one coherent run."
+            )
 
 
 def run_fixed_trace_analysis(
@@ -676,6 +742,7 @@ def run_fixed_trace_analysis(
     replay_condition: str,
     stage_name: str,
     settings: "FixedTraceSettings",
+    expected_identity: tuple | None = None,
 ) -> int:
     """End-to-end: read the canonical base file plus both replay policies'
     fixed-trace probe files from `output_dir`, pair/score them, and write
@@ -683,13 +750,16 @@ def run_fixed_trace_analysis(
     (not a fixed filename) so the b256/b512/b1024 screens
     (configs/early_gap_b*.yaml) never overwrite each other's decision file.
 
-    Every input is validated against its Pydantic schema and checked for a
-    single coherent (config, model, upstream-commit) identity BEFORE any
-    pairing/scoring happens (`_validate_base_records`/
-    `_validate_fixed_trace_probe_records`) — reading JSONL as plain dicts
-    without this check would silently accept a stale protocol-v1 directory
-    or a directory mixing two different runs as if it were valid current
-    input.
+    Every input is validated against its Pydantic schema, checked for a
+    single coherent identity WITHIN each file, and cross-checked for the
+    SAME identity ACROSS all three files (`_validate_base_records`/
+    `_validate_fixed_trace_probe_records`/`_assert_consistent_identity`)
+    BEFORE any pairing/scoring happens — reading JSONL as plain dicts
+    without this would silently accept a stale protocol-v1 directory, a
+    directory mixing two different runs, or (given `expected_identity`,
+    computed by the caller from the config/lock this invocation is actually
+    using) a directory produced under a config/model/upstream pin different
+    from the one currently pinned.
     """
     output_dir = Path(output_dir)
     base_path = output_dir / f"{trace_condition}.jsonl"
@@ -699,9 +769,17 @@ def run_fixed_trace_analysis(
     base_records = list(read_jsonl(base_path))
     full_probes = load_fixed_trace_records(full_probes_path, trace_condition)
     rkv_probes = load_fixed_trace_records(rkv_probes_path, replay_condition)
-    _validate_base_records(base_records, base_path)
-    _validate_fixed_trace_probe_records(full_probes, full_probes_path)
-    _validate_fixed_trace_probe_records(rkv_probes, rkv_probes_path)
+    base_identity = _validate_base_records(base_records, base_path)
+    full_probes_identity = _validate_fixed_trace_probe_records(full_probes, full_probes_path)
+    rkv_probes_identity = _validate_fixed_trace_probe_records(rkv_probes, rkv_probes_path)
+    _assert_consistent_identity(
+        [
+            (str(base_path), base_identity),
+            (str(full_probes_path), full_probes_identity),
+            (str(rkv_probes_path), rkv_probes_identity),
+        ],
+        expected=expected_identity,
+    )
     _assert_shared_trace_source(full_probes, rkv_probes, trace_condition)
 
     pairs = build_fixed_trace_pairs(base_records, full_probes, rkv_probes)

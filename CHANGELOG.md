@@ -5,6 +5,67 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-16 — Fixed-trace protocol v2, third pass: config-limit ignored, cross-file identity, duplicate rows (secondary, additive; no frozen §1/§4/§8/§9 value changed)
+
+A third external review of the protocol-v2 hardening commit found two
+blocking repository bugs (not scientific-mechanics bugs — the anchor
+extraction, budget selection, and f=1-eviction fixes from the prior two
+entries were all confirmed correct) that would have let a GPU rerun either
+silently process the wrong number of examples or silently pair
+inconsistent data:
+
+- **`StageConfig.limit` was completely ignored.** `_load_manifest_filtered`
+  only ever consulted `args.limit` (the CLI `--limit` flag); a stage
+  config's own `limit:` (e.g. `early_gap_v2_b128.yaml`'s `limit: 10`
+  against a 50-row manifest) had no effect at all. Every documented
+  fixed-trace command in `docs/GPU_VALIDATION_PLAN.md` omits an explicit
+  `--limit`, relying entirely on the config's declared limit — so the
+  documented "ten-example screen" was actually running against all 50
+  rows. Fixed: `effective_limit = args.limit if args.limit is not None
+  else stage.limit`. Verified end-to-end with the real config
+  (`--dry-run`, no `--limit`): `generate` now reports `rows: 10`,
+  `replay-fixed-trace` reports `planned examples: 10` /
+  `planned probe records: 90`, matching the documented n=10 exactly.
+- **Cross-file identity was never checked.** `_validate_base_records`/
+  `_validate_fixed_trace_probe_records` (added in the prior entry) each
+  only verified ONE file's own internal consistency — nothing compared the
+  canonical base file against either fixed-trace probe file, or either
+  probe file against the other. A base file from one config/model/upstream
+  pin could be silently paired against probe files from a different run.
+  Fixed: `FixedTraceProbeRecord` gained `model_revision`/
+  `tokenizer_revision` fields (schema bumped `1.2.0` -> `1.3.0`) so its
+  identity is directly comparable to `BaseRunRecord`'s; a new
+  `_assert_consistent_identity` cross-checks all three files' identities
+  against each other, and `cmd_analyze_fixed_trace` now also passes the
+  CURRENT invocation's own `(config_sha256, upstream_commit, model_revision,
+  tokenizer_revision)` — computed from `args.config` and the freshly loaded
+  lock, previously loaded and silently discarded — so stale data cannot be
+  analyzed even if it happens to be internally self-consistent.
+- **Duplicate `(base_record_id, fraction)` rows were silently overwritten.**
+  `load_fixed_trace_records` now raises on a duplicate key instead of
+  letting the later row win silently — such a duplicate can only arise
+  from a corrupted, hand-edited, or improperly concatenated file (the
+  writer itself already refuses a duplicate `record_id` within one run).
+- **`require_boxed_extraction` was a dead config field.** Declared in every
+  fixed-trace stage config but never read by any code (boxed extraction
+  was always required unconditionally). Changed from a plain `bool` to a
+  frozen `Literal[True]` — settable to `True` (or omitted), never silently
+  disabled to `False` with no effect.
+- Fixed a stale docstring still naming the retired
+  `no_rkv_eviction_during_scored_probes` field (renamed
+  `no_rkv_eviction_during_answer_probes` two entries ago) and corrected
+  `docs/GPU_VALIDATION_PLAN.md`'s one-example-gate instructions, which
+  implied `--limit 1` applies to `analyze-fixed-trace` too (it takes no
+  such flag — it only reads what `replay-fixed-trace` already wrote).
+- **Still open, unchanged**: no GPU exists in this environment to actually
+  exercise any of this — 217 CPU tests pass (up from 203), GPU test files
+  still only collect and skip. Raw b256/b1024 probe data remains
+  unrecoverable through code (§ prior entry). MATH-500 answer equivalence
+  remains unimplemented. This round also went directly to `main` without a
+  reviewed PR, same as the prior two — flagged again here since external
+  review has now raised it twice; a subsequent change may switch to a
+  branch+PR flow if that continues to matter.
+
 ## 2026-07-16 — Fixed-trace protocol v2 hardening: f=1 eviction gap, budget too large, analysis-input validation (secondary, additive; no frozen §1/§4/§8/§9 value changed)
 
 External review of the first protocol-v2 commit (`20e2ad6`, merged as

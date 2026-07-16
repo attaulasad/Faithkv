@@ -650,6 +650,8 @@ def _valid_fixed_trace_probe_record(**overrides) -> dict:
         config_sha256="a" * 64,
         provenance=ProvenanceState(upstream_rkv_commit="45eaa7d69d20b7388321f077020a610d9afb65bd", git_commit="deadbeef", git_dirty=False),
         versions=VersionInfo(python="3.10.0"),
+        model_revision="ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562",
+        tokenizer_revision="ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562",
         base_record_id="base-full-gsm8k_calibration_50-0-seed42",
         trace_source_condition="full",
         replay_policy_condition="rkv_b128",
@@ -755,3 +757,114 @@ def test_run_fixed_trace_analysis_rejects_protocol_v1_shaped_base_file(tmp_path)
             output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
             stage_name="early_gap_v2_b128", settings=_SETTINGS,
         )
+
+
+# --- Cross-file and current-config identity checks (§ external review 2026-07-16) ---
+
+def test_assert_consistent_identity_accepts_matching_files():
+    from kvcot.analysis.fixed_trace import _assert_consistent_identity
+
+    ident = ("a" * 64, "up", "model-1", "tok-1")
+    _assert_consistent_identity([("base", ident), ("full_probes", ident), ("rkv_probes", ident)])  # no raise
+
+
+def test_assert_consistent_identity_ignores_empty_files():
+    from kvcot.analysis.fixed_trace import _assert_consistent_identity
+
+    ident = ("a" * 64, "up", "model-1", "tok-1")
+    # An empty rkv_probes file (identity None) must not itself trigger a
+    # mismatch -- "nothing written yet" is reported elsewhere (n_shared=0).
+    _assert_consistent_identity([("base", ident), ("full_probes", ident), ("rkv_probes", None)])
+
+
+def test_assert_consistent_identity_rejects_cross_file_mismatch():
+    from kvcot.analysis.fixed_trace import _assert_consistent_identity
+
+    base_ident = ("a" * 64, "up", "model-1", "tok-1")
+    rkv_ident = ("a" * 64, "up", "model-1", "DIFFERENT-tokenizer")
+    with pytest.raises(ValueError):
+        _assert_consistent_identity([("base", base_ident), ("full_probes", base_ident), ("rkv_probes", rkv_ident)])
+
+
+def test_assert_consistent_identity_rejects_mismatch_against_expected():
+    from kvcot.analysis.fixed_trace import _assert_consistent_identity
+
+    ident = ("a" * 64, "up", "model-1", "tok-1")
+    expected = ("a" * 64, "up", "model-2", "tok-1")  # current lock pins a different model revision
+    with pytest.raises(ValueError):
+        _assert_consistent_identity([("base", ident), ("full_probes", ident), ("rkv_probes", ident)], expected=expected)
+
+
+def test_run_fixed_trace_analysis_rejects_base_vs_probes_identity_mismatch(tmp_path):
+    # base.jsonl and the R-KV fixed-trace probes were produced under
+    # different upstream_rkv_commit pins -- must never be silently paired.
+    base = _valid_base_run_record()
+    full_rec = _valid_fixed_trace_probe_record()
+    rkv_rec = _valid_fixed_trace_probe_record(
+        provenance={"upstream_rkv_commit": "0000000000000000000000000000000000000000", "git_commit": "deadbeef", "git_dirty": False},
+    )
+    _write(tmp_path / "full.jsonl", [base])
+    _write(tmp_path / "full_on_full_fixed_trace_probes.jsonl", [full_rec])
+    _write(tmp_path / "rkv_b128_on_full_fixed_trace_probes.jsonl", [rkv_rec])
+
+    with pytest.raises(ValueError):
+        run_fixed_trace_analysis(
+            output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
+            stage_name="early_gap_v2_b128", settings=_SETTINGS,
+        )
+
+
+def test_run_fixed_trace_analysis_rejects_mismatch_against_current_config(tmp_path):
+    # All three files agree with each other, but the invocation's OWN
+    # config/lock (expected_identity) pins a different model revision --
+    # this must be rejected even though the files are internally consistent.
+    base = _valid_base_run_record()
+    full_rec = _valid_fixed_trace_probe_record()
+    rkv_rec = _valid_fixed_trace_probe_record(record_id="fixed-probe-rkv-f1", replay_policy_condition="rkv_b128")
+    _write(tmp_path / "full.jsonl", [base])
+    _write(tmp_path / "full_on_full_fixed_trace_probes.jsonl", [full_rec])
+    _write(tmp_path / "rkv_b128_on_full_fixed_trace_probes.jsonl", [rkv_rec])
+
+    mismatched_expected_identity = (
+        base["config_sha256"], base["provenance"]["upstream_rkv_commit"],
+        "some-other-model-revision", base["tokenizer_revision"],
+    )
+    with pytest.raises(ValueError):
+        run_fixed_trace_analysis(
+            output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
+            stage_name="early_gap_v2_b128", settings=_SETTINGS, expected_identity=mismatched_expected_identity,
+        )
+
+
+def test_run_fixed_trace_analysis_accepts_matching_current_config(tmp_path, monkeypatch):
+    # run_fixed_trace_analysis writes results/decisions/{stage_name}_fixed_trace.json
+    # relative to the CURRENT WORKING DIRECTORY (not output_dir) -- chdir
+    # into tmp_path for this one successful-path test so it can't leave a
+    # stray file behind in the real repository's results/decisions/.
+    monkeypatch.chdir(tmp_path)
+    base = _valid_base_run_record()
+    full_rec = _valid_fixed_trace_probe_record()
+    rkv_rec = _valid_fixed_trace_probe_record(record_id="fixed-probe-rkv-f1", replay_policy_condition="rkv_b128")
+    _write(tmp_path / "full.jsonl", [base])
+    _write(tmp_path / "full_on_full_fixed_trace_probes.jsonl", [full_rec])
+    _write(tmp_path / "rkv_b128_on_full_fixed_trace_probes.jsonl", [rkv_rec])
+
+    matching_expected_identity = (
+        base["config_sha256"], base["provenance"]["upstream_rkv_commit"],
+        base["model_revision"], base["tokenizer_revision"],
+    )
+    rc = run_fixed_trace_analysis(
+        output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
+        stage_name="early_gap_v2_b128", settings=_SETTINGS, expected_identity=matching_expected_identity,
+    )
+    assert rc == 0
+
+
+# --- Duplicate (base_record_id, fraction) rows (§ external review 2026-07-16) ---
+
+def test_load_fixed_trace_records_rejects_duplicate_base_and_fraction(tmp_path):
+    rec_a = _valid_fixed_trace_probe_record(record_id="fixed-probe-a")
+    rec_b = _valid_fixed_trace_probe_record(record_id="fixed-probe-b")  # same base_record_id, same fraction=1.0
+    _write(tmp_path / "dup.jsonl", [rec_a, rec_b])
+    with pytest.raises(ValueError):
+        load_fixed_trace_records(tmp_path / "dup.jsonl", "rkv_b128")

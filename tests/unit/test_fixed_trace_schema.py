@@ -40,6 +40,8 @@ def _valid_kwargs(**overrides) -> dict:
         config_sha256="b" * 64,
         provenance=_provenance(),
         versions=_versions(),
+        model_revision="ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562",
+        tokenizer_revision="ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562",
         base_record_id="base-full-ds-0-seed42",
         trace_source_condition="full",
         replay_policy_condition="rkv_b512",
@@ -81,16 +83,27 @@ def _valid_kwargs(**overrides) -> dict:
 
 def test_fixed_trace_probe_record_valid_construction():
     rec = FixedTraceProbeRecord(**_valid_kwargs())
-    assert rec.schema_version == SCHEMA_VERSION == "1.2.0"
+    assert rec.schema_version == SCHEMA_VERSION == "1.3.0"
     assert rec.record_type == "fixed_trace_probe"
     assert rec.anchor_fraction == 1.0
     assert rec.trace_source_condition == "full"
     assert rec.replay_policy_condition == "rkv_b512"
+    assert rec.model_revision == "ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562"
+    assert rec.tokenizer_revision == "ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562"
 
 
 def test_fixed_trace_probe_record_rejects_stale_schema_version():
     with pytest.raises(ValidationError):
         FixedTraceProbeRecord(**_valid_kwargs(schema_version="1.1.0"))
+    with pytest.raises(ValidationError):
+        FixedTraceProbeRecord(**_valid_kwargs(schema_version="1.2.0"))
+
+
+def test_fixed_trace_probe_record_rejects_missing_model_revision():
+    kwargs = _valid_kwargs()
+    del kwargs["model_revision"]
+    with pytest.raises(ValidationError):
+        FixedTraceProbeRecord(**kwargs)
 
 
 def test_fixed_trace_probe_record_rejects_missing_required_field():

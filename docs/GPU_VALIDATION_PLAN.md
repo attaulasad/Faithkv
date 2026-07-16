@@ -204,8 +204,11 @@ and not weaker thresholds.
 ### One-example gate before a full rerun
 
 Per the corrected protocol's own validation order: run ONE fixed-trace
-example first (`--limit 1 --problem-index <n>` on each command above) and
-confirm, from the written records/decision JSON, all of the following before
+example first — add `--limit 1 --problem-index <n>` to the `generate` and
+`replay-fixed-trace` commands above (`analyze-fixed-trace` takes neither
+flag; it just reads whatever `replay-fixed-trace` already wrote, so limiting
+upstream is sufficient) — and confirm, from the written records/decision
+JSON, all of the following before
 running the full n=10 screen:
 
 - Both FullKV and R-KV f=1 extraction status is `"boxed"` (never
