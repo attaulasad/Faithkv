@@ -121,7 +121,15 @@ class FixedTraceSettings(BaseModel):
     """
 
     probe_max_new_tokens: int = Field(default=64, gt=0)
-    require_boxed_extraction: bool = True
+    # A frozen Literal, not a plain bool (§ external review 2026-07-16): a
+    # non-boxed (fallback) f=1 anchor is documented noise
+    # (kvcot.analysis.fixed_trace._pss_for_side/FixedTraceEligibility) —
+    # there is no supported "off" mode, so the field cannot silently be set
+    # to False and quietly do nothing (a plain `bool = True` field that no
+    # code ever reads is worse than no field at all). Kept as an explicit
+    # field, rather than removed, so a stage config can still document the
+    # requirement inline.
+    require_boxed_extraction: Literal[True] = True
     min_eligible_examples: int = Field(default=5, ge=1)
     min_actual_compression_rate: float = Field(default=0.7, ge=0.0, le=1.0)
     max_mean_f1_retention_ratio: float = Field(default=0.7, gt=0.0, le=1.0)

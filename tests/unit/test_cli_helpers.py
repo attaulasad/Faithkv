@@ -13,6 +13,7 @@ import pytest
 from kvcot.cli import (
     ResumeIdentityMismatchError,
     _get_dotted,
+    _load_manifest_filtered,
     _resolve_condition,
     _stage1b_candidate_budgets,
     _verify_resumable_record_ids,
@@ -153,3 +154,44 @@ def test_stage1b_candidate_budgets_globs_and_sorts(tmp_path):
 
 def test_stage1b_candidate_budgets_empty_dir(tmp_path):
     assert _stage1b_candidate_budgets(tmp_path) == []
+
+
+# --- _load_manifest_filtered / stage.limit (§ external review 2026-07-16) ---
+#
+# StageConfig.limit (e.g. early_gap_v2_b128.yaml's `limit: 10`) previously
+# had NO effect here -- only `--limit` on the CLI was ever consulted, so
+# every fixed-trace stage config's documented "ten-example screen" silently
+# ran against the full manifest whenever a command was invoked without an
+# explicit `--limit`.
+
+def _write_manifest(path, n_rows: int) -> None:
+    w = JsonlWriter(path, validator=None)
+    for i in range(n_rows):
+        w.append({"source_row_index": i, "question": f"q{i}", "question_hash": f"h{i}", "normalized_gold": str(i)})
+
+
+def test_load_manifest_filtered_uses_stage_limit_when_cli_limit_omitted(tmp_path):
+    manifest_path = tmp_path / "manifest.jsonl"
+    _write_manifest(manifest_path, 50)
+    stage = _stage(["full"], dataset_manifest=str(manifest_path), limit=10)
+    args = SimpleNamespace(problem_index=None, limit=None)
+    rows = _load_manifest_filtered(stage, args)
+    assert len(rows) == 10
+
+
+def test_load_manifest_filtered_cli_limit_overrides_stage_limit(tmp_path):
+    manifest_path = tmp_path / "manifest.jsonl"
+    _write_manifest(manifest_path, 50)
+    stage = _stage(["full"], dataset_manifest=str(manifest_path), limit=10)
+    args = SimpleNamespace(problem_index=None, limit=1)
+    rows = _load_manifest_filtered(stage, args)
+    assert len(rows) == 1
+
+
+def test_load_manifest_filtered_no_limit_anywhere_returns_all_rows(tmp_path):
+    manifest_path = tmp_path / "manifest.jsonl"
+    _write_manifest(manifest_path, 50)
+    stage = _stage(["full"], dataset_manifest=str(manifest_path))  # no limit set
+    args = SimpleNamespace(problem_index=None, limit=None)
+    rows = _load_manifest_filtered(stage, args)
+    assert len(rows) == 50

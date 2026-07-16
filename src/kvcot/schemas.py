@@ -11,7 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-SCHEMA_VERSION = "1.2.0"
+SCHEMA_VERSION = "1.3.0"
 
 Condition = str  # "full" | "patched_noop" | f"rkv_b{budget}" — validated by callers against configs, not hardcoded here
 ThinkParseStatus = Literal[
@@ -107,7 +107,7 @@ class ThinkSpanInfo(BaseModel):
 
 
 class BaseRunRecord(BaseModel):
-    schema_version: Literal["1.2.0"] = SCHEMA_VERSION
+    schema_version: Literal["1.3.0"] = SCHEMA_VERSION
     record_id: str
     parent_record_id: str | None = None
     record_type: Literal["base_generation"] = "base_generation"
@@ -159,7 +159,7 @@ class BaseRunRecord(BaseModel):
 
 
 class ProbeRunRecord(BaseModel):
-    schema_version: Literal["1.2.0"] = SCHEMA_VERSION
+    schema_version: Literal["1.3.0"] = SCHEMA_VERSION
     record_id: str
     parent_record_id: str  # the base_record_id this probe branched from
     record_type: Literal["probe"] = "probe"
@@ -208,7 +208,7 @@ class FixedTraceProbeRecord(BaseModel):
     why that distinction is the entire point of this record type.
     """
 
-    schema_version: Literal["1.2.0"] = SCHEMA_VERSION
+    schema_version: Literal["1.3.0"] = SCHEMA_VERSION
     record_id: str
     parent_record_id: str  # the base_record_id this probe branched from
     record_type: Literal["fixed_trace_probe"] = "fixed_trace_probe"
@@ -218,6 +218,20 @@ class FixedTraceProbeRecord(BaseModel):
     config_sha256: str
     provenance: ProvenanceState
     versions: VersionInfo
+
+    # Model identity (added schema 1.3.0, § external review 2026-07-16):
+    # `config_sha256` alone hashes only the STAGE yaml (e.g. early_gap_v2_
+    # b128.yaml), never the `configs/lock.yaml` it references — two runs of
+    # the identical stage yaml could still differ in pinned model/tokenizer
+    # revision if lock.yaml itself changed between them. BaseRunRecord
+    # already carries these two fields directly; FixedTraceProbeRecord did
+    # not, so cross-file identity validation
+    # (kvcot.analysis.fixed_trace._validate_base_records/
+    # _validate_fixed_trace_probe_records) could not actually verify model
+    # consistency between the canonical base file and either fixed-trace
+    # probe file, only config_sha256/upstream_rkv_commit agreement.
+    model_revision: str
+    tokenizer_revision: str
 
     # Canonical trace identity
     base_record_id: str
@@ -301,7 +315,7 @@ class FixedTraceProbeRecord(BaseModel):
 
 
 class RunManifest(BaseModel):
-    schema_version: Literal["1.2.0"] = SCHEMA_VERSION
+    schema_version: Literal["1.3.0"] = SCHEMA_VERSION
     command: str
     config_path: str
     config_sha256: str

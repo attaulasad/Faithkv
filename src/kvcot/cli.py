@@ -42,11 +42,20 @@ def _add_common_run_args(p: argparse.ArgumentParser) -> None:
 
 
 def _load_manifest_filtered(stage, args) -> list[dict]:
+    """§ external review 2026-07-16: `--limit` on the CLI must NOT be the
+    only way to cap a run — `StageConfig.limit` (e.g. `early_gap_v2_b128
+    .yaml`'s `limit: 10`) is a config-declared cap that previously had no
+    effect at all here, so every fixed-trace stage config's documented
+    "ten-example screen" silently ran against the full manifest (50 rows)
+    whenever the CLI invocation omitted `--limit`. `--limit` on the command
+    line still wins when given (an explicit override of the config
+    default), but the config's own `limit` is the floor otherwise."""
     rows = list(read_manifest(stage.dataset_manifest))
     if args.problem_index is not None:
         rows = [r for r in rows if r["source_row_index"] == args.problem_index]
-    if args.limit is not None:
-        rows = rows[: args.limit]
+    effective_limit = args.limit if args.limit is not None else stage.limit
+    if effective_limit is not None:
+        rows = rows[:effective_limit]
     return rows
 
 
@@ -962,6 +971,8 @@ def cmd_replay_fixed_trace(args: argparse.Namespace) -> int:
                 config_sha256=config_sha256,
                 provenance=ProvenanceState(upstream_rkv_commit=upstream_commit, git_commit=git_commit(), git_dirty=git_is_dirty()),
                 versions=versions,
+                model_revision=lock.model.revision,
+                tokenizer_revision=lock.model.tokenizer_revision,
                 base_record_id=base["record_id"],
                 trace_source_condition=trace_condition,
                 replay_policy_condition=replay_condition,
@@ -1273,7 +1284,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------ analyze-fixed-trace
 
 def cmd_analyze_fixed_trace(args: argparse.Namespace) -> int:
-    stage, _lock = load_stage_config(args.config)
+    stage, lock = load_stage_config(args.config)
     if stage.fixed_trace is None:
         raise SystemExit(f"{stage.stage_name}: missing required fixed_trace settings")
     trace_condition = _resolve_condition_name(stage, args.trace_condition)
@@ -1292,12 +1303,23 @@ def cmd_analyze_fixed_trace(args: argparse.Namespace) -> int:
 
     from kvcot.analysis.fixed_trace import run_fixed_trace_analysis
 
+    # § external review 2026-07-16: verify the three input files were
+    # produced under THIS invocation's own config/lock, not just that they
+    # agree with each other — `lock` was previously loaded and discarded.
+    expected_identity = (
+        config_identity(args.config),
+        upstream_submodule_commit(lock),
+        lock.model.revision,
+        lock.model.tokenizer_revision,
+    )
+
     return run_fixed_trace_analysis(
         output_dir=Path(stage.output_dir),
         trace_condition=trace_condition,
         replay_condition=replay_condition,
         stage_name=stage.stage_name,
         settings=stage.fixed_trace,
+        expected_identity=expected_identity,
     )
 
 

@@ -176,6 +176,23 @@ def test_replay_fixed_trace_dry_run_rejects_unknown_replay_condition():
         cmd_replay_fixed_trace(_fixed_trace_args(replay_condition="rkv_b999"))
 
 
+def test_replay_fixed_trace_dry_run_uses_configs_own_limit_without_cli_limit(capsys):
+    # § external review 2026-07-16: configs/early_gap_v2_b128.yaml declares
+    # `limit: 10` against a 50-row manifest. Without an explicit `--limit`
+    # on the command line, the dry-run plan must reflect the CONFIG's own
+    # limit (10 examples, 90 fixed-trace probe records) -- not silently run
+    # against all 50 rows the way `stage.limit` being ignored used to.
+    rc = cmd_replay_fixed_trace(
+        _fixed_trace_args(
+            config="configs/early_gap_v2_b128.yaml", replay_condition="rkv_b128", limit=None,
+        )
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "planned examples: 10" in out
+    assert "planned probe records: 90" in out
+
+
 def test_replay_fixed_trace_requires_fixed_trace_settings(monkeypatch, capsys):
     # §ステップ2/4: a stage config missing `fixed_trace:` must refuse to run —
     # falling back to the frozen primary probes.* settings would silently let
