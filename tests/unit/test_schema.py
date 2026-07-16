@@ -70,8 +70,43 @@ def test_base_run_record_valid_construction():
         compaction_event_steps=[],
         cache_length_final_per_layer=[3, 3],
     )
-    assert rec.schema_version == "1.1.0"  # bumped for FixedTraceProbeRecord's addition
+    assert rec.schema_version == "1.2.0"  # bumped for the fixed-trace protocol v2 fields
     assert rec.record_type == "base_generation"
+
+
+def test_schema_version_literal_rejects_stale_value():
+    with pytest.raises(ValidationError):
+        BaseRunRecord(
+            record_id="r1",
+            schema_version="1.1.0",
+            config_path="configs/stage0_smoke.yaml",
+            config_sha256="b" * 64,
+            provenance=_provenance(),
+            versions=_versions(),
+            model_name="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+            model_revision="ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562",
+            tokenizer_name="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+            tokenizer_revision="ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562",
+            dataset=_dataset(),
+            condition="full",
+            method_config=MethodConfig(method="fullkv"),
+            global_seed=42,
+            derived_seed=123456,
+            prompt_text="hello",
+            prompt_token_ids=[1, 2, 3],
+            generated_token_ids=[4, 5, 6],
+            decoded_output="the answer is 42",
+            think_span=_think_span(),
+            extracted_answer="42",
+            extraction_method="boxed",
+            is_correct=True,
+            cap_hit=False,
+            wall_time_seconds=1.23,
+            generated_token_count=3,
+            compaction_count=0,
+            compaction_event_steps=[],
+            cache_length_final_per_layer=[3, 3],
+        )
 
 
 def test_base_run_record_rejects_missing_required_field():

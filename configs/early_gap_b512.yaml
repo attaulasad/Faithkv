@@ -11,6 +11,19 @@ output_dir: results/raw/early_gap_b512
 limit: 10
 seeds_override: [42]
 
+# Protocol v2 (2026-07-16, CHANGELOG.md): a teacher-forced boxed-answer
+# prefix replaces the empty fixed-trace suffix, so the model reliably emits
+# a `\boxed{...}` answer within a short budget instead of writing a verbose
+# structured re-derivation that hits the frozen 48-token probe cap. This
+# stage's own decoding/eligibility settings live here, separate from the
+# frozen `configs/lock.yaml` probes.* block.
+fixed_trace:
+  probe_max_new_tokens: 64
+  require_boxed_extraction: true
+  min_eligible_examples: 5
+  min_actual_compression_rate: 0.7
+  max_mean_f1_retention_ratio: 0.7
+
 notes: >
   Ten-example, one-seed fixed-trace gap screen. Not a publishable estimate —
   PSS/Delta_PSS at n=10 produces descriptive counts only, no p-value
@@ -18,4 +31,6 @@ notes: >
   trace is replayed under FullKV and R-KV via `kvcot replay-fixed-trace`.
   Budget escalation: if compression rarely fires at 512, try
   early_gap_b256.yaml; if it fires but destroys accuracy, try
-  early_gap_b1024.yaml instead of stepping down to 256.
+  early_gap_b1024.yaml instead of stepping down to 256. Run
+  `kvcot inspect-fixed-trace` against the canonical trace before replaying —
+  it stops immediately if no trace is longer than this budget.

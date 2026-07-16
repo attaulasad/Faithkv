@@ -10,6 +10,7 @@ generation code path.
 from __future__ import annotations
 
 import copy
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import torch
@@ -369,6 +370,22 @@ def restore_snapshot(model, cache, snapshot: ModelStateSnapshot) -> ModelProvena
 class ProbeResult:
     control_suffix_token_ids: list[int]
     probe_output_token_ids: list[int]
+    # Why generation actually stopped — "eos" (natural end),
+    # "boxed_answer_complete" (only ever set when a caller passes
+    # `stop_predicate`, e.g. the fixed-trace probe), or "max_new_tokens" (the
+    # loop exhausted its budget without either). The frozen primary
+    # replay-probe path never passes `stop_predicate`, so its ProbeResults
+    # only ever see "eos"/"max_new_tokens".
+    stop_reason: str = "max_new_tokens"
+    # Absolute position (into the prompt+generated token stream) after the
+    # LAST fed/decoded token of this probe call — i.e. snapshot.absolute_
+    # position + (close marker + control suffix + every generated token
+    # actually fed back in, which excludes the final token if decoding
+    # stopped on it rather than feeding it). Used by callers to detect
+    # whether the cache evicted more than expected while answering (§ Step
+    # 8, kvcot.cli.cmd_replay_fixed_trace).
+    final_absolute_position: int = 0
+    final_cache_lengths_per_layer: list[int] = field(default_factory=list)
 
 
 def branch_and_probe(
@@ -380,6 +397,7 @@ def branch_and_probe(
     max_new_tokens: int,
     eos_token_id: int,
     device: str,
+    stop_predicate: Callable[[list[int]], bool] | None = None,
 ) -> ProbeResult:
     """§6 steps 8-9: from a deep-cloned snapshot, teacher-force the
     closing-think token sequence and then the single control suffix
@@ -389,6 +407,14 @@ def branch_and_probe(
     per docs/REPLAY_DESIGN.md §2 on why call shape matters), then generates
     up to `max_new_tokens` answer tokens greedily (§4: probe decoding is
     always greedy/deterministic).
+
+    `stop_predicate`, if given, is checked after every newly generated token
+    (in addition to the EOS check) and, if it returns True, stops decoding
+    without feeding that token back in — used only by the fixed-trace probe
+    (kvcot.cli.cmd_replay_fixed_trace's `boxed_answer_complete`) to halt the
+    instant a `\\boxed{...}` closes, saving GPU time and preventing a second
+    solution attempt in the same generation. The frozen primary replay-probe
+    path (kvcot.cli.cmd_replay_probe) never passes this argument.
 
     Restoring the same `snapshot` and calling this twice must yield
     identical `probe_output_token_ids` (§6.1 hard gate) — guaranteed by
@@ -417,15 +443,26 @@ def branch_and_probe(
         )
 
     generated: list[int] = []
+    stop_reason = "max_new_tokens"
     for _ in range(max_new_tokens):
         next_id = greedy_next_token(logits)
         token_id = int(next_id.item())
         generated.append(token_id)
         if token_id == eos_token_id:
+            stop_reason = "eos"
+            break
+        if stop_predicate is not None and stop_predicate(generated):
+            stop_reason = "boxed_answer_complete"
             break
         logits = feed(token_id)
+
+    num_layers = len(model.model.layers)
+    final_cache_lengths = [int(cache.key_cache[i].shape[-2]) for i in range(num_layers)]
 
     return ProbeResult(
         control_suffix_token_ids=control_suffix_token_ids,
         probe_output_token_ids=generated,
+        stop_reason=stop_reason,
+        final_absolute_position=absolute_position,
+        final_cache_lengths_per_layer=final_cache_lengths,
     )

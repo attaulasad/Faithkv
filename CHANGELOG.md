@@ -5,6 +5,134 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-16 — Fixed-trace protocol v2: boxed-answer prefix, realized-compression gating (secondary, additive; no frozen §1/§4/§8/§9 value changed)
+
+**Protocol v1 produced no scientific result.** The first fixed-trace GPU
+screen (b512, seed=42, n=10) ran end-to-end cleanly — sampled base accuracy
+9/10 under both conditions, zero cap hits on generation — but `n_eligible =
+0` at every budget tested, for two independent, diagnosable reasons found by
+decoding the raw probe text:
+
+1. **The f=1 anchor was garbage on every example.** The fixed-trace suffix
+   was deliberately empty (`FIXED_TRACE_SUFFIX_TEXT = ""`, to avoid cueing
+   recomputation), and probe decoding used the frozen 48-token budget
+   (`configs/lock.yaml`'s `probes.max_new_tokens`). R1-Distill's answer mode
+   is a verbose structured write-up that essentially never reaches a
+   `\boxed{...}` (or even an explicit `Final answer:`) within 48 tokens, so
+   extraction fell through to the conservative final-number fallback tier on
+   nearly every probe and grabbed an incidental mid-sentence number as the
+   "anchor" — noise, not an answer. Every reported PSS/curve value from that
+   screen was contaminated (fallback-extracted noise compared against
+   fallback-extracted noise) and must not be read as evidence in either
+   direction.
+2. **Eligibility gated on a recorded compaction EVENT COUNT, not realized
+   compression.** At the exact budget boundary R-KV can record a compaction
+   event that evicts zero tokens (`kvcot.generation.replay`'s documented
+   boundary case) — `rkv_had_replay_compaction` (`count > 0`) let such pairs
+   through as "eligible" even though the physical cache never actually
+   shrank.
+
+Neither failure says anything about the underlying hypothesis (G1) — this
+screen tested the elicitation machinery and found it broken, not the
+compression question. All kill criteria from the earlier design chats remain
+live and untriggered; the infra (gates, replay, schemas, eligibility logic)
+is fully reusable once these two defects are fixed. Fixed here, before any
+rerun:
+
+- **`src/kvcot/probes/templates.py`**: `FIXED_TRACE_SUFFIX_TEXT` changed from
+  `""` to `"\n\nFinal answer: \\boxed{"` — a teacher-forced FORMAT prefix
+  (identical across conditions, fed as plain tokens exactly like the closing
+  `</think>` marker), never a natural-language recomputation instruction
+  ("solve again"/"recalculate"/"use the question"/"explain your answer" are
+  all still forbidden, per the module's own documented rationale).
+- **`src/kvcot/config.py`**: new `FixedTraceSettings` (own
+  `probe_max_new_tokens` default 64, `min_eligible_examples`,
+  `min_actual_compression_rate`, `max_mean_f1_retention_ratio`), attached as
+  `StageConfig.fixed_trace`, required (not optional) by
+  `cmd_replay_fixed_trace`/`cmd_analyze_fixed_trace` — deliberately
+  **separate** from the frozen `configs/lock.yaml` `probes.max_new_tokens:
+  48`, so a fixed-trace-motivated change can never silently alter the frozen
+  primary EAS experiment. `configs/early_gap_b{256,512,1024}.yaml` each gained
+  a `fixed_trace:` block.
+- **`src/kvcot/utils/answers.py`**: `has_complete_boxed_answer` (stop
+  predicate for probe decoding) and `answers_match_or_none` (three-valued
+  match — `None` means "could not extract," `False` means "a valid but
+  different answer"; the two must never be conflated, since coercing the
+  first into the second hides extraction breakage inside what looks like a
+  normal disagreement rate). `answers_match` (the frozen primary path's
+  two-valued match) is unchanged.
+- **`src/kvcot/generation/replay.py`**: `branch_and_probe` accepts an
+  optional `stop_predicate` (checked after every generated token, in
+  addition to EOS) so fixed-trace decoding halts the instant a box closes —
+  never used by the frozen primary replay-probe path. `ProbeResult` gained
+  `stop_reason`, `final_absolute_position`, `final_cache_lengths_per_layer`
+  so callers can detect an eviction that happened *while writing the answer*
+  itself, not just at the reasoning cut.
+- **`src/kvcot/cli.py`** (`cmd_replay_fixed_trace`): extraction now runs over
+  the reconstructed prefix+generated text (`probe_extraction_text`), never
+  generated tokens alone; the stop predicate is wired in; realized retention
+  and actual-compression are measured at every snapshot
+  (`replay_retention_at_cut`, `actual_compression_at_cut` — physical cache
+  length vs. FullKV-equivalent slots, never the configured budget);
+  answer-time eviction is detected (`probe_actual_eviction_during_answer`).
+  New CPU-only `kvcot inspect-fixed-trace` command: reports think-span/
+  prompt+think-span length statistics against the configured R-KV budget and
+  refuses to proceed if no trace in the file is even longer than the budget
+  (this cannot prove compression will happen, only rule out the case where
+  it definitely cannot) — run this before spending GPU time on
+  `replay-fixed-trace`.
+- **`src/kvcot/schemas.py`**: `FixedTraceProbeRecord` gained
+  `probe_extraction_text`, `probe_stop_reason`, `probe_cap_hit`,
+  `replay_retention_at_cut`, `actual_compression_at_cut`,
+  `probe_cache_length_final_per_layer`, `probe_actual_eviction_during_answer`.
+  `SCHEMA_VERSION` bumped `1.1.0` -> `1.2.0`, and every record's
+  `schema_version` is now `Literal["1.2.0"]` (not just a string default) —
+  a stale-schema record now fails Pydantic validation outright instead of
+  being silently accepted. **Old protocol-v1 output directories must not be
+  resumed under protocol v2** — start a fresh `output_dir`.
+- **`src/kvcot/analysis/fixed_trace.py`**: eligibility (`FixedTraceEligibility`)
+  reworked around realized compression (`rkv_actual_compression_at_f1`,
+  `no_rkv_eviction_during_scored_probes`) instead of a recorded event count,
+  plus new gates on each side's own f=1 anchor being a `"boxed"` extraction
+  (`full_f1_anchor_boxed`/`rkv_f1_anchor_boxed` — a fallback anchor is never
+  accepted) and on the canonical trace's own base answer being correct
+  (`canonical_trace_base_correct`). PSS is `None` (never `0.0`) whenever a
+  side's own anchor is invalid/fallback or any scored fraction failed to
+  extract; `Delta_PSS` is additionally `None` whenever the pair fails full
+  eligibility (in particular: no actual R-KV compression, or an answer-time
+  eviction) even if both PSS values are individually defined. Descriptive
+  curves (`fixed_trace_curve_by_fraction`) now return `None` for a fraction
+  with zero valid measurements, never `0.0` — the two are different claims.
+  New screen-level validity gate (`build_screen_validity`,
+  `build_fixed_trace_decision`): `screen_valid` requires enough eligible
+  examples, a high enough realized-compression rate, and low enough realized
+  retention (all from `FixedTraceSettings`); `hypothesis_status` is
+  `"not_tested"` when any of those fail, and even when the screen is valid
+  this module never reports "positive"/"negative"/"gap exists"/"gap does not
+  exist" — only descriptive counts, per its existing kill/continue-screen
+  discipline.
+- **GPU test process isolation** (`tests/integration/test_replay_gpu.py`,
+  `test_probe_stability_gpu.py`): every patched-R-KV test and the FullKV
+  identity test now run inside their own `multiprocessing.get_context
+  ("spawn")` subprocess (never `fork`), mirroring the pattern already used in
+  `test_patched_noop_parity_gpu.py`. Previously, several of these tests ran
+  directly in the shared pytest process — since the R-KV monkeypatch on
+  `transformers.models.qwen2` is process-global with no per-instance undo
+  (`docs/UPSTREAM_AUDIT.md` H1), and `kvcot.generation.state.
+  declare_process_mode` already refuses a second, conflicting mode in one
+  process, mixing stock/patched tests (or two different R-KV configs) in one
+  process was unsafe or outright broken (`reset_active_mode_for_testing()`
+  only clears kvcot's own tracking variable, not the underlying monkeypatch).
+  `_load_rkv_model` now calls `declare_process_mode("patched")` before
+  `replace_qwen2(...)`, matching every real loader
+  (`kvcot.generation.policies._PatchedPolicyBase.load`).
+- **Scope note**: MATH-500 support (verified answer-equivalence for
+  fractions/radicals/decimals, distinct from GSM8K's plain string
+  equality) and longer-trace budget calibration are deliberately **not**
+  included in this entry — planned as a follow-up once the corrected
+  protocol passes its one-example GPU gate on GSM8K, per the original
+  design's stated validation order.
+
 ## 2026-07-16 — Fixed-trace prefix-sufficiency screen (secondary, additive; no frozen §1/§4/§8/§9 value changed)
 
 Added on branch `early-gap-fixed-trace`, still pre-GPU. This is an

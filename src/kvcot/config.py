@@ -107,6 +107,26 @@ class FrozenSettings(BaseModel):
         return v
 
 
+class FixedTraceSettings(BaseModel):
+    """Settings for the secondary, additive fixed-trace prefix-sufficiency
+    screen (`kvcot replay-fixed-trace`/`analyze-fixed-trace`,
+    kvcot.analysis.fixed_trace) — deliberately separate from `ProbesLock`
+    (§4's frozen `probes.max_new_tokens: 48`). The fixed-trace probe's
+    answer-elicitation strategy (teacher-forced boxed-answer prefix, §
+    kvcot.probes.templates.FIXED_TRACE_SUFFIX_TEXT) is not the frozen
+    primary replay-probe protocol, so it is allowed its own decoding budget
+    and eligibility thresholds without touching `configs/lock.yaml` — mixing
+    the two would let a fixed-trace-motivated change silently alter the
+    frozen primary EAS experiment.
+    """
+
+    probe_max_new_tokens: int = Field(default=64, gt=0)
+    require_boxed_extraction: bool = True
+    min_eligible_examples: int = Field(default=5, ge=1)
+    min_actual_compression_rate: float = Field(default=0.7, ge=0.0, le=1.0)
+    max_mean_f1_retention_ratio: float = Field(default=0.7, gt=0.0, le=1.0)
+
+
 class StageConfig(BaseModel):
     stage_name: str
     lock_config_path: str = "configs/lock.yaml"
@@ -119,6 +139,12 @@ class StageConfig(BaseModel):
     # seed in lock.seeds" (Stage 2 only).
     seeds_override: list[int] | None = None
     notes: str | None = None
+    # Only set (and only required) for the secondary fixed-trace screen's
+    # own stage configs (early_gap_b*.yaml) — see FixedTraceSettings and
+    # kvcot.cli.cmd_replay_fixed_trace/cmd_analyze_fixed_trace, which refuse
+    # to run without it rather than silently falling back to the frozen
+    # primary probes.* settings.
+    fixed_trace: FixedTraceSettings | None = None
 
     def resolve_seeds(self, lock: "FrozenSettings") -> list[int]:
         if self.seeds_override is not None:

@@ -69,16 +69,50 @@ One row per (base record, probe fraction).
 | `is_f1_stability_probe` | `True` iff `fraction == 1.0` — the stability control (§4/§8.1), excluded from EAS. |
 | `snapshot_cache_hash` / `snapshot_provenance_hash` / `snapshot_state_hash` | Cheap fingerprints for dataset-scale runs, which never persist full K/V tensors (§6) — only the tiny replay-validation fixture does that. |
 
+## `FixedTraceProbeRecord` (`record_type = "fixed_trace_probe"`)
+
+Secondary, additive diagnostic (`kvcot replay-fixed-trace`/`analyze-fixed-trace`,
+`kvcot.analysis.fixed_trace`) — NOT the frozen primary record type. Replays
+ONE canonical trace (always FullKV's own generated tokens,
+`trace_source_condition`) under a possibly-different cache policy
+(`replay_policy_condition`), so both conditions teacher-force identical
+prompt and reasoning tokens and only the cache policy varies.
+
+Protocol v2 (2026-07-16, `CHANGELOG.md`): protocol v1 used an empty
+`control_suffix_token_ids` and the frozen 48-token probe budget, and gated
+eligibility on a recorded compaction *event count* alone. Both were wrong —
+see the `kvcot.analysis.fixed_trace` module docstring for the full root-cause
+analysis. Protocol v2's fields:
+
+| Field | Why |
+|---|---|
+| `control_suffix_token_ids` | **No longer always `[]`.** A teacher-forced boxed-answer format prefix (`kvcot.probes.templates.FIXED_TRACE_SUFFIX_TEXT`, `"\n\nFinal answer: \\boxed{"`), identical across conditions, so extraction reliably reaches a `\boxed{...}` within a short budget instead of falling through to the conservative final-number fallback. |
+| `probe_extraction_text` | The text `extract_answer` actually ran on: `control_suffix_token_ids` decoded + `probe_output_token_ids` decoded. `probe_output_text` (generated tokens alone) does **not** contain the opening `\boxed{` — it lives in the prefix. |
+| `probe_stop_reason` | `"eos"` \| `"boxed_answer_complete"` \| `"max_new_tokens"`. A fixed-trace probe stopping on `"max_new_tokens"` (`probe_cap_hit`) without a complete box is a red flag, not a normal case — the stop predicate (`kvcot.utils.answers.has_complete_boxed_answer`) is expected to fire first. |
+| `replay_retention_at_cut` / `actual_compression_at_cut` | Realized, measured retention AT THE SNAPSHOT this probe branched from (§9) — `actual_compression_at_cut` requires the physical cache to have actually shrunk relative to the FullKV-equivalent slot count, never just a nonzero `replay_compaction_count_at_cut`. R-KV can record a compaction event that evicts zero tokens at the exact budget boundary (`kvcot.generation.replay`'s documented boundary case) — an event count alone is not evidence of compression. |
+| `probe_cache_length_final_per_layer` / `probe_actual_eviction_during_answer` | Cache state AFTER this probe's own answer decoding, to detect a further eviction that happened WHILE writing the answer (as opposed to at the reasoning cut) — such a probe is excluded from PSS (`kvcot.analysis.fixed_trace`). |
+| `matches_f1_anchor_answer` | Never accepted from a non-`"boxed"` (e.g. `final_number_fallback`) `normalized_f1_anchor_answer` — a fallback anchor is documented noise, not a usable reference point (`kvcot.analysis.fixed_trace._pss_for_side`). |
+
 ## `RunManifest`
 
-One per `kvcot generate` / `kvcot replay-probe` invocation. Counts
-`n_attempted`/`n_completed`/`n_skipped_resumed`/`n_failed` are always
-reported, even (especially) when resuming — a resumed run that silently
-under-reports what it actually did defeats the point of having a manifest.
+One per `kvcot generate` / `kvcot replay-probe` / `kvcot replay-fixed-trace`
+invocation. Counts `n_attempted`/`n_completed`/`n_skipped_resumed`/`n_failed`
+are always reported, even (especially) when resuming — a resumed run that
+silently under-reports what it actually did defeats the point of having a
+manifest.
 
 ## Versioning
 
-`schema_version` is `"1.0.0"` on every record. A breaking schema change
-bumps this and is documented in `CHANGELOG.md` — `kvcot validate-run`
-checks it and refuses to silently reinterpret an old-schema record under a
-new model.
+`schema_version` is `Literal["1.2.0"]` on every record — a Pydantic literal,
+not just a string default, so an old-schema record (e.g. a stray `"1.1.0"`
+row from before the fixed-trace protocol v2 fields existed) fails validation
+outright rather than being silently accepted and reinterpreted under the new
+model. History: `"1.0.0"` (initial build) -> `"1.1.0"` (added
+`FixedTraceProbeRecord`, protocol v1) -> `"1.2.0"` (2026-07-16: protocol v2
+fixed-trace fields — boxed-answer prefix, realized-compression tracking,
+answer-time eviction detection). A breaking schema change bumps this and is
+documented in `CHANGELOG.md` — `kvcot validate-run` checks it. **Do not
+resume an old output directory produced under a prior schema version** — start
+a fresh `output_dir` instead (protocol v1's `results/raw/early_gap_b*`
+directories from before 2026-07-16 are not valid inputs to protocol v2
+commands).

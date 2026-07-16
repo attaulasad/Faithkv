@@ -11,13 +11,14 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-SCHEMA_VERSION = "1.1.0"
+SCHEMA_VERSION = "1.2.0"
 
 Condition = str  # "full" | "patched_noop" | f"rkv_b{budget}" — validated by callers against configs, not hardcoded here
 ThinkParseStatus = Literal[
     "ok", "no_open_marker", "no_close_marker", "generation_prompt_preopened_ok", "malformed"
 ]
 ExtractionMethod = Literal["boxed", "final_answer_marker", "final_number_fallback", "none"]
+ProbeStopReason = Literal["eos", "boxed_answer_complete", "max_new_tokens"]
 
 
 def utc_now_iso() -> str:
@@ -106,7 +107,7 @@ class ThinkSpanInfo(BaseModel):
 
 
 class BaseRunRecord(BaseModel):
-    schema_version: str = SCHEMA_VERSION
+    schema_version: Literal["1.2.0"] = SCHEMA_VERSION
     record_id: str
     parent_record_id: str | None = None
     record_type: Literal["base_generation"] = "base_generation"
@@ -158,7 +159,7 @@ class BaseRunRecord(BaseModel):
 
 
 class ProbeRunRecord(BaseModel):
-    schema_version: str = SCHEMA_VERSION
+    schema_version: Literal["1.2.0"] = SCHEMA_VERSION
     record_id: str
     parent_record_id: str  # the base_record_id this probe branched from
     record_type: Literal["probe"] = "probe"
@@ -207,7 +208,7 @@ class FixedTraceProbeRecord(BaseModel):
     why that distinction is the entire point of this record type.
     """
 
-    schema_version: str = SCHEMA_VERSION
+    schema_version: Literal["1.2.0"] = SCHEMA_VERSION
     record_id: str
     parent_record_id: str  # the base_record_id this probe branched from
     record_type: Literal["fixed_trace_probe"] = "fixed_trace_probe"
@@ -237,12 +238,47 @@ class FixedTraceProbeRecord(BaseModel):
 
     # Probe generation
     close_marker_token_ids: list[int]
-    control_suffix_token_ids: list[int]  # always [] for the fixed-trace suffix — see kvcot.probes.templates.render_fixed_trace_suffix
+    # Protocol v2 (2026-07-16): NO LONGER always [] — the fixed-trace suffix
+    # is now a teacher-forced boxed-answer format prefix (§ kvcot.probes.
+    # templates.FIXED_TRACE_SUFFIX_TEXT), not the empty string. Historic
+    # protocol-v1 records (schema_version < 1.2.0) had this always empty.
+    control_suffix_token_ids: list[int]
     probe_decoding_max_new_tokens: int
     probe_output_token_ids: list[int]
-    probe_output_text: str
+    probe_output_text: str  # decoded from probe_output_token_ids alone (no prefix)
+    # Decoded from control_suffix_token_ids + probe_output_token_ids — the
+    # text actually passed to kvcot.utils.answers.extract_answer, since the
+    # boxed-answer prefix supplies the opening `\boxed{` that the generated
+    # tokens alone do not contain (kvcot.cli.cmd_replay_fixed_trace).
+    probe_extraction_text: str
     normalized_probe_answer: str | None
     probe_extraction_status: ExtractionMethod
+
+    # Why greedy answer decoding actually stopped for this probe
+    # (kvcot.generation.replay.ProbeResult.stop_reason). A fixed-trace probe
+    # must never rely on "max_new_tokens" to have produced a complete boxed
+    # answer — "boxed_answer_complete" (via has_complete_boxed_answer as the
+    # stop_predicate) is the expected normal case; "max_new_tokens" without a
+    # complete box is `probe_cap_hit`.
+    probe_stop_reason: ProbeStopReason
+    probe_cap_hit: bool  # True iff probe_stop_reason == "max_new_tokens"
+
+    # Realized (measured, never configured — §9) retention AT THE SNAPSHOT
+    # this probe branched from, under replay_policy_condition. A recorded
+    # replay_compaction_count_at_cut > 0 is NOT sufficient evidence of actual
+    # compression: at the exact budget boundary R-KV can record a compaction
+    # event that evicts zero tokens (kvcot.generation.replay._sync_layer_
+    # after_call's documented boundary case). actual_compression_at_cut is
+    # the physical-cache-shrank check that event counts alone cannot give.
+    replay_retention_at_cut: RetentionSummary
+    actual_compression_at_cut: bool
+
+    # Cache state AFTER this probe's own greedy answer decoding (not just at
+    # the snapshot it branched from) — needed to detect a further eviction
+    # that happened WHILE writing the answer, which the reasoning-cut
+    # snapshot above cannot show.
+    probe_cache_length_final_per_layer: list[int]
+    probe_actual_eviction_during_answer: bool
 
     # f=1 anchored measurement (this replay policy's own greedy f=1 answer —
     # the metric target every fraction, including f=1 itself, is matched
@@ -265,7 +301,7 @@ class FixedTraceProbeRecord(BaseModel):
 
 
 class RunManifest(BaseModel):
-    schema_version: str = SCHEMA_VERSION
+    schema_version: Literal["1.2.0"] = SCHEMA_VERSION
     command: str
     config_path: str
     config_sha256: str

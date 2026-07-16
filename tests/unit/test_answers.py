@@ -1,4 +1,10 @@
-from kvcot.utils.answers import extract_answer, normalize_numeric_string, answers_match
+from kvcot.utils.answers import (
+    answers_match,
+    answers_match_or_none,
+    extract_answer,
+    has_complete_boxed_answer,
+    normalize_numeric_string,
+)
 
 
 def test_simple_boxed_integer():
@@ -115,3 +121,17 @@ def test_answers_match_requires_both_present():
 def test_normalize_numeric_string_rejects_non_numeric():
     assert normalize_numeric_string("banana") is None
     assert normalize_numeric_string("") is None
+
+
+def test_answers_match_or_none_distinguishes_extraction_failure_from_mismatch():
+    assert answers_match_or_none(None, "5") is None
+    assert answers_match_or_none("5", None) is None
+    assert answers_match_or_none(None, None) is None
+    assert answers_match_or_none("5", "5") is True
+    assert answers_match_or_none("5", "6") is False
+
+
+def test_has_complete_boxed_answer_requires_closed_brace():
+    assert has_complete_boxed_answer("Final answer: \\boxed{42}")
+    assert not has_complete_boxed_answer("Final answer: \\boxed{42")
+    assert not has_complete_boxed_answer("no box here at all")

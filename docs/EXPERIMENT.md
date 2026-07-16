@@ -186,3 +186,31 @@ still.
 behavioral dependence on visible generated tokens under an intervention
 (here, cache-policy substitution over a fixed trace, rather than
 truncation) — not internal faithfulness, not whether reasoning is "real."
+
+**Protocol v2 (2026-07-16).** Protocol v1's first GPU screen (b512, n=10)
+produced `n_eligible = 0` — zero scientific information about the
+hypothesis, not a negative result. Root cause: an empty fixed-trace suffix
+plus the frozen 48-token probe budget meant the f=1 anchor almost never
+reached a `\boxed{...}` (R1-Distill's answer mode is a verbose write-up),
+so extraction fell through to the conservative final-number fallback and
+"anchored" against noise; separately, eligibility gated on a recorded
+compaction *event count*, which can be nonzero with zero actual eviction at
+the exact budget boundary. See `CHANGELOG.md`'s 2026-07-16 entry for the
+full diagnosis and fix (a teacher-forced boxed-answer format prefix,
+`FixedTraceSettings`, and eligibility gated on realized compression). Every
+number reported from a protocol-v1 run (`schema_version` `"1.1.0"`) must be
+treated as uninformative, not as evidence in either direction — do not
+resume a protocol-v1 output directory under protocol v2.
+
+Before spending GPU time on a rerun, run the CPU-only preflight:
+
+```bash
+kvcot inspect-fixed-trace --config configs/early_gap_b512.yaml --trace-condition full
+```
+
+against an already-generated FullKV base file. It reports think-span and
+prompt+think-span length statistics against the configured R-KV budget and
+refuses to proceed if no trace in the manifest is even longer than the
+budget — R-KV cannot compress a sequence shorter than its own budget, so
+this at least rules out repeating the "budget larger than every trace"
+failure mode cheaply, before any replay.

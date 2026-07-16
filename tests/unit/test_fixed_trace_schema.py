@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from kvcot.schemas import (
     FixedTraceProbeRecord,
     ProvenanceState,
+    RetentionSummary,
     SCHEMA_VERSION,
     VersionInfo,
 )
@@ -19,6 +20,16 @@ def _provenance():
 
 def _versions():
     return VersionInfo(python="3.10.0")
+
+
+def _retention(*, ratio: float = 0.6) -> RetentionSummary:
+    return RetentionSummary(
+        fullkv_equivalent_slots=200,
+        physical_cache_slots_per_layer=[int(200 * ratio)] * 2,
+        instantaneous_retention_ratio=ratio,
+        post_compaction_budget_tokens=512,
+        tokens_since_last_compaction=10,
+    )
 
 
 def _valid_kwargs(**overrides) -> dict:
@@ -41,12 +52,19 @@ def _valid_kwargs(**overrides) -> dict:
         think_span_length=100,
         cut_index=50,
         close_marker_token_ids=[151649],
-        control_suffix_token_ids=[],
-        probe_decoding_max_new_tokens=48,
+        control_suffix_token_ids=[123, 456],
+        probe_decoding_max_new_tokens=64,
         probe_output_token_ids=[9, 9],
-        probe_output_text="Final answer: \\boxed{42}",
+        probe_output_text="42}",
+        probe_extraction_text="Final answer: \\boxed{42}",
         normalized_probe_answer="42",
         probe_extraction_status="boxed",
+        probe_stop_reason="boxed_answer_complete",
+        probe_cap_hit=False,
+        replay_retention_at_cut=_retention(),
+        actual_compression_at_cut=True,
+        probe_cache_length_final_per_layer=[130, 130],
+        probe_actual_eviction_during_answer=False,
         normalized_f1_anchor_answer="42",
         matches_f1_anchor_answer=True,
         f1_anchor_matches_source_base_answer=True,
@@ -63,11 +81,16 @@ def _valid_kwargs(**overrides) -> dict:
 
 def test_fixed_trace_probe_record_valid_construction():
     rec = FixedTraceProbeRecord(**_valid_kwargs())
-    assert rec.schema_version == SCHEMA_VERSION == "1.1.0"
+    assert rec.schema_version == SCHEMA_VERSION == "1.2.0"
     assert rec.record_type == "fixed_trace_probe"
     assert rec.anchor_fraction == 1.0
     assert rec.trace_source_condition == "full"
     assert rec.replay_policy_condition == "rkv_b512"
+
+
+def test_fixed_trace_probe_record_rejects_stale_schema_version():
+    with pytest.raises(ValidationError):
+        FixedTraceProbeRecord(**_valid_kwargs(schema_version="1.1.0"))
 
 
 def test_fixed_trace_probe_record_rejects_missing_required_field():

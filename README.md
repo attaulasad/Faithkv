@@ -97,6 +97,19 @@ kill/continue screen (Prefix-Sufficiency Sensitivity / Delta_PSS,
 `CHANGELOG.md`'s 2026-07-16 entry. Same `--limit`/`--problem-index`/`--seed`/
 `--resume`/`--dry-run` support.
 
+**Protocol v2 (2026-07-16):** the first GPU screen under protocol v1 produced
+zero eligible examples — not a negative result, no result at all (root cause
+and fix in `CHANGELOG.md`). Protocol v2 uses a teacher-forced boxed-answer
+format prefix instead of an empty suffix, its own `FixedTraceSettings`
+(separate from the frozen primary `probes.max_new_tokens: 48`), and gates
+eligibility on realized (measured) compression rather than a recorded
+compaction event count. Run the CPU-only `kvcot inspect-fixed-trace`
+preflight against an already-generated FullKV trace before spending any GPU
+time on `replay-fixed-trace` — it stops immediately if no trace in the
+manifest is even longer than the configured budget. Old protocol-v1 output
+directories (`schema_version` `"1.1.0"`) must not be resumed under protocol
+v2 — start a fresh `output_dir`.
+
 **Resume behavior:** re-running the same command with `--resume` skips any
 `record_id` already present in the output JSONL file
 (`kvcot.utils.io.JsonlWriter`/`read_existing_record_ids`) — safe to

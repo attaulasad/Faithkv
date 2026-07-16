@@ -14,6 +14,14 @@ output_dir: results/raw/early_gap_b1024
 limit: 10
 seeds_override: [42]
 
+# Protocol v2 (2026-07-16, CHANGELOG.md) — see early_gap_b512.yaml's comment.
+fixed_trace:
+  probe_max_new_tokens: 64
+  require_boxed_extraction: true
+  min_eligible_examples: 5
+  min_actual_compression_rate: 0.7
+  max_mean_f1_retention_ratio: 0.7
+
 notes: >
   Ten-example, one-seed fixed-trace gap screen. Not a publishable estimate —
   PSS/Delta_PSS at n=10 produces descriptive counts only, no p-value

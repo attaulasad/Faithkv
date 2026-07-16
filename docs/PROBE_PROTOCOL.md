@@ -122,19 +122,34 @@ multi-token batch (docs/REPLAY_DESIGN.md §2).
 
 ## 6. Fixed-trace suffix (secondary, additive diagnostic — `kvcot replay-fixed-trace`)
 
-`src/kvcot/probes/templates.py:FIXED_TRACE_SUFFIX_TEXT` is the empty string
-— it tokenizes to zero tokens (`tokenizer.encode("", add_special_tokens=False)
-== []`) regardless of tokenizer revision, so there is nothing to record here
-the way §5 records `CONTROL_SUFFIX_TEXT`'s token IDs. The closing `</think>`
-marker (§5's `[151649]`) alone supplies the next-token logits needed to
-start greedy answer decoding — `kvcot.generation.replay.branch_and_probe`
-only requires the closing marker and suffix not both be empty, and the
-fixed-trace probe never uses this empty suffix on its own. See
-`kvcot.probes.templates.render_fixed_trace_suffix`'s docstring for why this
-suffix is empty rather than reusing `CONTROL_SUFFIX_TEXT` — the fixed-trace
-design does not want a natural-language "stop and answer" instruction, which
-risks cueing the model to answer directly from the question rather than
-from the reasoning prefix in its (possibly-compressed) cache.
+**Protocol v2 (2026-07-16, CHANGELOG.md).** Protocol v1 had
+`src/kvcot/probes/templates.py:FIXED_TRACE_SUFFIX_TEXT` as the empty string
+(tokenizing to zero tokens) — the closing `</think>` marker (§5's `[151649]`)
+alone supplying the next-token logits to start greedy answer decoding. In
+practice R1-Distill's answer mode almost never reached a `\boxed{...}` (or
+even `Final answer:`) within the frozen 48-token probe budget starting from
+just `</think>`, so extraction fell through to the conservative final-number
+fallback tier and "anchored" against an incidental mid-sentence number —
+contaminating every fixed-trace match/PSS value from that protocol.
+
+`FIXED_TRACE_SUFFIX_TEXT` is now `"\n\nFinal answer: \\boxed{"` — a
+teacher-forced FORMAT prefix, tokenized like any other fixed string
+(`tokenizer.encode(FIXED_TRACE_SUFFIX_TEXT, add_special_tokens=False)`,
+non-empty, identical across conditions since it is fed as plain tokens
+exactly like §5's `CONTROL_SUFFIX_TEXT`) and teacher-forced after the
+closing `</think>` marker, one token at a time. Reconstructed answer text is
+this prefix's decoded text plus the decoded generated tokens
+(`kvcot.cli.cmd_replay_fixed_trace`'s `probe_extraction_text`) — the opening
+`\boxed{` lives in the prefix, not in anything the model generates. This is
+deliberately still NOT a natural-language "stop and answer" instruction like
+`CONTROL_SUFFIX_TEXT` — it carries no content that could cue the model to
+recompute the answer directly from the question rather than continue from
+the (possibly-compressed) reasoning prefix actually in its cache, which
+would confound the two conditions' cache states with two different
+answer-elicitation strategies. Fixed-trace probe decoding also now stops as
+soon as `kvcot.utils.answers.has_complete_boxed_answer` is true of the
+reconstructed text (`branch_and_probe`'s `stop_predicate`), rather than
+always running to the token cap.
 
 ## 7. What was deferred
 
