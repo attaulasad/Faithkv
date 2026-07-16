@@ -174,7 +174,7 @@ and sign meaning as Delta_EAS. PSS/Delta_PSS is a **different metric**;
 never pool or directly compare it with EAS/Delta_EAS values
 (`kvcot.analysis.fixed_trace` module docstring).
 
-**Sample size.** `configs/early_gap_b512.yaml` runs n=10, one seed —
+**Sample size.** `configs/early_gap_v2_b128.yaml` runs n=10, one seed —
 descriptive counts only (`n_positive`/`n_negative`/`n_ties`/`mean_delta_pss`),
 no p-value or confidence interval. This is a kill/continue screen, not a
 claim of any distributional result — the same discipline §8 above applies
@@ -205,12 +205,32 @@ resume a protocol-v1 output directory under protocol v2.
 Before spending GPU time on a rerun, run the CPU-only preflight:
 
 ```bash
-kvcot inspect-fixed-trace --config configs/early_gap_b512.yaml --trace-condition full
+kvcot inspect-fixed-trace --config configs/early_gap_v2_b128.yaml --trace-condition full
 ```
 
 against an already-generated FullKV base file. It reports think-span and
 prompt+think-span length statistics against the configured R-KV budget and
-refuses to proceed if no trace in the manifest is even longer than the
-budget — R-KV cannot compress a sequence shorter than its own budget, so
-this at least rules out repeating the "budget larger than every trace"
-failure mode cheaply, before any replay.
+refuses to proceed if (1) no trace in the manifest is even longer than the
+budget, (2) the fraction of traces that could even possibly exceed it is
+already below `FixedTraceSettings.min_actual_compression_rate` (an upper
+bound on achievable compression), or (3) even best-case compaction
+(`budget / length`, a lower bound on achievable retention) couldn't clear
+`max_mean_f1_retention_ratio` — all three rule out the case where the
+configured screen is mathematically guaranteed to fail, before any replay.
+
+**Follow-up hardening (2026-07-16, external review).** The b512 GPU data
+already collected showed exactly this failure mode: observed prompt+think
+lengths never exceed budget 512/1024 at all
+(`mean_final_retention_ratio: 0.98`), and exceed 256 on at most ~6/10
+traces — below the required compression rate regardless of retention.
+`configs/early_gap_v2_b128.yaml` is a new stage identity chosen because
+every trace in that sample exceeds 128; thresholds were not weakened to
+force an existing budget to pass. Also fixed: `FixedTraceEligibility`'s
+answer-time-eviction check previously scanned only the 7 scored fractions,
+missing an eviction that happened only during the f=1 anchor's own answer —
+every fraction is compared against that anchor, so this was a real
+eligibility gap, now closed (`no_rkv_eviction_during_answer_probes`).
+`run_fixed_trace_analysis` also now validates every input record's schema
+and (config, model, upstream-commit) identity before analyzing anything, so
+a stale protocol-v1 directory can no longer be silently read as if it were
+current.

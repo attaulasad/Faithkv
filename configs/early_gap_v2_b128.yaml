@@ -1,0 +1,53 @@
+# Fixed-trace prefix-sufficiency screen, protocol v2, candidate budget=128 —
+# secondary, additive diagnostic (kvcot.analysis.fixed_trace), NOT a Stage
+# 0-2 config and NOT part of the frozen stage funnel (docs/EXPERIMENT.md
+# §4). Uses `kvcot replay-fixed-trace`/`analyze-fixed-trace`, never
+# `replay-probe`.
+#
+# Why a new budget, not a rerun of early_gap_b512.yaml (2026-07-16 review):
+# the b512/b1024 raw GPU data already collected (logs/b512_accuracy_
+# compaction.log) shows prompt+think lengths of ~220-343 tokens against
+# budget=512/1024 — neither budget is ever exceeded, so R-KV cannot compact
+# at all (mean_final_retention_ratio observed: 0.98). budget=256 fares only
+# slightly better (exceeded by at most ~6/10 traces in that sample) — still
+# below FixedTraceSettings.min_actual_compression_rate (0.70), and even a
+# maximally-aggressive compaction at budget=256 cannot bring mean retention
+# under the 0.70 ceiling on traces this short. budget=128 is exceeded by
+# EVERY trace in that sample (all >= 220 tokens), giving R-KV room to
+# actually compress and a real chance of clearing both thresholds. This is a
+# NEW stage identity (stage_name, output_dir), never a resumption of an
+# early_gap_b*.yaml output directory — those may contain protocol-v1
+# (schema_version "1.1.0") data that must not be silently reinterpreted
+# under protocol v2 (kvcot.analysis.fixed_trace's schema/identity
+# validation rejects it outright if it ever were).
+#
+# Per the frozen validation order (docs/GPU_VALIDATION_PLAN.md): run
+# `kvcot inspect-fixed-trace --config configs/early_gap_v2_b128.yaml` against
+# an already-generated FullKV base file FIRST, then the one-example gate,
+# before running the full n=10 screen below.
+stage_name: early_gap_v2_b128
+lock_config_path: configs/lock.yaml
+dataset_manifest: data/manifests/gsm8k_calibration_50.jsonl
+conditions: [full, rkv_b128]
+rkv_budgets: [128]
+output_dir: results/raw/protocol_v2/early_gap_b128
+limit: 10
+seeds_override: [42]
+
+fixed_trace:
+  probe_max_new_tokens: 64
+  require_boxed_extraction: true
+  min_eligible_examples: 5
+  min_actual_compression_rate: 0.7
+  max_mean_f1_retention_ratio: 0.7
+
+notes: >
+  Ten-example, one-seed fixed-trace gap screen, protocol v2. Not a
+  publishable estimate — PSS/Delta_PSS at n=10 produces descriptive counts
+  only, no p-value (kvcot.analysis.fixed_trace). FullKV supplies the
+  canonical trace; the same trace is replayed under FullKV and R-KV via
+  `kvcot replay-fixed-trace`. If budget=128 still fails to clear
+  min_actual_compression_rate/max_mean_f1_retention_ratio on the real GPU
+  data, do not weaken these thresholds — move to a longer-trace manifest
+  (MATH-500) instead, once MATH answer-equivalence is implemented
+  (CHANGELOG.md's "not yet evaluation-ready" note).

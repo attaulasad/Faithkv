@@ -115,6 +115,7 @@ from typing import TYPE_CHECKING
 
 from kvcot.config import PROBE_FRACTIONS_ALL, PROBE_FRACTIONS_SCORED
 from kvcot.probes.early_answering import CLAIM_BOUNDARY_NOTICE
+from kvcot.schemas import SCHEMA_VERSION, BaseRunRecord, FixedTraceProbeRecord
 from kvcot.utils.io import read_jsonl, write_json
 
 if TYPE_CHECKING:
@@ -222,7 +223,14 @@ class FixedTraceEligibility:
     full_all_scored_extractable: bool
     rkv_all_scored_extractable: bool
     rkv_actual_compression_at_f1: bool
-    no_rkv_eviction_during_scored_probes: bool
+    # Covers PROBE_FRACTIONS_SCORED *and* the f=1 anchor itself — every
+    # fraction's match is scored against the f=1 anchor's own answer, so an
+    # eviction that happened while the anchor was writing ITS OWN answer is
+    # exactly as disqualifying as one during a scored fraction's answer (an
+    # untrustworthy anchor contaminates every comparison against it, not
+    # just the scored-fraction side). A prior version of this check only
+    # scanned the 7 scored fractions and missed an f=1-only eviction.
+    no_rkv_eviction_during_answer_probes: bool
     canonical_trace_base_correct: bool
     canonical_trace_did_not_hit_cap: bool
     canonical_trace_think_parsed: bool
@@ -237,7 +245,7 @@ class FixedTraceEligibility:
             and self.full_all_scored_extractable
             and self.rkv_all_scored_extractable
             and self.rkv_actual_compression_at_f1
-            and self.no_rkv_eviction_during_scored_probes
+            and self.no_rkv_eviction_during_answer_probes
             and self.canonical_trace_base_correct
             and self.canonical_trace_did_not_hit_cap
             and self.canonical_trace_think_parsed
@@ -260,7 +268,7 @@ class FixedTraceEligibility:
             reasons.append("rkv_scored_probe_extraction_failed")
         if not self.rkv_actual_compression_at_f1:
             reasons.append("rkv_no_actual_compression_at_f1")
-        if not self.no_rkv_eviction_during_scored_probes:
+        if not self.no_rkv_eviction_during_answer_probes:
             reasons.append("rkv_evicted_during_answer_probe")
         if not self.canonical_trace_base_correct:
             reasons.append("canonical_trace_base_incorrect")
@@ -367,9 +375,13 @@ def build_fixed_trace_pairs(
             if retention is not None:
                 rkv_f1_retention = retention.get("instantaneous_retention_ratio")
 
-        no_eviction_during_scored = all(
+        # §Codex review 2026-07-16: must cover the f=1 anchor itself, not
+        # only the 7 scored fractions — every fraction's match is scored
+        # against the anchor's own answer, so an eviction while the anchor
+        # was writing that answer is exactly as disqualifying.
+        no_eviction_during_answer = all(
             rkv_group.get(f, {}).get("probe_actual_eviction_during_answer", False) is not True
-            for f in scored_fractions
+            for f in (*scored_fractions, 1.0)
         )
 
         elig = FixedTraceEligibility(
@@ -380,7 +392,7 @@ def build_fixed_trace_pairs(
             full_all_scored_extractable=_all_scored_extractable(full_matches, scored_fractions),
             rkv_all_scored_extractable=_all_scored_extractable(rkv_matches, scored_fractions),
             rkv_actual_compression_at_f1=bool(rkv_f1 and rkv_f1.get("actual_compression_at_cut") is True),
-            no_rkv_eviction_during_scored_probes=no_eviction_during_scored,
+            no_rkv_eviction_during_answer_probes=no_eviction_during_answer,
             canonical_trace_base_correct=base.get("is_correct") is True,
             canonical_trace_did_not_hit_cap=not bool(base.get("cap_hit", True)),
             canonical_trace_think_parsed=think_parsed_ok(base["think_span"]["think_parse_status"]),
@@ -590,6 +602,74 @@ def build_fixed_trace_decision(
     }
 
 
+def _record_identity(row: dict) -> tuple:
+    """(config_sha256, upstream_rkv_commit) — the two fields every record in
+    one coherent run must share, regardless of record type. Not model/
+    tokenizer revision (those live only on `BaseRunRecord`, not on probe
+    records) — see `_validate_base_records`/`_validate_fixed_trace_probe_records`
+    for the base-record-only model/tokenizer check."""
+    provenance = row.get("provenance") or {}
+    return (row.get("config_sha256"), provenance.get("upstream_rkv_commit"))
+
+
+def _validate_base_records(rows: list[dict], path: Path) -> None:
+    """Reject anything that isn't a schema-valid, current-protocol
+    `BaseRunRecord` — in particular, a stale protocol-v1 (`schema_version
+    "1.1.0"`) file fails the `Literal["1.2.0"]` check immediately, rather
+    than being silently read as plain dicts and analyzed as if it were
+    current data. Also requires every row to share one (config_sha256,
+    upstream_rkv_commit, model_revision, tokenizer_revision) identity —
+    a file mixing two runs (different config/model/upstream pin) is not a
+    single coherent trace source."""
+    identities: set[tuple] = set()
+    for row in rows:
+        try:
+            BaseRunRecord.model_validate(row)
+        except Exception as e:
+            raise ValueError(
+                f"{path}: base record {row.get('record_id')!r} failed schema validation against "
+                f"BaseRunRecord (schema_version={row.get('schema_version')!r}, expected "
+                f"{SCHEMA_VERSION!r}): {e} -- refusing to analyze. This usually means {path} was "
+                "produced under an old protocol version (e.g. protocol v1, schema 1.1.0) — "
+                "regenerate it under the current protocol into a fresh output_dir rather than "
+                "reusing old output."
+            ) from e
+        identities.add((*_record_identity(row), row.get("model_revision"), row.get("tokenizer_revision")))
+    if len(identities) > 1:
+        raise ValueError(
+            f"{path}: base records were produced under {len(identities)} different "
+            f"(config_sha256, upstream_rkv_commit, model_revision, tokenizer_revision) identities "
+            f"{sorted(identities)} -- refusing to analyze a file that mixes more than one run."
+        )
+
+
+def _validate_fixed_trace_probe_records(records: FixedTraceRecords, path: Path) -> None:
+    """Same discipline as `_validate_base_records`, for fixed-trace probe
+    files: schema-valid `FixedTraceProbeRecord` (rejects stale
+    `schema_version`) plus one shared (config_sha256, upstream_rkv_commit)
+    identity across every row."""
+    identities: set[tuple] = set()
+    for group in records.probes_by_base.values():
+        for row in group.values():
+            try:
+                FixedTraceProbeRecord.model_validate(row)
+            except Exception as e:
+                raise ValueError(
+                    f"{path}: fixed-trace probe record {row.get('record_id')!r} failed schema "
+                    f"validation against FixedTraceProbeRecord (schema_version="
+                    f"{row.get('schema_version')!r}, expected {SCHEMA_VERSION!r}): {e} -- refusing "
+                    f"to analyze. Regenerate {path} under the current protocol into a fresh "
+                    "output_dir rather than reusing old output."
+                ) from e
+            identities.add(_record_identity(row))
+    if len(identities) > 1:
+        raise ValueError(
+            f"{path}: fixed-trace probe records were produced under {len(identities)} different "
+            f"(config_sha256, upstream_rkv_commit) identities {sorted(identities)} -- refusing to "
+            "analyze a file that mixes more than one run."
+        )
+
+
 def run_fixed_trace_analysis(
     output_dir: str | Path,
     trace_condition: str,
@@ -602,6 +682,14 @@ def run_fixed_trace_analysis(
     `results/decisions/{stage_name}_fixed_trace.json`. Keyed by `stage_name`
     (not a fixed filename) so the b256/b512/b1024 screens
     (configs/early_gap_b*.yaml) never overwrite each other's decision file.
+
+    Every input is validated against its Pydantic schema and checked for a
+    single coherent (config, model, upstream-commit) identity BEFORE any
+    pairing/scoring happens (`_validate_base_records`/
+    `_validate_fixed_trace_probe_records`) — reading JSONL as plain dicts
+    without this check would silently accept a stale protocol-v1 directory
+    or a directory mixing two different runs as if it were valid current
+    input.
     """
     output_dir = Path(output_dir)
     base_path = output_dir / f"{trace_condition}.jsonl"
@@ -611,6 +699,9 @@ def run_fixed_trace_analysis(
     base_records = list(read_jsonl(base_path))
     full_probes = load_fixed_trace_records(full_probes_path, trace_condition)
     rkv_probes = load_fixed_trace_records(rkv_probes_path, replay_condition)
+    _validate_base_records(base_records, base_path)
+    _validate_fixed_trace_probe_records(full_probes, full_probes_path)
+    _validate_fixed_trace_probe_records(rkv_probes, rkv_probes_path)
     _assert_shared_trace_source(full_probes, rkv_probes, trace_condition)
 
     pairs = build_fixed_trace_pairs(base_records, full_probes, rkv_probes)

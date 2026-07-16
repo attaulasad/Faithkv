@@ -1307,18 +1307,37 @@ _THINK_PARSE_OK_STATUSES = ("ok", "generation_prompt_preopened_ok")
 
 
 def cmd_inspect_fixed_trace(args: argparse.Namespace) -> int:
-    """CPU-only trace-length preflight (§ Step 16) for the fixed-trace
-    screen — run BEFORE spending any GPU time on `replay-fixed-trace`.
-    Reads one condition's already-generated base file (normally
-    `--trace-condition full`, the canonical trace source) and reports think-
-    span/prompt+think-span length statistics against the stage's configured
-    R-KV budget. If no trace in the file is even longer than the budget,
-    R-KV can never compress anything during replay (`rkv_no_replay_compaction`
-    for every example, guaranteed) — this command stops immediately in that
-    case rather than letting a GPU run discover it. This cannot by itself
-    prove compression will happen (a longer-than-budget trace can still
-    fail to compact if e.g. its think span is short relative to
-    divide_length), only rule out the "definitely can't" case cheaply.
+    """CPU-only trace-length preflight (§ Step 16; strengthened 2026-07-16
+    per external review) for the fixed-trace screen — run BEFORE spending
+    any GPU time on `replay-fixed-trace`. Reads one condition's already-
+    generated base file (normally `--trace-condition full`, the canonical
+    trace source) and reports think-span/prompt+think-span length
+    statistics against the stage's configured R-KV budget.
+
+    Three independent, purely-arithmetic reasons to stop before any GPU
+    spend (none of these can *prove* compression will happen — a
+    longer-than-budget trace can still fail to compact if e.g. its think
+    span is short relative to divide_length — they only rule out cases
+    where the configured screen definitely cannot pass):
+
+    1. No trace is even longer than the budget — R-KV cannot compress a
+       sequence that never exceeds its own budget, full stop.
+    2. `fraction_of_traces_longer_than_budget` is an UPPER BOUND on the
+       achievable `actual_compression_rate` (only a longer-than-budget
+       trace can show `actual_compression_at_cut=True`) — if that upper
+       bound is already below `FixedTraceSettings.min_actual_compression_
+       rate`, the eligibility gate is mathematically unreachable at this
+       budget, regardless of how the real GPU run behaves.
+    3. `mean_optimistic_retention` is a LOWER BOUND on the achievable mean
+       realized retention (`budget / length` per trace if `length >
+       budget` else `1.0` — the most aggressive possible compaction; real
+       retention sawtooths above this between compaction events, per
+       docs/UPSTREAM_AUDIT.md H4). If even this best case already exceeds
+       `FixedTraceSettings.max_mean_f1_retention_ratio`, no real run at
+       this budget can clear the retention ceiling either.
+
+    Checks 2 and 3 only run when the stage config declares `fixed_trace:`
+    settings (they need its thresholds); check 1 always runs.
     """
     import statistics
 
@@ -1367,6 +1386,15 @@ def cmd_inspect_fixed_trace(args: argparse.Namespace) -> int:
         if (budget is not None and prompt_plus_think_lengths)
         else None
     )
+    # Lower bound on achievable mean retention: best case is the cache
+    # compacted all the way down to the budget by the end of the think span;
+    # a trace that never exceeds the budget cannot be compressed below 1.0
+    # no matter what.
+    mean_optimistic_retention = (
+        sum((budget / L) if L > budget else 1.0 for L in prompt_plus_think_lengths) / len(prompt_plus_think_lengths)
+        if (budget is not None and prompt_plus_think_lengths)
+        else None
+    )
 
     def _fmt(fn, values):
         return fn(values) if values else None
@@ -1387,16 +1415,40 @@ def cmd_inspect_fixed_trace(args: argparse.Namespace) -> int:
     )
     print(f"  configured R-KV budget: {budget}")
     print(f"  fraction of traces longer than budget: {fraction_longer}")
+    print(f"  best-case (optimistic) mean retention achievable at this budget: {mean_optimistic_retention}")
 
     if budget is not None and prompt_plus_think_lengths and n_longer_than_budget == 0:
         print(
             "inspect-fixed-trace: STOP — no trace in this file is longer than the configured "
             f"budget ({budget}); R-KV compression can never fire during replay at this budget. "
-            "Choose a smaller budget or a longer-trace manifest before running replay-fixed-trace. "
-            "(This preflight cannot prove compression will happen — only rule out the case where "
-            "it definitely cannot.)"
+            "Choose a smaller budget or a longer-trace manifest before running replay-fixed-trace."
         )
         return 1
+
+    if stage.fixed_trace is not None and fraction_longer is not None:
+        if fraction_longer < stage.fixed_trace.min_actual_compression_rate:
+            print(
+                "inspect-fixed-trace: STOP — fraction of traces longer than the budget "
+                f"({fraction_longer:.3f}) is an upper bound on the achievable actual_compression_rate, "
+                f"and it is already below min_actual_compression_rate "
+                f"({stage.fixed_trace.min_actual_compression_rate}). The eligibility gate is "
+                "mathematically unreachable at this budget on this manifest — choose a smaller "
+                "budget or a longer-trace manifest, do not weaken the threshold."
+            )
+            return 1
+        if (
+            mean_optimistic_retention is not None
+            and mean_optimistic_retention > stage.fixed_trace.max_mean_f1_retention_ratio
+        ):
+            print(
+                "inspect-fixed-trace: STOP — even the best-case (most aggressive) achievable mean "
+                f"retention ({mean_optimistic_retention:.3f}) already exceeds "
+                f"max_mean_f1_retention_ratio ({stage.fixed_trace.max_mean_f1_retention_ratio}); real "
+                "retention only sawtooths higher than this optimistic floor between compaction "
+                "events. No real run at this budget can clear the retention ceiling either — choose "
+                "a smaller budget or a longer-trace manifest, do not weaken the threshold."
+            )
+            return 1
     return 0
 
 

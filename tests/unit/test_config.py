@@ -154,3 +154,21 @@ def test_primary_lock_probes_max_new_tokens_is_unchanged():
     # its own decoding budget lives in FixedTraceSettings.probe_max_new_tokens.
     lock = load_lock_config(LOCK_PATH)
     assert lock.probes.max_new_tokens == 48
+
+
+def test_early_gap_v2_b128_config_has_own_stage_identity():
+    # External review 2026-07-16: b512/b1024 never exceed the budget on the
+    # real GPU data collected (logs/b512_accuracy_compaction.log), and b256
+    # is exceeded on at most ~6/10 traces -- structurally below
+    # min_actual_compression_rate. b128 is a fresh stage_name/output_dir
+    # (never a resumption of an early_gap_b*.yaml directory, which may hold
+    # protocol-v1 data) chosen because every observed trace in that sample
+    # exceeds it.
+    stage, _lock = load_stage_config("configs/early_gap_v2_b128.yaml")
+    assert stage.stage_name == "early_gap_v2_b128"
+    assert stage.output_dir == "results/raw/protocol_v2/early_gap_b128"
+    assert stage.rkv_budgets == [128]
+    assert stage.conditions == ["full", "rkv_b128"]
+    assert stage.fixed_trace is not None
+    assert stage.fixed_trace.min_actual_compression_rate == 0.7
+    assert stage.fixed_trace.max_mean_f1_retention_ratio == 0.7

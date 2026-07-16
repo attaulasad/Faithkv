@@ -159,27 +159,47 @@ unless synced.
 
 Not a Stage 0-2 step and not gated behind any of the stages above — this can
 run any time after `test_replay_gpu.py` passes (§5), since it depends on the
-same replay engine. Requires FullKV base generation for the screen's
-manifest first:
+same replay engine. **Use `configs/early_gap_v2_b128.yaml` first** (not
+`early_gap_b512.yaml`) — see "Which budget to run" below for why. Requires
+FullKV base generation for the screen's manifest first:
 
 ```bash
-kvcot generate --config configs/early_gap_b512.yaml --condition full
-kvcot inspect-fixed-trace --config configs/early_gap_b512.yaml --trace-condition full  # CPU preflight; stops if no trace exceeds the budget
-kvcot replay-fixed-trace --config configs/early_gap_b512.yaml --trace-condition full --replay-condition full
-kvcot replay-fixed-trace --config configs/early_gap_b512.yaml --trace-condition full --replay-condition rkv_b512
-kvcot analyze-fixed-trace --config configs/early_gap_b512.yaml --trace-condition full --replay-condition rkv_b512
+kvcot generate --config configs/early_gap_v2_b128.yaml --condition full
+kvcot inspect-fixed-trace --config configs/early_gap_v2_b128.yaml --trace-condition full  # CPU preflight; stops on any of 3 arithmetic-only failure conditions, see below
+kvcot replay-fixed-trace --config configs/early_gap_v2_b128.yaml --trace-condition full --replay-condition full
+kvcot replay-fixed-trace --config configs/early_gap_v2_b128.yaml --trace-condition full --replay-condition rkv_b128
+kvcot analyze-fixed-trace --config configs/early_gap_v2_b128.yaml --trace-condition full --replay-condition rkv_b128
 ```
 
-Reads `results/decisions/early_gap_b512_fixed_trace.json` — descriptive
+Reads `results/decisions/early_gap_v2_b128_fixed_trace.json` — descriptive
 counts only (n=10, one seed), no p-value. See `docs/EXPERIMENT.md` §11 and
-`CHANGELOG.md`'s 2026-07-16 entry for what this measures and why it is
-additive to, not a substitute for, Stage 0-2 above. `early_gap_b256.yaml`/
-`early_gap_b1024.yaml` are budget-escalation fallbacks (same commands,
-substituting the condition/config names). **Protocol v2 (2026-07-16):** any
-`results/raw/early_gap_b*` directory generated before this date is protocol
-v1 (`schema_version` `"1.1.0"`, empty fixed-trace suffix, event-count
-eligibility) and produced zero eligible examples — do not resume it; start
-a fresh `output_dir` (or delete/rename the old one) before rerunning.
+`CHANGELOG.md`'s 2026-07-16 entries for what this measures and why it is
+additive to, not a substitute for, Stage 0-2 above.
+
+**Protocol v2, do not resume protocol-v1 output.** Any `results/raw/
+early_gap_b*` directory generated before 2026-07-16 is protocol v1
+(`schema_version` `"1.1.0"`, empty fixed-trace suffix, event-count
+eligibility) and produced zero eligible examples — `kvcot analyze-fixed-trace`
+now refuses to read it at all (schema/identity validation,
+`kvcot.analysis.fixed_trace._validate_base_records`). Start a fresh
+`output_dir` for any rerun; never point a v2 config at an old v1 directory.
+The four stale protocol-v1 decision JSONs from the first GPU screen are kept,
+for provenance only, under `results/decisions/archive/protocol_v1_2026-07-16/`
+— do not read them as evidence for or against G1.
+
+**Which budget to run, and why not b512/b256/b1024.** The real GPU data
+already collected under b512 (`logs/b512_accuracy_compaction.log`) shows
+prompt+think lengths that never exceed budget 512 or 1024 at all
+(`mean_final_retention_ratio: 0.98`), and exceed budget 256 on at most
+~6/10 traces — below `min_actual_compression_rate` (0.70) even before
+accounting for how much retention itself would need to drop. `early_gap_b256
+.yaml`/`early_gap_b1024.yaml` remain in the repo as historical artifacts of
+that (now-superseded) escalation plan; do not run them expecting a different
+outcome without first re-checking their trace-length assumptions with
+`inspect-fixed-trace`. `early_gap_v2_b128.yaml` is the current starting
+point. If it also fails `inspect-fixed-trace`'s checks on the real data, the
+next step is a longer-trace manifest (MATH-500), not a smaller GSM8K budget
+and not weaker thresholds.
 
 ### One-example gate before a full rerun
 
@@ -194,7 +214,11 @@ running the full n=10 screen:
 - Neither f=1 probe hit its token cap (`probe_cap_hit` is `False`).
 - R-KV shows `actual_compression_at_cut: true` at f=1 with
   `instantaneous_retention_ratio < 1.0`.
-- `probe_actual_eviction_during_answer` is `False` for R-KV's scored probes.
+- `probe_actual_eviction_during_answer` is `False` for R-KV's scored probes
+  **and for the f=1 anchor itself** — an eviction while the anchor was
+  writing its own answer is exactly as disqualifying, since every fraction
+  is compared against that anchor (`no_rkv_eviction_during_answer_probes`,
+  `kvcot.analysis.fixed_trace`).
 - `git status` shows a clean tree (`git_dirty: false` in the record's own
   provenance) before the run started.
 

@@ -18,6 +18,8 @@ import pytest
 
 from kvcot.analysis.fixed_trace import (
     _assert_shared_trace_source,
+    _validate_base_records,
+    _validate_fixed_trace_probe_records,
     build_fixed_trace_decision,
     build_fixed_trace_pairs,
     build_screen_validity,
@@ -26,8 +28,10 @@ from kvcot.analysis.fixed_trace import (
     fixed_trace_curve_by_fraction,
     load_fixed_trace_records,
     match_rate_delta_rkv_minus_full,
+    run_fixed_trace_analysis,
 )
 from kvcot.config import FixedTraceSettings, PROBE_FRACTIONS_ALL, PROBE_FRACTIONS_SCORED
+from kvcot.schemas import BaseRunRecord, FixedTraceProbeRecord
 from kvcot.utils.io import JsonlWriter, read_jsonl
 
 
@@ -369,6 +373,48 @@ def test_answer_time_eviction_makes_pair_ineligible(tmp_path):
     assert pairs[0].delta_pss is None
 
 
+def test_f1_only_answer_time_eviction_makes_pair_ineligible(tmp_path):
+    # Regression for a real gap found in external review (2026-07-16): the
+    # eviction check previously only scanned PROBE_FRACTIONS_SCORED (7
+    # fractions), never the f=1 anchor itself -- so a synthetic case where
+    # ONLY the R-KV f=1 answer evicted cache tokens was scored eligible with
+    # zero failure reasons. Every scored fraction is compared against the
+    # f=1 anchor's own answer, so an eviction while the anchor was writing
+    # ITS OWN answer must be exactly as disqualifying as one on a scored
+    # fraction -- the anchor itself becomes untrustworthy.
+    base = _base_record(0, 42, is_correct=True)
+    full_recs = [
+        _fixed_probe_record(base["record_id"], f, matches_anchor=True)
+        for f in PROBE_FRACTIONS_ALL
+    ]
+    rkv_recs = [
+        _fixed_probe_record(
+            base["record_id"], f, matches_anchor=True,
+            # Every scored fraction is clean -- eviction happens ONLY on f=1.
+            probe_actual_eviction_during_answer=(f == 1.0),
+        )
+        for f in PROBE_FRACTIONS_ALL
+    ]
+    _write(tmp_path / "full.jsonl", [base])
+    _write(tmp_path / "full_on_full_fixed_trace_probes.jsonl", full_recs)
+    _write(tmp_path / "rkv_b512_on_full_fixed_trace_probes.jsonl", rkv_recs)
+
+    base_records = [base]
+    full_probes = load_fixed_trace_records(tmp_path / "full_on_full_fixed_trace_probes.jsonl", "full")
+    rkv_probes = load_fixed_trace_records(tmp_path / "rkv_b512_on_full_fixed_trace_probes.jsonl", "rkv_b512")
+
+    pairs = build_fixed_trace_pairs(base_records, full_probes, rkv_probes)
+    assert len(pairs) == 1
+    eligible_with_f1_only_eviction = pairs[0].eligibility.eligible
+    failure_reasons = pairs[0].eligibility.failure_reasons
+    assert eligible_with_f1_only_eviction is False, (
+        "an f=1-only answer-time eviction must make the pair ineligible -- the anchor itself is "
+        "untrustworthy even though every SCORED fraction's own probe was clean"
+    )
+    assert "rkv_evicted_during_answer_probe" in failure_reasons
+    assert pairs[0].delta_pss is None
+
+
 def test_fully_eligible_pair_gets_a_defined_delta_pss(tmp_path):
     full_matches = {f: True for f in PROBE_FRACTIONS_ALL}
     rkv_matches = {f: True for f in PROBE_FRACTIONS_ALL}
@@ -553,3 +599,159 @@ def test_decision_never_reports_positive_or_negative_characterization(tmp_path):
     pairs = build_fixed_trace_pairs(base_records, full_probes, rkv_probes)
     decision = build_fixed_trace_decision(len(pairs), pairs, full_curve={}, rkv_curve={}, settings=_SETTINGS)
     assert decision["hypothesis_status"] in ("not_tested", "screened")
+
+
+# --- Schema/identity validation at analysis load time (§ external review 2026-07-16) ---
+
+def _valid_base_run_record(**overrides) -> dict:
+    from kvcot.schemas import DatasetProvenance, MethodConfig, ProvenanceState, ThinkSpanInfo, VersionInfo
+
+    defaults = dict(
+        record_id="base-full-gsm8k_calibration_50-0-seed42",
+        config_path="configs/early_gap_v2_b128.yaml",
+        config_sha256="a" * 64,
+        provenance=ProvenanceState(upstream_rkv_commit="45eaa7d69d20b7388321f077020a610d9afb65bd", git_commit="deadbeef", git_dirty=False),
+        versions=VersionInfo(python="3.10.0"),
+        model_name="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        model_revision="ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562",
+        tokenizer_name="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        tokenizer_revision="ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562",
+        dataset=DatasetProvenance(dataset_name="gsm8k", source_row_index=0, question_hash="b" * 64, normalized_gold="42"),
+        condition="full",
+        method_config=MethodConfig(method="fullkv"),
+        global_seed=42,
+        derived_seed=123,
+        prompt_text="hello",
+        prompt_token_ids=[1, 2, 3],
+        generated_token_ids=[4, 5, 6],
+        decoded_output="Final answer: \boxed{42}",
+        think_span=ThinkSpanInfo(think_start_index=0, think_end_index=3, think_parse_status="generation_prompt_preopened_ok", generation_prompt_preopened_think=True),
+        extracted_answer="42",
+        extraction_method="boxed",
+        is_correct=True,
+        cap_hit=False,
+        wall_time_seconds=1.0,
+        generated_token_count=3,
+        compaction_count=0,
+        compaction_event_steps=[],
+        cache_length_final_per_layer=[3, 3],
+    )
+    defaults.update(overrides)
+    return BaseRunRecord(**defaults).model_dump(mode="json")
+
+
+def _valid_fixed_trace_probe_record(**overrides) -> dict:
+    from kvcot.schemas import ProvenanceState, RetentionSummary, VersionInfo
+
+    defaults = dict(
+        record_id="fixed-probe-rkv_b128-on-full-base-full-gsm8k_calibration_50-0-seed42-f1.0",
+        parent_record_id="base-full-gsm8k_calibration_50-0-seed42",
+        config_path="configs/early_gap_v2_b128.yaml",
+        config_sha256="a" * 64,
+        provenance=ProvenanceState(upstream_rkv_commit="45eaa7d69d20b7388321f077020a610d9afb65bd", git_commit="deadbeef", git_dirty=False),
+        versions=VersionInfo(python="3.10.0"),
+        base_record_id="base-full-gsm8k_calibration_50-0-seed42",
+        trace_source_condition="full",
+        replay_policy_condition="rkv_b128",
+        source_row_index=0,
+        global_seed=42,
+        normalized_gold="42",
+        source_base_answer="42",
+        source_base_is_correct=True,
+        fraction=1.0,
+        think_span_length=100,
+        cut_index=100,
+        close_marker_token_ids=[151649],
+        control_suffix_token_ids=[123, 456],
+        probe_decoding_max_new_tokens=64,
+        probe_output_token_ids=[9, 9],
+        probe_output_text="42}",
+        probe_extraction_text="Final answer: \boxed{42}",
+        normalized_probe_answer="42",
+        probe_extraction_status="boxed",
+        probe_stop_reason="boxed_answer_complete",
+        probe_cap_hit=False,
+        replay_retention_at_cut=RetentionSummary(
+            fullkv_equivalent_slots=200, physical_cache_slots_per_layer=[120, 120],
+            instantaneous_retention_ratio=0.6, post_compaction_budget_tokens=128,
+            tokens_since_last_compaction=5,
+        ),
+        actual_compression_at_cut=True,
+        probe_cache_length_final_per_layer=[125, 125],
+        probe_actual_eviction_during_answer=False,
+        normalized_f1_anchor_answer="42",
+        matches_f1_anchor_answer=True,
+        f1_anchor_matches_source_base_answer=True,
+        f1_anchor_is_correct=True,
+        replay_compaction_count_at_cut=2,
+        replay_compaction_event_steps_at_cut=[64, 128],
+        snapshot_cache_hash="c" * 64,
+        snapshot_provenance_hash="d" * 64,
+        snapshot_state_hash="e" * 64,
+    )
+    defaults.update(overrides)
+    return FixedTraceProbeRecord(**defaults).model_dump(mode="json")
+
+
+def test_validate_base_records_accepts_schema_valid_input(tmp_path):
+    _validate_base_records([_valid_base_run_record()], tmp_path / "full.jsonl")  # must not raise
+
+
+def test_validate_base_records_rejects_stale_schema_version_dict(tmp_path):
+    # A raw dict shaped like a protocol-v1 (schema 1.1.0) record -- missing
+    # the protocol-v2-only fields entirely, and carrying the old version
+    # string. model_validate must reject it, not silently accept it as a
+    # plain dict the way analysis used to.
+    stale_row = _valid_base_run_record()
+    stale_row["schema_version"] = "1.1.0"
+    with pytest.raises(ValueError):
+        _validate_base_records([stale_row], tmp_path / "full.jsonl")
+
+
+def test_validate_base_records_rejects_mismatched_identity(tmp_path):
+    row_a = _valid_base_run_record(record_id="base-a")
+    row_b = _valid_base_run_record(record_id="base-b", config_sha256="f" * 64)
+    with pytest.raises(ValueError):
+        _validate_base_records([row_a, row_b], tmp_path / "full.jsonl")
+
+
+def test_validate_fixed_trace_probe_records_accepts_schema_valid_input(tmp_path):
+    from kvcot.analysis.fixed_trace import FixedTraceRecords
+
+    rec = _valid_fixed_trace_probe_record()
+    records = FixedTraceRecords(
+        replay_condition="rkv_b128", trace_source_condition="full",
+        probes_by_base={rec["base_record_id"]: {1.0: rec}},
+    )
+    _validate_fixed_trace_probe_records(records, tmp_path / "probes.jsonl")  # must not raise
+
+
+def test_validate_fixed_trace_probe_records_rejects_stale_schema_version(tmp_path):
+    from kvcot.analysis.fixed_trace import FixedTraceRecords
+
+    rec = _valid_fixed_trace_probe_record()
+    rec["schema_version"] = "1.1.0"
+    records = FixedTraceRecords(
+        replay_condition="rkv_b128", trace_source_condition="full",
+        probes_by_base={rec["base_record_id"]: {1.0: rec}},
+    )
+    with pytest.raises(ValueError):
+        _validate_fixed_trace_probe_records(records, tmp_path / "probes.jsonl")
+
+
+def test_run_fixed_trace_analysis_rejects_protocol_v1_shaped_base_file(tmp_path):
+    # End-to-end: a base file shaped like protocol v1 (missing the fields
+    # BaseRunRecord now requires, or carrying schema_version "1.1.0") must
+    # make the whole analysis command fail loudly rather than silently
+    # produce a decision JSON from unvalidated dicts.
+    stale_base = _valid_base_run_record()
+    stale_base["schema_version"] = "1.1.0"
+    _write(tmp_path / "full.jsonl", [stale_base])
+    _write(tmp_path / "full_on_full_fixed_trace_probes.jsonl", [])
+    _write(tmp_path / "rkv_b128_on_full_fixed_trace_probes.jsonl", [])
+
+    with pytest.raises(ValueError):
+        run_fixed_trace_analysis(
+            output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
+            stage_name="early_gap_v2_b128", settings=_SETTINGS,
+        )

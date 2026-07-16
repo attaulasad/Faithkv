@@ -5,6 +5,81 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-16 — Fixed-trace protocol v2 hardening: f=1 eviction gap, budget too large, analysis-input validation (secondary, additive; no frozen §1/§4/§8/§9 value changed)
+
+External review of the first protocol-v2 commit (`20e2ad6`, merged as
+`b883fd3`) found the anchor-extraction fix correct but three remaining gaps
+that would have let a GPU rerun waste money on a screen that still cannot
+produce a valid result, plus one real eligibility bug. Fixed here, still
+before any GPU spend:
+
+- **b512/b1024 cannot compress on this manifest; b256 falls short too.**
+  Recalculating from the real GPU data already collected
+  (`logs/b512_accuracy_compaction.log`): observed prompt+think lengths on
+  the `gsm8k_calibration_50` sample never exceed budget 512 or 1024 at all
+  (`mean_final_retention_ratio: 0.98` — confirms this), and exceed budget
+  256 on at most ~6/10 traces — structurally below
+  `FixedTraceSettings.min_actual_compression_rate` (0.70), and even
+  maximally aggressive compaction at 256 cannot bring mean retention under
+  the 0.70 ceiling on traces this short. **Added
+  `configs/early_gap_v2_b128.yaml`** (new `stage_name`/`output_dir`, never a
+  resumption of an `early_gap_b*.yaml` directory) as the first budget with
+  a realistic chance of clearing both thresholds on this manifest.
+  Thresholds themselves were **not** weakened to make an existing budget
+  pass — per the review's explicit instruction, a budget too large for the
+  data is fixed by picking a smaller budget (or longer traces), not by
+  lowering the bar.
+- **`kvcot inspect-fixed-trace` strengthened** (`src/kvcot/cli.py`) with two
+  new arithmetic-only stop conditions, on top of the existing "nothing
+  exceeds the budget" check: (1) `fraction_of_traces_longer_than_budget` is
+  an upper bound on the achievable `actual_compression_rate` — if that
+  bound is already below `min_actual_compression_rate`, the eligibility
+  gate is mathematically unreachable at this budget; (2)
+  `mean_optimistic_retention` (`budget/length` per trace, the most
+  aggressive possible compaction) is a lower bound on achievable mean
+  retention — if even that best case exceeds
+  `max_mean_f1_retention_ratio`, no real run can pass either. Both checks
+  only run when the stage config declares `fixed_trace:` settings.
+- **Eligibility gap: answer-time eviction was never checked for the f=1
+  anchor itself** (`src/kvcot/analysis/fixed_trace.py`,
+  `FixedTraceEligibility`) — the check only scanned the 7 scored fractions.
+  Every scored fraction's match is scored against the f=1 anchor's own
+  answer, so an eviction while the anchor was writing ITS OWN answer is
+  exactly as disqualifying as one on a scored fraction; a synthetic
+  f=1-only-eviction case previously came back eligible with zero failure
+  reasons. `no_rkv_eviction_during_answer_probes` (renamed from
+  `no_rkv_eviction_during_scored_probes`) now covers
+  `PROBE_FRACTIONS_SCORED + (1.0,)`. Regression test added:
+  `test_f1_only_answer_time_eviction_makes_pair_ineligible`.
+- **`run_fixed_trace_analysis` now validates every input record**
+  (`src/kvcot/analysis/fixed_trace.py`, `_validate_base_records`/
+  `_validate_fixed_trace_probe_records`) against `BaseRunRecord`/
+  `FixedTraceProbeRecord` (rejecting a stale `schema_version` outright, via
+  the `Literal["1.2.0"]` field) and checks every record shares one coherent
+  `(config_sha256, upstream_rkv_commit[, model_revision, tokenizer_revision])`
+  identity, before any pairing/scoring happens. Previously the analysis read
+  JSONL as plain dicts with no schema check at load time, so a protocol-v1
+  directory (or one mixing two different runs) could be silently
+  "analyzed" as if it were valid current input.
+- **Archived stale protocol-v1 decision JSONs**
+  (`results/decisions/early_gap_b{256,512,1024}_fixed_trace.json`,
+  `early_gap_b512_accuracy_compaction.json`) to
+  `results/decisions/archive/protocol_v1_2026-07-16/` (with a README
+  explaining why) rather than leaving them under names that look like
+  current results. These files are `schema_version "1.1.0"`, `git_dirty:
+  true`, and — per the diagnosis above — describe a screen that produced
+  zero eligible examples; they must never be read as evidence for or
+  against G1. Corresponding raw probe data for b256/b1024 (only b512 was
+  ever actually generated) does not exist and cannot be reconstructed —
+  a fresh GPU run under `early_gap_v2_b128.yaml` is required.
+- **Still open, unchanged from the prior entry**: MATH-500 answer
+  equivalence is still not implemented (plain string equality only) — do
+  not switch to MATH-500 traces until that lands, tested. Protocol v2 has
+  not yet been exercised on a real GPU — CPU tests (203 passing) and
+  `python -m py_compile` are the only checks possible on this build
+  machine; the one-example GPU gate in `docs/GPU_VALIDATION_PLAN.md` is
+  still required before any 10-example rerun.
+
 ## 2026-07-16 — Fixed-trace protocol v2: boxed-answer prefix, realized-compression gating (secondary, additive; no frozen §1/§4/§8/§9 value changed)
 
 **Protocol v1 produced no scientific result.** The first fixed-trace GPU

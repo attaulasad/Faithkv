@@ -87,7 +87,8 @@ build (see the final build report).
 ### Secondary diagnostic: fixed-trace prefix-sufficiency screen
 
 `kvcot replay-fixed-trace` / `kvcot analyze-fixed-trace`
-(`configs/early_gap_b512.yaml` and its budget-escalation siblings) replay
+(`configs/early_gap_v2_b128.yaml` — see below for why not the older
+`early_gap_b512.yaml`/`b256`/`b1024` siblings) replay
 ONE canonical trace (FullKV's own generated tokens) under both FullKV and
 R-KV cache policies, so both conditions teacher-force identical reasoning
 tokens — only the cache policy varies. This is a smaller-sample,
@@ -105,10 +106,25 @@ format prefix instead of an empty suffix, its own `FixedTraceSettings`
 eligibility on realized (measured) compression rather than a recorded
 compaction event count. Run the CPU-only `kvcot inspect-fixed-trace`
 preflight against an already-generated FullKV trace before spending any GPU
-time on `replay-fixed-trace` — it stops immediately if no trace in the
-manifest is even longer than the configured budget. Old protocol-v1 output
-directories (`schema_version` `"1.1.0"`) must not be resumed under protocol
-v2 — start a fresh `output_dir`.
+time on `replay-fixed-trace` — it stops if no trace exceeds the configured
+budget, if the fraction of traces that could even possibly exceed it is
+already below the required compression rate, or if even best-case
+compaction couldn't clear the retention ceiling on this data. Old
+protocol-v1 output directories (`schema_version` `"1.1.0"`) are rejected
+outright at analysis time (schema/identity validation,
+`kvcot.analysis.fixed_trace`) — start a fresh `output_dir` instead of
+resuming one.
+
+**2026-07-16 follow-up hardening (external review):** the real b512 GPU
+data already collected shows prompt+think lengths that never exceed budget
+512/1024 at all, and exceed 256 on at most ~6/10 traces — structurally
+below the required compression rate on this manifest. `early_gap_v2_b128.yaml`
+is the current starting config (new `stage_name`/`output_dir`, isolated from
+any protocol-v1 data); the old `early_gap_b*.yaml` decision JSONs are
+archived under `results/decisions/archive/protocol_v1_2026-07-16/`, not
+deleted. Also fixed: eligibility now checks answer-time cache eviction for
+the f=1 anchor itself, not only the 7 scored fractions (a synthetic
+f=1-only-eviction case previously slipped through as eligible).
 
 **Resume behavior:** re-running the same command with `--resume` skips any
 `record_id` already present in the output JSONL file
