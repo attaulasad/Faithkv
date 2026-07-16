@@ -1,0 +1,11 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0 -- /workspace/Faithkv/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /workspace/Faithkv
+configfile: pytest.ini
+plugins: cov-7.1.0
+collecting ... collected 1 item
+
+tests/integration/test_patched_noop_parity_gpu.py::test_stock_vs_patched_noop_parity PASSED [100%]
+
+============================== 1 passed in 36.34s ==============================

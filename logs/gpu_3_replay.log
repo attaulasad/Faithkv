@@ -1,0 +1,87 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.13, pytest-9.1.1, pluggy-1.6.0 -- /workspace/Faithkv/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /workspace/Faithkv
+configfile: pytest.ini
+plugins: cov-7.1.0
+collecting ... collected 7 items
+
+tests/integration/test_replay_gpu.py::test_replay_reproduces_identical_tokens_and_compaction_events[flash_attention_2] PASSED [ 14%]
+tests/integration/test_replay_gpu.py::test_replay_reproduces_identical_tokens_and_compaction_events[sdpa] PASSED [ 28%]
+tests/integration/test_replay_gpu.py::test_two_independent_replays_are_identical PASSED [ 42%]
+tests/integration/test_replay_gpu.py::test_restoring_same_snapshot_twice_yields_identical_probe_tokens PASSED [ 57%]
+tests/integration/test_replay_gpu.py::test_fullkv_replay_passes_identity_test FAILED [ 71%]
+tests/integration/test_replay_gpu.py::test_streaming_replay_vs_bulk_prefill_negative_control PASSED [ 85%]
+tests/integration/test_replay_gpu.py::test_note_event_once_records_exactly_one_entry_per_real_event PASSED [100%]
+
+=================================== FAILURES ===================================
+___________________ test_fullkv_replay_passes_identity_test ____________________
+
+    @pytest.mark.gpu
+    def test_fullkv_replay_passes_identity_test():
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers.cache_utils import DynamicCache
+    
+        from kvcot.generation.decode import decode_step, prefill
+        from kvcot.generation.replay import replay_and_snapshot
+        from kvcot.generation.state import declare_process_mode, reset_patched_state
+        from kvcot.probes.early_answering import find_think_span
+    
+        _set_determinism()
+        declare_process_mode("stock")
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_NAME, revision=MODEL_REVISION, torch_dtype=torch.bfloat16,
+            device_map="cuda", attn_implementation="flash_attention_2",
+        )
+        model.eval()
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, revision=MODEL_REVISION, use_fast=True)
+        device = "cuda"
+    
+        cache = reset_patched_state(model, lambda: DynamicCache())
+        prompt_ids = tokenizer(LONG_PROMPT, add_special_tokens=True)["input_ids"]
+        continuation_ids = tokenizer(LONG_CONTINUATION, add_special_tokens=False)["input_ids"]
+>       logits, pos = prefill(model, cache, prompt_ids, device)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/integration/test_replay_gpu.py:275: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+src/kvcot/generation/decode.py:72: in prefill
+    out = model(
+.venv/lib/python3.12/site-packages/torch/nn/modules/module.py:1739: in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.venv/lib/python3.12/site-packages/torch/nn/modules/module.py:1750: in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+third_party/R-KV/HuggingFace/rkv/modeling.py:557: in CausalLM_forward
+    if self.config.compression_content == "think":
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = Qwen2Config {
+  "architectures": [
+    "Qwen2ForCausalLM"
+  ],
+  "attention_dropout": 0.0,
+  "bos_token_id": 151643,
+ ... "update_kv": true,
+  "use_cache": true,
+  "use_mrope": false,
+  "use_sliding_window": false,
+  "vocab_size": 151936
+}
+
+key = 'compression_content'
+
+    def __getattribute__(self, key):
+        if key != "attribute_map" and key in super().__getattribute__("attribute_map"):
+            key = super().__getattribute__("attribute_map")[key]
+>       return super().__getattribute__(key)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       AttributeError: 'Qwen2Config' object has no attribute 'compression_content'
+
+.venv/lib/python3.12/site-packages/transformers/configuration_utils.py:211: AttributeError
+=========================== short test summary info ============================
+FAILED tests/integration/test_replay_gpu.py::test_fullkv_replay_passes_identity_test
+=================== 1 failed, 6 passed in 623.07s (0:10:23) ====================

@@ -1,0 +1,187 @@
+{
+  "claim_boundary_notice": "This measures counterfactual behavioral dependence on the visible, generated chain-of-thought under truncation — NOT internal faithfulness, NOT whether reasoning is 'real', and NOT a claim about the model's internal cognition. See docs/EXPERIMENT.md and build brief §1.",
+  "full_curve": {
+    "0.0": 0.3,
+    "0.125": 0.3,
+    "0.25": 0.3,
+    "0.375": 0.6,
+    "0.5": 0.4,
+    "0.625": 0.6,
+    "0.75": 0.6,
+    "0.875": 0.4,
+    "1.0": 1.0
+  },
+  "match_rate_delta_rkv_minus_full": {
+    "0.0": 0.0,
+    "0.125": 0.0,
+    "0.25": 0.0,
+    "0.375": 0.0,
+    "0.5": 0.0,
+    "0.625": 0.0,
+    "0.75": 0.0,
+    "0.875": 0.0,
+    "1.0": 0.0
+  },
+  "mean_delta_pss": null,
+  "metric_notice": "PSS/Delta_PSS is a SEPARATE, secondary, additive metric from EAS/Delta_EAS (kvcot.analysis.metrics) — it is scored against each replay policy's own greedy f=1 answer under a SHARED canonical (FullKV) trace, not against each condition's own sampled natural base answer. Do not compare or pool PSS/Delta_PSS values with EAS/Delta_EAS ones.",
+  "n_eligible": 0,
+  "n_negative": 0,
+  "n_positive": 0,
+  "n_shared": 10,
+  "n_ties": 0,
+  "per_example": [
+    {
+      "base_record_id": "base-full-gsm8k_calibration_50-30-seed42",
+      "delta_pss": null,
+      "eligible": false,
+      "failure_reasons": [
+        "full_f1_anchor_incorrect",
+        "rkv_f1_anchor_incorrect",
+        "rkv_no_replay_compaction"
+      ],
+      "pss_full": 1.0,
+      "pss_rkv": 1.0,
+      "seed": 42,
+      "source_row_index": 30
+    },
+    {
+      "base_record_id": "base-full-gsm8k_calibration_50-63-seed42",
+      "delta_pss": null,
+      "eligible": false,
+      "failure_reasons": [
+        "full_f1_anchor_incorrect",
+        "rkv_f1_anchor_incorrect",
+        "rkv_no_replay_compaction"
+      ],
+      "pss_full": 0.5714285714285714,
+      "pss_rkv": 0.5714285714285714,
+      "seed": 42,
+      "source_row_index": 63
+    },
+    {
+      "base_record_id": "base-full-gsm8k_calibration_50-148-seed42",
+      "delta_pss": null,
+      "eligible": false,
+      "failure_reasons": [
+        "full_f1_anchor_incorrect",
+        "rkv_f1_anchor_incorrect",
+        "rkv_no_replay_compaction"
+      ],
+      "pss_full": 0.2857142857142857,
+      "pss_rkv": 0.2857142857142857,
+      "seed": 42,
+      "source_row_index": 148
+    },
+    {
+      "base_record_id": "base-full-gsm8k_calibration_50-176-seed42",
+      "delta_pss": null,
+      "eligible": false,
+      "failure_reasons": [
+        "full_f1_anchor_incorrect",
+        "rkv_f1_anchor_incorrect",
+        "rkv_no_replay_compaction"
+      ],
+      "pss_full": 0.7142857142857143,
+      "pss_rkv": 0.7142857142857143,
+      "seed": 42,
+      "source_row_index": 176
+    },
+    {
+      "base_record_id": "base-full-gsm8k_calibration_50-243-seed42",
+      "delta_pss": null,
+      "eligible": false,
+      "failure_reasons": [
+        "full_f1_anchor_incorrect",
+        "rkv_f1_anchor_incorrect",
+        "rkv_no_replay_compaction"
+      ],
+      "pss_full": 0.8571428571428571,
+      "pss_rkv": 0.8571428571428571,
+      "seed": 42,
+      "source_row_index": 243
+    },
+    {
+      "base_record_id": "base-full-gsm8k_calibration_50-262-seed42",
+      "delta_pss": null,
+      "eligible": false,
+      "failure_reasons": [
+        "full_f1_anchor_incorrect",
+        "rkv_f1_anchor_incorrect",
+        "rkv_no_replay_compaction"
+      ],
+      "pss_full": 0.2857142857142857,
+      "pss_rkv": 0.2857142857142857,
+      "seed": 42,
+      "source_row_index": 262
+    },
+    {
+      "base_record_id": "base-full-gsm8k_calibration_50-271-seed42",
+      "delta_pss": null,
+      "eligible": false,
+      "failure_reasons": [
+        "full_f1_anchor_incorrect",
+        "rkv_f1_anchor_incorrect",
+        "rkv_no_replay_compaction"
+      ],
+      "pss_full": 0.5714285714285714,
+      "pss_rkv": 0.5714285714285714,
+      "seed": 42,
+      "source_row_index": 271
+    },
+    {
+      "base_record_id": "base-full-gsm8k_calibration_50-281-seed42",
+      "delta_pss": null,
+      "eligible": false,
+      "failure_reasons": [
+        "full_f1_anchor_incorrect",
+        "rkv_f1_anchor_incorrect",
+        "rkv_no_replay_compaction"
+      ],
+      "pss_full": 0.0,
+      "pss_rkv": 0.0,
+      "seed": 42,
+      "source_row_index": 281
+    },
+    {
+      "base_record_id": "base-full-gsm8k_calibration_50-290-seed42",
+      "delta_pss": null,
+      "eligible": false,
+      "failure_reasons": [
+        "full_f1_anchor_incorrect",
+        "rkv_f1_anchor_incorrect",
+        "rkv_no_replay_compaction"
+      ],
+      "pss_full": 0.8571428571428571,
+      "pss_rkv": 0.8571428571428571,
+      "seed": 42,
+      "source_row_index": 290
+    },
+    {
+      "base_record_id": "base-full-gsm8k_calibration_50-307-seed42",
+      "delta_pss": null,
+      "eligible": false,
+      "failure_reasons": [
+        "full_f1_anchor_incorrect",
+        "rkv_f1_anchor_incorrect",
+        "rkv_no_replay_compaction"
+      ],
+      "pss_full": 0.2857142857142857,
+      "pss_rkv": 0.2857142857142857,
+      "seed": 42,
+      "source_row_index": 307
+    }
+  ],
+  "rkv_curve": {
+    "0.0": 0.3,
+    "0.125": 0.3,
+    "0.25": 0.3,
+    "0.375": 0.6,
+    "0.5": 0.4,
+    "0.625": 0.6,
+    "0.75": 0.6,
+    "0.875": 0.4,
+    "1.0": 1.0
+  },
+  "sign_convention": "positive delta_pss (pss_full - pss_rkv) => R-KV less sensitive to truncation of a SHARED reasoning prefix; positive match_rate_delta_rkv_minus_full => same direction",
+  "statistical_note": "descriptive counts only -- no p-value or confidence interval is computed at this sample size; this is a kill/continue screen, not the primary result"
+}

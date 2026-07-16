@@ -1,0 +1,26 @@
+{
+  "budget": 512,
+  "n_paired": 10,
+  "full_correct": 9,
+  "rkv_correct": 9,
+  "accuracy_difference_rkv_minus_full": 0.0,
+  "both_correct": 9,
+  "compaction_events_active": 7,
+  "actual_compression_active": 1,
+  "mean_final_retention_ratio": 0.9805545727054655,
+  "cap_hits_full": 0,
+  "cap_hits_rkv": 0
+}
+
+Per-example:
+  idx   full    rkv  events  retention  full_tok  rkv_tok
+   30   True   True       1      0.998       518      518
+   63   True   True       1      0.998       467      467
+  148   True   True       0      1.000       295      295
+  176   True   True       0      1.000       312      312
+  243   True   True       1      0.998       494      496
+  262   True   True       0      1.000       366      366
+  271   True   True       1      0.998       440      440
+  281   True   True       2      0.816       595      592
+  290   True   True       1      0.998       406      406
+  307  False  False       1      0.998       439      462
