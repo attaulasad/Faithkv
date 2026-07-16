@@ -154,3 +154,24 @@ bash scripts/sync_results.sh
 
 `results/raw/` is gitignored — this is the only copy of raw generations
 unless synced.
+
+## 10. Optional: fixed-trace prefix-sufficiency screen (secondary, additive — not part of the ordered sequence above)
+
+Not a Stage 0-2 step and not gated behind any of the stages above — this can
+run any time after `test_replay_gpu.py` passes (§5), since it depends on the
+same replay engine. Requires FullKV base generation for the screen's
+manifest first:
+
+```bash
+kvcot generate --config configs/early_gap_b512.yaml --condition full
+kvcot replay-fixed-trace --config configs/early_gap_b512.yaml --trace-condition full --replay-condition full
+kvcot replay-fixed-trace --config configs/early_gap_b512.yaml --trace-condition full --replay-condition rkv_b512
+kvcot analyze-fixed-trace --config configs/early_gap_b512.yaml --trace-condition full --replay-condition rkv_b512
+```
+
+Reads `results/decisions/early_gap_b512_fixed_trace.json` — descriptive
+counts only (n=10, one seed), no p-value. See `docs/EXPERIMENT.md` §11 and
+`CHANGELOG.md`'s 2026-07-16 entry for what this measures and why it is
+additive to, not a substitute for, Stage 0-2 above. `early_gap_b256.yaml`/
+`early_gap_b1024.yaml` are budget-escalation fallbacks (same three commands,
+substituting the condition/config names).

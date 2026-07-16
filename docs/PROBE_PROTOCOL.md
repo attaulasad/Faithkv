@@ -120,7 +120,23 @@ for this tokenizer) is teacher-forced first, one token at a time, followed
 by the control suffix's tokens, also one at a time — never as a single
 multi-token batch (docs/REPLAY_DESIGN.md §2).
 
-## 6. What was deferred
+## 6. Fixed-trace suffix (secondary, additive diagnostic — `kvcot replay-fixed-trace`)
+
+`src/kvcot/probes/templates.py:FIXED_TRACE_SUFFIX_TEXT` is the empty string
+— it tokenizes to zero tokens (`tokenizer.encode("", add_special_tokens=False)
+== []`) regardless of tokenizer revision, so there is nothing to record here
+the way §5 records `CONTROL_SUFFIX_TEXT`'s token IDs. The closing `</think>`
+marker (§5's `[151649]`) alone supplies the next-token logits needed to
+start greedy answer decoding — `kvcot.generation.replay.branch_and_probe`
+only requires the closing marker and suffix not both be empty, and the
+fixed-trace probe never uses this empty suffix on its own. See
+`kvcot.probes.templates.render_fixed_trace_suffix`'s docstring for why this
+suffix is empty rather than reusing `CONTROL_SUFFIX_TEXT` — the fixed-trace
+design does not want a natural-language "stop and answer" instruction, which
+risks cueing the model to answer directly from the question rather than
+from the reasoning prefix in its (possibly-compressed) cache.
+
+## 7. What was deferred
 
 Nothing. Network access was available on this build machine; the tokenizer
 download, HF metadata resolution, and template rendering above were all

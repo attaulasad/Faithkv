@@ -50,3 +50,28 @@ CONTROL_SUFFIX_TEXT = (
 
 def render_control_suffix() -> str:
     return CONTROL_SUFFIX_TEXT
+
+
+# Used only by the secondary, additive fixed-trace probe
+# (kvcot.cli.cmd_replay_fixed_trace / kvcot.analysis.fixed_trace) — never by
+# the frozen replay-probe/EAS pipeline above, which always uses
+# CONTROL_SUFFIX_TEXT. Deliberately empty: unlike the early-answering probe
+# (which must work when branched from f=0, almost no visible reasoning yet,
+# and so needs an explicit "stop and answer" instruction), the fixed-trace
+# probe's whole point is prefix-sufficiency under a shared canonical trace —
+# injecting "Stop reasoning now. Based on everything above..." risks cueing
+# the model to recompute the answer directly from the question rather than
+# from the (possibly-compressed) reasoning prefix actually in its cache,
+# which would confound the two conditions' cache states with two different
+# answer-elicitation strategies. The closing </think> marker alone supplies
+# the next-token logits needed to start greedy answer decoding (see
+# kvcot.generation.replay.branch_and_probe: it only requires the closing
+# marker and suffix not both be empty).
+FIXED_TRACE_SUFFIX_TEXT = ""
+
+
+def render_fixed_trace_suffix() -> str:
+    """No natural-language intervention. The replay branch feeds the model's
+    native </think> marker and then allows greedy answer generation to begin
+    in the model's normal answer mode."""
+    return FIXED_TRACE_SUFFIX_TEXT

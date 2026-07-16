@@ -5,6 +5,72 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-16 — Fixed-trace prefix-sufficiency screen (secondary, additive; no frozen §1/§4/§8/§9 value changed)
+
+Added on branch `early-gap-fixed-trace`, still pre-GPU. This is an
+**addition alongside** the frozen `replay-probe`/EAS/Delta_EAS pipeline, not
+a replacement or a modification of it — every §1/§4/§8/§9 frozen value in
+`CLAUDE.md`/`configs/lock.yaml` is unchanged, `replay-probe` itself is
+byte-for-byte unmodified, and the frozen research question (§1) remains this
+repository's headline claim.
+
+**Motivation.** `replay-probe`/EAS scores each condition's probe answer
+against that SAME condition's own sampled base answer (§8). FullKV and R-KV
+each generate their own natural trace, so a Delta_EAS effect could in
+principle be partly attributable to the traces themselves differing between
+conditions, not only to the cache policy — the frozen design already
+controls for this at the level that matters for the primary claim (§8.5's
+both-correct-and-compression-active subset conditions on correctness per
+problem), but it does not isolate the cache-policy question in the most
+literal possible way: replaying one identical token sequence under two
+different policies. This addition does exactly that, as a secondary,
+smaller-sample screen — a kill/continue check, not a second primary result.
+
+- **New commands**: `kvcot replay-fixed-trace` and `kvcot analyze-fixed-trace`
+  (`src/kvcot/cli.py`). `replay-fixed-trace` reads its canonical token
+  sequence from one condition's base file (`--trace-condition`, default
+  `full`) but loads the model and applies cache-policy replay under a
+  possibly-different condition (`--replay-condition`) — both replay
+  policies teacher-force identical prompt and reasoning tokens; only the
+  cache policy varies. `replay-probe` is untouched and remains the on-policy
+  diagnostic; both commands can coexist against the same stage's output
+  directory.
+- **New metric**: Prefix-Sufficiency Sensitivity (PSS) / Delta_PSS
+  (`src/kvcot/analysis/fixed_trace.py`) — mean mismatch rate against each
+  replay policy's own greedy f=1 answer (never the trace source's sampled
+  natural answer, which would reintroduce the sampled-vs-greedy confound
+  §7 of `docs/EXPERIMENT.md` already documents for the original f=1
+  stability probe). `Delta_PSS = PSS_full - PSS_rkv`, same subtraction
+  order and sign meaning as `Delta_EAS` (positive => R-KV less sensitive to
+  truncation). This is a **different metric** from EAS/Delta_EAS — never
+  pool or directly compare the two. No p-value or confidence interval is
+  computed at this sample size (`configs/early_gap_b512.yaml`: n=10,
+  one seed) — descriptive counts only.
+- **New schema**: `FixedTraceProbeRecord` (`src/kvcot/schemas.py`),
+  distinguishing `trace_source_condition` from `replay_policy_condition` —
+  a distinction `ProbeRunRecord` has no field for, since it never needed
+  one. `SCHEMA_VERSION` bumped `1.0.0` -> `1.1.0`. `kvcot validate-run` now
+  dispatches on each record's own `record_type` field instead of filename
+  pattern-matching (`_schema_for_record`) — a `..._fixed_trace_probes.jsonl`
+  file still ends in `_probes.jsonl`, so filename-based dispatch would have
+  silently misvalidated it against `ProbeRunRecord`.
+- **New configs**: `configs/early_gap_b512.yaml` (primary, 10-example,
+  seed=42 screen) plus `early_gap_b256.yaml`/`early_gap_b1024.yaml`
+  (budget-escalation fallbacks — step down only if compression rarely
+  fires at 512, step up only if it fires but breaks accuracy, never step
+  down after breaking accuracy).
+- **Scope note**: an earlier draft of this change also proposed a
+  mistake-insertion probe (corrupting a verified intermediate arithmetic
+  step and testing whether the answer changes). That is **not implemented**
+  here — `CLAUDE.md` §1 and `README.md`'s Scope section both explicitly and
+  repeatedly list "mistake insertion" as out of scope for this repository,
+  and the technique is a standard chain-of-thought-faithfulness probe from
+  the literature, which is exactly the category of conclusion §1's
+  "Forbidden conclusions" clause exists to rule out. Implementing it would
+  require un-freezing that boundary first, with its own dated entry here —
+  deliberately deferred rather than done silently alongside an otherwise
+  in-scope addition.
+
 ## 2026-07-15 — Second pre-GPU audit: orchestration/pipeline completeness (no frozen §4 setting changed)
 
 A second audit found the orchestration layer (CLI commands and the shell
