@@ -236,3 +236,143 @@ def test_analyze_fixed_trace_dry_run_reports_stage_scoped_output_path(capsys):
     out = capsys.readouterr().out
     # Stage-scoped filename -- must not collide with early_gap_b256/b1024's own decisions.
     assert "early_gap_b512_fixed_trace.json" in out
+
+
+# --- replay-fixed-trace --resume identity check must cover model/tokenizer
+# revision (§ external review 2026-07-16) ---
+#
+# cmd_replay_fixed_trace's expected_identity dict previously only carried
+# config_sha256/upstream_rkv_commit -- a --resume into a fixed-trace probe
+# file recorded under a stale model/tokenizer revision was accepted here,
+# even though FixedTraceProbeRecord has carried its own model_revision/
+# tokenizer_revision fields since schema 1.3.0 specifically so this could be
+# checked. The final analysis (kvcot.analysis.fixed_trace) would eventually
+# reject the resulting mixed-identity file, but only after wasting GPU time
+# generating it.
+
+def _stale_fixed_trace_probe_record(config_sha256: str, upstream_commit: str, **overrides) -> dict:
+    from kvcot.schemas import FixedTraceProbeRecord, ProvenanceState, RetentionSummary, VersionInfo
+
+    defaults = dict(
+        record_id="fixed-probe-rkv_b512-on-full-base-full-x-0-seed42-f1.0",
+        parent_record_id="base-full-x-0-seed42",
+        config_path=EARLY_GAP_CONFIG,
+        config_sha256=config_sha256,
+        provenance=ProvenanceState(upstream_rkv_commit=upstream_commit, git_commit="deadbeef", git_dirty=False),
+        versions=VersionInfo(python="3.10.0"),
+        model_revision="stale-model-revision",
+        tokenizer_revision="stale-tokenizer-revision",
+        base_record_id="base-full-x-0-seed42",
+        trace_source_condition="full",
+        replay_policy_condition="rkv_b512",
+        source_row_index=0,
+        global_seed=42,
+        normalized_gold="42",
+        source_base_answer="42",
+        source_base_is_correct=True,
+        fraction=1.0,
+        think_span_length=10,
+        cut_index=10,
+        close_marker_token_ids=[1],
+        control_suffix_token_ids=[2],
+        probe_decoding_max_new_tokens=64,
+        probe_output_token_ids=[3],
+        probe_output_text="42}",
+        probe_extraction_text="Final answer: \\boxed{42}",
+        normalized_probe_answer="42",
+        probe_extraction_status="boxed",
+        probe_stop_reason="boxed_answer_complete",
+        probe_cap_hit=False,
+        replay_retention_at_cut=RetentionSummary(
+            fullkv_equivalent_slots=200, physical_cache_slots_per_layer=[100, 100],
+            instantaneous_retention_ratio=0.5, post_compaction_budget_tokens=512,
+            tokens_since_last_compaction=5,
+        ),
+        actual_compression_at_cut=True,
+        probe_cache_length_final_per_layer=[100, 100],
+        probe_actual_eviction_during_answer=False,
+        normalized_f1_anchor_answer="42",
+        matches_f1_anchor_answer=True,
+        f1_anchor_matches_source_base_answer=True,
+        f1_anchor_is_correct=True,
+        replay_compaction_count_at_cut=1,
+        replay_compaction_event_steps_at_cut=[64],
+        snapshot_cache_hash="a" * 64,
+        snapshot_provenance_hash="b" * 64,
+        snapshot_state_hash="c" * 64,
+    )
+    defaults.update(overrides)
+    return FixedTraceProbeRecord(**defaults).model_dump(mode="json")
+
+
+def _patch_output_dir(monkeypatch, tmp_path):
+    from kvcot.config import load_stage_config as real_load_stage_config
+
+    def _load_with_tmp_output_dir(path):
+        stage, lock = real_load_stage_config(path)
+        stage.output_dir = str(tmp_path)
+        return stage, lock
+
+    monkeypatch.setattr("kvcot.cli.load_stage_config", _load_with_tmp_output_dir)
+
+
+def test_replay_fixed_trace_resume_rejects_model_revision_mismatch(tmp_path, monkeypatch):
+    from kvcot.cli import ResumeIdentityMismatchError
+    from kvcot.config import config_identity, load_stage_config
+    from kvcot.runtime import upstream_submodule_commit
+    from kvcot.utils.io import JsonlWriter
+
+    _, lock = load_stage_config(EARLY_GAP_CONFIG)
+    config_sha256 = config_identity(EARLY_GAP_CONFIG)
+    upstream_commit = upstream_submodule_commit(lock)
+    _patch_output_dir(monkeypatch, tmp_path)
+
+    stale_rec = _stale_fixed_trace_probe_record(config_sha256, upstream_commit)
+    JsonlWriter(tmp_path / "rkv_b512_on_full_fixed_trace_probes.jsonl", validator=None).append(stale_rec)
+
+    args = _fixed_trace_args(replay_condition="rkv_b512", resume=True)
+    with pytest.raises(ResumeIdentityMismatchError, match="model_revision"):
+        cmd_replay_fixed_trace(args)
+
+
+def test_replay_fixed_trace_resume_rejects_tokenizer_revision_mismatch(tmp_path, monkeypatch):
+    from kvcot.cli import ResumeIdentityMismatchError
+    from kvcot.config import config_identity, load_stage_config
+    from kvcot.runtime import upstream_submodule_commit
+    from kvcot.utils.io import JsonlWriter
+
+    _, lock = load_stage_config(EARLY_GAP_CONFIG)
+    config_sha256 = config_identity(EARLY_GAP_CONFIG)
+    upstream_commit = upstream_submodule_commit(lock)
+    _patch_output_dir(monkeypatch, tmp_path)
+
+    # model_revision matches the current lock -- only tokenizer_revision is stale.
+    stale_rec = _stale_fixed_trace_probe_record(
+        config_sha256, upstream_commit, model_revision=lock.model.revision,
+    )
+    JsonlWriter(tmp_path / "rkv_b512_on_full_fixed_trace_probes.jsonl", validator=None).append(stale_rec)
+
+    args = _fixed_trace_args(replay_condition="rkv_b512", resume=True)
+    with pytest.raises(ResumeIdentityMismatchError, match="tokenizer_revision"):
+        cmd_replay_fixed_trace(args)
+
+
+def test_replay_fixed_trace_resume_accepts_matching_model_and_tokenizer_revision(tmp_path, monkeypatch):
+    from kvcot.config import config_identity, load_stage_config
+    from kvcot.runtime import upstream_submodule_commit
+    from kvcot.utils.io import JsonlWriter
+
+    _, lock = load_stage_config(EARLY_GAP_CONFIG)
+    config_sha256 = config_identity(EARLY_GAP_CONFIG)
+    upstream_commit = upstream_submodule_commit(lock)
+    _patch_output_dir(monkeypatch, tmp_path)
+
+    matching_rec = _stale_fixed_trace_probe_record(
+        config_sha256, upstream_commit,
+        model_revision=lock.model.revision, tokenizer_revision=lock.model.tokenizer_revision,
+    )
+    JsonlWriter(tmp_path / "rkv_b512_on_full_fixed_trace_probes.jsonl", validator=None).append(matching_rec)
+
+    args = _fixed_trace_args(replay_condition="rkv_b512", resume=True)
+    rc = cmd_replay_fixed_trace(args)
+    assert rc == 0

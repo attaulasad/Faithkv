@@ -139,8 +139,10 @@ def test_trace_source_and_replay_policy_conditions_are_independent_fields():
 
 
 def test_control_suffix_token_ids_may_be_empty():
-    # The fixed-trace suffix is deliberately "" (kvcot.probes.templates.
-    # render_fixed_trace_suffix) -- must encode to an empty token list without
-    # tripping any non-empty validation ProbeRunRecord never needed.
+    # Protocol v2 (kvcot.probes.templates.render_fixed_trace_suffix) always
+    # renders a non-empty teacher-forced boxed-answer prefix now -- only
+    # protocol v1 used "". This schema-level test just confirms the field
+    # itself has no non-empty validation constraint (ProbeRunRecord never
+    # needed one either), independent of what the current template renders.
     rec = FixedTraceProbeRecord(**_valid_kwargs(control_suffix_token_ids=[]))
     assert rec.control_suffix_token_ids == []

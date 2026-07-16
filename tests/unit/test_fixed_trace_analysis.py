@@ -58,6 +58,7 @@ def _fixed_probe_record(
     fraction: float,
     *,
     trace_source_condition: str = "full",
+    replay_policy_condition: str = "full",
     matches_anchor: bool | None,
     f1_anchor_is_correct: bool | None = True,
     compaction_count: int = 3,
@@ -72,6 +73,7 @@ def _fixed_probe_record(
         "base_record_id": base_record_id,
         "fraction": fraction,
         "trace_source_condition": trace_source_condition,
+        "replay_policy_condition": replay_policy_condition,
         "matches_f1_anchor_answer": matches_anchor,
         "f1_anchor_is_correct": f1_anchor_is_correct,
         "replay_compaction_count_at_cut": compaction_count,
@@ -139,6 +141,7 @@ def _make_fixed_trace_run(
     rkv_recs = [
         _fixed_probe_record(
             rkv_base_id, f, matches_anchor=rkv_matches[f], f1_anchor_is_correct=rkv_f1_correct,
+            replay_policy_condition="rkv_b512",
             compaction_count=rkv_compaction,
             probe_extraction_status=_status_for(f, rkv_f1_boxed),
             actual_compression_at_cut=rkv_actual_compression,
@@ -390,6 +393,7 @@ def test_f1_only_answer_time_eviction_makes_pair_ineligible(tmp_path):
     rkv_recs = [
         _fixed_probe_record(
             base["record_id"], f, matches_anchor=True,
+            replay_policy_condition="rkv_b512",
             # Every scored fraction is clean -- eviction happens ONLY on f=1.
             probe_actual_eviction_during_answer=(f == 1.0),
         )
@@ -445,7 +449,10 @@ def test_mismatched_trace_source_condition_raises(tmp_path):
     # Simulates a user error: this file was actually replayed from a
     # patched_noop-generated trace, not the "full" trace this analysis expects.
     rkv_recs_from_wrong_trace = [
-        _fixed_probe_record(base["record_id"], f, trace_source_condition="patched_noop", matches_anchor=True)
+        _fixed_probe_record(
+            base["record_id"], f, trace_source_condition="patched_noop",
+            replay_policy_condition="rkv_b512", matches_anchor=True,
+        )
         for f in PROBE_FRACTIONS_ALL
     ]
     _write(tmp_path / "full_on_full_fixed_trace_probes.jsonl", full_recs)
@@ -696,7 +703,7 @@ def _valid_fixed_trace_probe_record(**overrides) -> dict:
 
 
 def test_validate_base_records_accepts_schema_valid_input(tmp_path):
-    _validate_base_records([_valid_base_run_record()], tmp_path / "full.jsonl")  # must not raise
+    _validate_base_records([_valid_base_run_record()], tmp_path / "full.jsonl", "full")  # must not raise
 
 
 def test_validate_base_records_rejects_stale_schema_version_dict(tmp_path):
@@ -707,14 +714,24 @@ def test_validate_base_records_rejects_stale_schema_version_dict(tmp_path):
     stale_row = _valid_base_run_record()
     stale_row["schema_version"] = "1.1.0"
     with pytest.raises(ValueError):
-        _validate_base_records([stale_row], tmp_path / "full.jsonl")
+        _validate_base_records([stale_row], tmp_path / "full.jsonl", "full")
 
 
 def test_validate_base_records_rejects_mismatched_identity(tmp_path):
     row_a = _valid_base_run_record(record_id="base-a")
     row_b = _valid_base_run_record(record_id="base-b", config_sha256="f" * 64)
     with pytest.raises(ValueError):
-        _validate_base_records([row_a, row_b], tmp_path / "full.jsonl")
+        _validate_base_records([row_a, row_b], tmp_path / "full.jsonl", "full")
+
+
+def test_validate_base_records_rejects_condition_not_matching_trace_condition(tmp_path):
+    # § external review 2026-07-16: a base file recorded under condition=
+    # "rkv_b128" being passed in as the canonical trace source (which this
+    # analysis always expects to be trace_condition, in practice "full")
+    # would mean the wrong file was used as the canonical trace.
+    row = _valid_base_run_record(condition="rkv_b128")
+    with pytest.raises(ValueError):
+        _validate_base_records([row], tmp_path / "full.jsonl", "full")
 
 
 def test_validate_fixed_trace_probe_records_accepts_schema_valid_input(tmp_path):
@@ -799,7 +816,7 @@ def test_run_fixed_trace_analysis_rejects_base_vs_probes_identity_mismatch(tmp_p
     # base.jsonl and the R-KV fixed-trace probes were produced under
     # different upstream_rkv_commit pins -- must never be silently paired.
     base = _valid_base_run_record()
-    full_rec = _valid_fixed_trace_probe_record()
+    full_rec = _valid_fixed_trace_probe_record(replay_policy_condition="full")
     rkv_rec = _valid_fixed_trace_probe_record(
         provenance={"upstream_rkv_commit": "0000000000000000000000000000000000000000", "git_commit": "deadbeef", "git_dirty": False},
     )
@@ -819,7 +836,7 @@ def test_run_fixed_trace_analysis_rejects_mismatch_against_current_config(tmp_pa
     # config/lock (expected_identity) pins a different model revision --
     # this must be rejected even though the files are internally consistent.
     base = _valid_base_run_record()
-    full_rec = _valid_fixed_trace_probe_record()
+    full_rec = _valid_fixed_trace_probe_record(replay_policy_condition="full")
     rkv_rec = _valid_fixed_trace_probe_record(record_id="fixed-probe-rkv-f1", replay_policy_condition="rkv_b128")
     _write(tmp_path / "full.jsonl", [base])
     _write(tmp_path / "full_on_full_fixed_trace_probes.jsonl", [full_rec])
@@ -843,7 +860,7 @@ def test_run_fixed_trace_analysis_accepts_matching_current_config(tmp_path, monk
     # stray file behind in the real repository's results/decisions/.
     monkeypatch.chdir(tmp_path)
     base = _valid_base_run_record()
-    full_rec = _valid_fixed_trace_probe_record()
+    full_rec = _valid_fixed_trace_probe_record(replay_policy_condition="full")
     rkv_rec = _valid_fixed_trace_probe_record(record_id="fixed-probe-rkv-f1", replay_policy_condition="rkv_b128")
     _write(tmp_path / "full.jsonl", [base])
     _write(tmp_path / "full_on_full_fixed_trace_probes.jsonl", [full_rec])
@@ -868,3 +885,52 @@ def test_load_fixed_trace_records_rejects_duplicate_base_and_fraction(tmp_path):
     _write(tmp_path / "dup.jsonl", [rec_a, rec_b])
     with pytest.raises(ValueError):
         load_fixed_trace_records(tmp_path / "dup.jsonl", "rkv_b128")
+
+
+# --- replay_policy_condition role validation (§ external review 2026-07-16) ---
+#
+# `load_fixed_trace_records` previously only checked `trace_source_condition`
+# consistency/agreement -- it never checked a row's own `replay_policy_
+# condition` against the `replay_condition` the caller passed in based on
+# which file (by filename convention) is being read. A swapped or renamed
+# pair of fixed-trace probe files -- e.g. full_on_full_fixed_trace_probes.
+# jsonl actually containing rkv_b128-policy records, and vice versa -- was
+# silently accepted and could flip which curve gets called FullKV vs R-KV.
+
+def test_load_fixed_trace_records_rejects_replay_policy_condition_mismatch(tmp_path):
+    # A record declaring replay_policy_condition="rkv_b128" saved into a file
+    # being read as the "full" replay policy's probes -- exactly what an
+    # accidental file swap/rename would produce.
+    rec = _valid_fixed_trace_probe_record(replay_policy_condition="rkv_b128")
+    _write(tmp_path / "full_on_full_fixed_trace_probes.jsonl", [rec])
+    with pytest.raises(ValueError, match="replay_policy_condition"):
+        load_fixed_trace_records(tmp_path / "full_on_full_fixed_trace_probes.jsonl", "full")
+
+
+def test_load_fixed_trace_records_rejects_mixed_replay_policy_condition_within_one_file(tmp_path):
+    rec_a = _valid_fixed_trace_probe_record(record_id="fixed-probe-a", replay_policy_condition="rkv_b128")
+    rec_b = _valid_fixed_trace_probe_record(
+        record_id="fixed-probe-b", fraction=0.5, replay_policy_condition="full",
+    )
+    _write(tmp_path / "mixed.jsonl", [rec_a, rec_b])
+    with pytest.raises(ValueError, match="replay_policy_condition"):
+        load_fixed_trace_records(tmp_path / "mixed.jsonl", "rkv_b128")
+
+
+def test_run_fixed_trace_analysis_rejects_swapped_full_and_rkv_probe_files(tmp_path):
+    # End-to-end version of the adversarial case above: full_on_full declares
+    # replay_policy_condition="rkv_b128" and rkv_b128_on_full declares "full"
+    # -- as if the two files were swapped or renamed. Must be rejected, not
+    # silently analyzed with the curves' identities flipped.
+    base = _valid_base_run_record()
+    full_rec = _valid_fixed_trace_probe_record(replay_policy_condition="rkv_b128")
+    rkv_rec = _valid_fixed_trace_probe_record(record_id="fixed-probe-rkv-f1", replay_policy_condition="full")
+    _write(tmp_path / "full.jsonl", [base])
+    _write(tmp_path / "full_on_full_fixed_trace_probes.jsonl", [full_rec])
+    _write(tmp_path / "rkv_b128_on_full_fixed_trace_probes.jsonl", [rkv_rec])
+
+    with pytest.raises(ValueError, match="replay_policy_condition"):
+        run_fixed_trace_analysis(
+            output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
+            stage_name="early_gap_v2_b128", settings=_SETTINGS,
+        )
