@@ -21,17 +21,44 @@ the policy varies.
 source's sampled natural answer ===
 
 The canonical trace was generated with SAMPLED decoding (temperature 0.6).
-Replaying it and then closing the think block with the fixed (empty)
-suffix and decoding greedily (kvcot.probes.templates.render_fixed_trace_suffix)
-is a different decoding procedure than the one that produced the trace's own
-recorded answer — so a naive comparison against the trace source's own
-answer would conflate "did truncation change the answer" with "does greedy
-teacher-forced replay reproduce a temperature-0.6 sample," exactly the
-confound docs/EXPERIMENT.md §7 already documents for the ORIGINAL f=1
-stability probe. Using each policy's own greedy f=1 replay as the anchor
-(kvcot.schemas.FixedTraceProbeRecord.normalized_f1_anchor_answer) removes
-that confound: every fraction, including f=1 itself, is compared against a
-same-policy, same-decoding-procedure reference.
+Replaying it and then closing the think block with the fixed boxed-answer
+prefix (kvcot.probes.templates.render_fixed_trace_suffix) and decoding
+greedily is a different decoding procedure than the one that produced the
+trace's own recorded answer — so a naive comparison against the trace
+source's own answer would conflate "did truncation change the answer" with
+"does greedy teacher-forced replay reproduce a temperature-0.6 sample,"
+exactly the confound docs/EXPERIMENT.md §7 already documents for the
+ORIGINAL f=1 stability probe. Using each policy's own greedy f=1 replay as
+the anchor (kvcot.schemas.FixedTraceProbeRecord.normalized_f1_anchor_answer)
+removes that confound: every fraction, including f=1 itself, is compared
+against a same-policy, same-decoding-procedure reference.
+
+=== Protocol v2 (2026-07-16, CHANGELOG.md) ===
+
+Protocol v1 (empty fixed-trace suffix, frozen 48-token probe budget, event-
+count-based eligibility) produced n_eligible=0 at every budget tested — not
+a negative result, no result at all. Two independent failures, diagnosed
+from the raw probe text:
+
+  1. The anchor (f=1 probe) almost never reached a `\\boxed{...}` within 48
+     tokens — R1-Distill's answer mode is a verbose structured write-up.
+     Extraction fell through to the conservative final-number fallback tier
+     and grabbed an incidental mid-sentence number as the "anchor," which is
+     noise, not an answer.
+  2. A recorded R-KV compaction event is not sufficient evidence of actual
+     compression — at the exact budget boundary R-KV can record an event
+     that evicts zero tokens (kvcot.generation.replay's documented boundary
+     case), so "≥1 compaction event" let through pairs where the physical
+     cache never actually shrank.
+
+Protocol v2 fixes both: a teacher-forced boxed-answer format prefix
+(kvcot.probes.templates.FIXED_TRACE_SUFFIX_TEXT) makes extraction reliable
+within a short budget, and eligibility now requires the physical cache to
+have actually shrunk at the cut (`actual_compression_at_cut`), not just a
+nonzero event count. `rkv_had_replay_compaction` (event-count-based) is
+retired as a *gate* — compaction event counts remain available on each
+record as a diagnostic, but never substitute for the realized-compression
+check.
 
 === Metric: Prefix-Sufficiency Sensitivity (PSS) ===
 
@@ -50,11 +77,26 @@ PSS/Delta_PSS values against EAS/Delta_EAS ones, and do not average or pool
 them; they are scored against different anchors over different trace
 sources.
 
+PSS_{i,c} is None (not 0.0) whenever this policy's own anchor is invalid
+(missing), a fallback (non-boxed) extraction, or any scored fraction is
+missing/failed to extract (`_pss_for_side`) — 0.0 means "a valid 0%
+mismatch rate," which is a completely different, and false, claim.
+Delta_PSS_i is additionally None (even when both PSS values are individually
+defined) whenever the pair does not meet full eligibility (§ below) — in
+particular, whenever R-KV shows no actual compression at the cut or evicted
+further while answering, since in that regime R-KV behaves like FullKV and a
+delta would say nothing about compression's effect.
+
 === Sample-size discipline ===
 
 This module never computes a p-value or a confidence interval. It is a
 kill/continue screen at n<=50 (in practice n=10 for the first pass,
 configs/early_gap_b512.yaml), not a claim of any distributional result.
+`build_screen_validity` additionally refuses to characterize the result
+("positive"/"negative"/"gap exists"/"gap does not exist") at all unless the
+screen clears minimum eligible-example, realized-compression-rate, and
+retention thresholds (kvcot.config.FixedTraceSettings) — otherwise
+`hypothesis_status` is "not_tested".
 
 CLAIM BOUNDARY (§1, restated per repository convention): this measures
 counterfactual behavioral dependence on the visible, generated
@@ -69,10 +111,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kvcot.config import PROBE_FRACTIONS_ALL, PROBE_FRACTIONS_SCORED
 from kvcot.probes.early_answering import CLAIM_BOUNDARY_NOTICE
 from kvcot.utils.io import read_jsonl, write_json
+
+if TYPE_CHECKING:
+    from kvcot.config import FixedTraceSettings
 
 PSS_METRIC_NOTICE = (
     "PSS/Delta_PSS is a SEPARATE, secondary, additive metric from EAS/Delta_EAS "
@@ -121,30 +167,78 @@ def compute_delta_pss(pss_full: float | None, pss_rkv: float | None) -> float | 
     return pss_full - pss_rkv
 
 
+def _matches_by_fraction_vs_anchor(
+    probes: dict[float, dict], fractions: tuple[float, ...]
+) -> dict[float, bool | None]:
+    out: dict[float, bool | None] = {}
+    for f in fractions:
+        rec = probes.get(f)
+        if rec is None:
+            continue
+        out[f] = rec.get("matches_f1_anchor_answer")
+    return out
+
+
+def _is_boxed(rec: dict | None) -> bool:
+    return bool(rec is not None and rec.get("probe_extraction_status") == "boxed")
+
+
+def _pss_for_side(
+    group: dict[float, dict], scored_fractions: tuple[float, ...] = PROBE_FRACTIONS_SCORED
+) -> float | None:
+    """PSS for one replay policy's side of a pair. None (not 0.0) whenever
+    this side's own f=1 anchor is missing or a non-boxed (e.g. fallback)
+    extraction — a fallback anchor is documented noise (module docstring),
+    never a usable reference point — or whenever `compute_pss` itself finds
+    a missing/failed-extraction scored fraction."""
+    f1 = group.get(1.0)
+    if not _is_boxed(f1):
+        return None
+    matches = _matches_by_fraction_vs_anchor(group, scored_fractions)
+    return compute_pss(matches, scored_fractions)
+
+
+def _all_scored_extractable(matches: dict[float, bool | None], scored: tuple[float, ...]) -> bool:
+    return all(f in matches and matches[f] is not None for f in scored)
+
+
 @dataclass(frozen=True)
 class FixedTraceEligibility:
     """A stricter, purpose-built eligibility check for this small screen —
     deliberately not reusing kvcot.analysis.metrics.EligibilityCheck, since
     the two pipelines are scored against different anchors and this one adds
-    a canonical-trace cleanliness bar (no cap hit) that the primary
-    EAS pipeline does not enforce at the pairing stage."""
+    a canonical-trace cleanliness bar (no cap hit, base itself correct) that
+    the primary EAS pipeline does not enforce at the pairing stage.
 
+    Protocol v2: gates on realized compression (`rkv_actual_compression_at_f1`,
+    `no_rkv_eviction_during_scored_probes`), never on a recorded compaction
+    EVENT COUNT alone — see module docstring for why that changed.
+    """
+
+    full_f1_anchor_boxed: bool
+    rkv_f1_anchor_boxed: bool
     full_f1_anchor_correct: bool
     rkv_f1_anchor_correct: bool
-    full_all_scored_present: bool
-    rkv_all_scored_present: bool
-    rkv_had_replay_compaction: bool
+    full_all_scored_extractable: bool
+    rkv_all_scored_extractable: bool
+    rkv_actual_compression_at_f1: bool
+    no_rkv_eviction_during_scored_probes: bool
+    canonical_trace_base_correct: bool
     canonical_trace_did_not_hit_cap: bool
     canonical_trace_think_parsed: bool
 
     @property
     def eligible(self) -> bool:
         return (
-            self.full_f1_anchor_correct
+            self.full_f1_anchor_boxed
+            and self.rkv_f1_anchor_boxed
+            and self.full_f1_anchor_correct
             and self.rkv_f1_anchor_correct
-            and self.full_all_scored_present
-            and self.rkv_all_scored_present
-            and self.rkv_had_replay_compaction
+            and self.full_all_scored_extractable
+            and self.rkv_all_scored_extractable
+            and self.rkv_actual_compression_at_f1
+            and self.no_rkv_eviction_during_scored_probes
+            and self.canonical_trace_base_correct
             and self.canonical_trace_did_not_hit_cap
             and self.canonical_trace_think_parsed
         )
@@ -152,16 +246,24 @@ class FixedTraceEligibility:
     @property
     def failure_reasons(self) -> list[str]:
         reasons = []
+        if not self.full_f1_anchor_boxed:
+            reasons.append("full_f1_anchor_not_boxed")
+        if not self.rkv_f1_anchor_boxed:
+            reasons.append("rkv_f1_anchor_not_boxed")
         if not self.full_f1_anchor_correct:
             reasons.append("full_f1_anchor_incorrect")
         if not self.rkv_f1_anchor_correct:
             reasons.append("rkv_f1_anchor_incorrect")
-        if not self.full_all_scored_present:
-            reasons.append("full_missing_scored_probe")
-        if not self.rkv_all_scored_present:
-            reasons.append("rkv_missing_scored_probe")
-        if not self.rkv_had_replay_compaction:
-            reasons.append("rkv_no_replay_compaction")
+        if not self.full_all_scored_extractable:
+            reasons.append("full_scored_probe_extraction_failed")
+        if not self.rkv_all_scored_extractable:
+            reasons.append("rkv_scored_probe_extraction_failed")
+        if not self.rkv_actual_compression_at_f1:
+            reasons.append("rkv_no_actual_compression_at_f1")
+        if not self.no_rkv_eviction_during_scored_probes:
+            reasons.append("rkv_evicted_during_answer_probe")
+        if not self.canonical_trace_base_correct:
+            reasons.append("canonical_trace_base_incorrect")
         if not self.canonical_trace_did_not_hit_cap:
             reasons.append("canonical_trace_cap_hit")
         if not self.canonical_trace_think_parsed:
@@ -214,22 +316,6 @@ def _assert_shared_trace_source(full_probes: FixedTraceRecords, rkv_probes: Fixe
             )
 
 
-def _matches_by_fraction_vs_anchor(
-    probes: dict[float, dict], fractions: tuple[float, ...]
-) -> dict[float, bool | None]:
-    out: dict[float, bool | None] = {}
-    for f in fractions:
-        rec = probes.get(f)
-        if rec is None:
-            continue
-        out[f] = rec.get("matches_f1_anchor_answer")
-    return out
-
-
-def _all_scored_present(matches: dict[float, bool | None], scored: tuple[float, ...]) -> bool:
-    return all(f in matches and matches[f] is not None for f in scored)
-
-
 @dataclass(frozen=True)
 class FixedTracePairResult:
     source_row_index: int
@@ -239,6 +325,10 @@ class FixedTracePairResult:
     pss_full: float | None
     pss_rkv: float | None
     delta_pss: float | None  # None unless eligible AND both PSS defined
+    full_f1_boxed: bool
+    rkv_f1_boxed: bool
+    rkv_actual_compression_at_f1: bool
+    rkv_f1_retention_ratio: float | None
 
 
 def build_fixed_trace_pairs(
@@ -265,18 +355,33 @@ def build_fixed_trace_pairs(
 
         full_matches = _matches_by_fraction_vs_anchor(full_group, scored_fractions)
         rkv_matches = _matches_by_fraction_vs_anchor(rkv_group, scored_fractions)
-        pss_full = compute_pss(full_matches, scored_fractions)
-        pss_rkv = compute_pss(rkv_matches, scored_fractions)
+        pss_full = _pss_for_side(full_group, scored_fractions)
+        pss_rkv = _pss_for_side(rkv_group, scored_fractions)
 
         full_f1 = full_group.get(1.0)
         rkv_f1 = rkv_group.get(1.0)
 
+        rkv_f1_retention = None
+        if rkv_f1 is not None:
+            retention = rkv_f1.get("replay_retention_at_cut")
+            if retention is not None:
+                rkv_f1_retention = retention.get("instantaneous_retention_ratio")
+
+        no_eviction_during_scored = all(
+            rkv_group.get(f, {}).get("probe_actual_eviction_during_answer", False) is not True
+            for f in scored_fractions
+        )
+
         elig = FixedTraceEligibility(
+            full_f1_anchor_boxed=_is_boxed(full_f1),
+            rkv_f1_anchor_boxed=_is_boxed(rkv_f1),
             full_f1_anchor_correct=bool(full_f1 and full_f1.get("f1_anchor_is_correct") is True),
             rkv_f1_anchor_correct=bool(rkv_f1 and rkv_f1.get("f1_anchor_is_correct") is True),
-            full_all_scored_present=_all_scored_present(full_matches, scored_fractions),
-            rkv_all_scored_present=_all_scored_present(rkv_matches, scored_fractions),
-            rkv_had_replay_compaction=bool(rkv_f1 and rkv_f1.get("replay_compaction_count_at_cut", 0) > 0),
+            full_all_scored_extractable=_all_scored_extractable(full_matches, scored_fractions),
+            rkv_all_scored_extractable=_all_scored_extractable(rkv_matches, scored_fractions),
+            rkv_actual_compression_at_f1=bool(rkv_f1 and rkv_f1.get("actual_compression_at_cut") is True),
+            no_rkv_eviction_during_scored_probes=no_eviction_during_scored,
+            canonical_trace_base_correct=base.get("is_correct") is True,
             canonical_trace_did_not_hit_cap=not bool(base.get("cap_hit", True)),
             canonical_trace_think_parsed=think_parsed_ok(base["think_span"]["think_parse_status"]),
         )
@@ -292,6 +397,10 @@ def build_fixed_trace_pairs(
                 pss_full=pss_full,
                 pss_rkv=pss_rkv,
                 delta_pss=delta,
+                full_f1_boxed=elig.full_f1_anchor_boxed,
+                rkv_f1_boxed=elig.rkv_f1_anchor_boxed,
+                rkv_actual_compression_at_f1=elig.rkv_actual_compression_at_f1,
+                rkv_f1_retention_ratio=rkv_f1_retention,
             )
         )
     return results
@@ -299,15 +408,20 @@ def build_fixed_trace_pairs(
 
 def fixed_trace_curve_by_fraction(
     records: FixedTraceRecords, fractions: tuple[float, ...] = PROBE_FRACTIONS_ALL
-) -> dict[float, float]:
+) -> dict[float, float | None]:
     """Descriptive match-vs-f1-anchor rate curve for ONE replay policy across
     all 9 probe fractions — same shape/philosophy as
     kvcot.analysis.pipeline.agreement_curve_by_fraction, but keyed against
     this policy's own f=1 anchor rather than each condition's own natural
     base answer. f=1 itself is included (its match rate is, by construction,
     how often an f=1-vs-f=1 comparison is defined at all, i.e. how often the
-    anchor itself extracted an answer) — descriptive only, not scored."""
-    curve: dict[float, float] = {}
+    anchor itself extracted an answer) — descriptive only, not scored.
+
+    None (not 0.0) for a fraction with zero valid measurements — 0.0 would
+    silently claim "a valid 0% match rate," which is a different, false,
+    statement from "no valid data exists at this fraction."
+    """
+    curve: dict[float, float | None] = {}
     for f in fractions:
         matches: list[bool] = []
         for group in records.probes_by_base.values():
@@ -317,27 +431,84 @@ def fixed_trace_curve_by_fraction(
             m = rec.get("matches_f1_anchor_answer")
             if m is not None:
                 matches.append(m)
-        curve[f] = (sum(1.0 for m in matches if m) / len(matches)) if matches else 0.0
+        curve[f] = (sum(1.0 for m in matches if m) / len(matches)) if matches else None
+    return curve
+
+
+def fixed_trace_compression_rate_by_fraction(
+    records: FixedTraceRecords, fractions: tuple[float, ...] = PROBE_FRACTIONS_ALL
+) -> dict[float, float | None]:
+    """Diagnostic-only: fraction of this replay policy's probes at each
+    fraction whose cache had ACTUALLY shrunk relative to FullKV-equivalent
+    slots (`actual_compression_at_cut`), never the recorded-event-count
+    proxy. None for a fraction with no probes on record."""
+    curve: dict[float, float | None] = {}
+    for f in fractions:
+        flags: list[bool] = []
+        for group in records.probes_by_base.values():
+            rec = group.get(f)
+            if rec is None or "actual_compression_at_cut" not in rec:
+                continue
+            flags.append(bool(rec["actual_compression_at_cut"]))
+        curve[f] = (sum(1.0 for v in flags if v) / len(flags)) if flags else None
     return curve
 
 
 def match_rate_delta_rkv_minus_full(
-    full_curve: dict[float, float], rkv_curve: dict[float, float]
-) -> dict[float, float]:
+    full_curve: dict[float, float | None], rkv_curve: dict[float, float | None]
+) -> dict[float, float | None]:
     """rkv_match_rate - full_match_rate, per fraction. NOT full - rkv: this is
     a match-rate (not a mismatch-rate) metric, so the less-sensitive-under-R-KV
     direction is a HIGHER match rate, i.e. a POSITIVE rkv-minus-full delta —
     the opposite subtraction order from compute_delta_pss, which is scored
     over a mismatch rate. Do not swap this without re-deriving both signs
-    together (see module docstring)."""
-    return {f: rkv_curve[f] - full_curve[f] for f in full_curve if f in rkv_curve}
+    together (see module docstring). None whenever either side is None."""
+    out: dict[float, float | None] = {}
+    for f in full_curve:
+        if f not in rkv_curve:
+            continue
+        full_v, rkv_v = full_curve[f], rkv_curve[f]
+        out[f] = (rkv_v - full_v) if (full_v is not None and rkv_v is not None) else None
+    return out
+
+
+def build_screen_validity(
+    n_eligible: int,
+    actual_compression_rate: float | None,
+    mean_f1_rkv_retention_ratio: float | None,
+    settings: "FixedTraceSettings",
+) -> tuple[bool, list[str]]:
+    """§ Step 11: whether this screen cleared the minimum bar to be
+    interpreted AT ALL — insufficient eligible examples, compression that
+    essentially never fired, or realized retention indistinguishable from
+    FullKV are each, independently, reasons this screen tested nothing about
+    the compression hypothesis (kill/continue gate, not a significance test).
+    """
+    reasons: list[str] = []
+    if n_eligible < settings.min_eligible_examples:
+        reasons.append(
+            f"n_eligible ({n_eligible}) below min_eligible_examples "
+            f"({settings.min_eligible_examples})"
+        )
+    if actual_compression_rate is None or actual_compression_rate < settings.min_actual_compression_rate:
+        reasons.append(
+            f"actual_compression_rate ({actual_compression_rate}) below "
+            f"min_actual_compression_rate ({settings.min_actual_compression_rate})"
+        )
+    if mean_f1_rkv_retention_ratio is None or mean_f1_rkv_retention_ratio > settings.max_mean_f1_retention_ratio:
+        reasons.append(
+            f"mean_f1_rkv_retention_ratio ({mean_f1_rkv_retention_ratio}) above "
+            f"max_mean_f1_retention_ratio ({settings.max_mean_f1_retention_ratio})"
+        )
+    return (len(reasons) == 0, reasons)
 
 
 def build_fixed_trace_decision(
     n_shared: int,
     pair_results: list[FixedTracePairResult],
-    full_curve: dict[float, float],
-    rkv_curve: dict[float, float],
+    full_curve: dict[float, float | None],
+    rkv_curve: dict[float, float | None],
+    settings: "FixedTraceSettings",
 ) -> dict:
     eligible = [p for p in pair_results if p.eligibility.eligible]
     deltas = [p.delta_pss for p in eligible if p.delta_pss is not None]
@@ -346,6 +517,30 @@ def build_fixed_trace_decision(
     n_positive = sum(1 for d in deltas if d > 0)
     n_negative = sum(1 for d in deltas if d < 0)
     n_ties = sum(1 for d in deltas if d == 0)
+
+    n_boxed_f1_full = sum(1 for p in pair_results if p.full_f1_boxed)
+    n_boxed_f1_rkv = sum(1 for p in pair_results if p.rkv_f1_boxed)
+    n_actual_compression_active = sum(1 for p in pair_results if p.rkv_actual_compression_at_f1)
+    actual_compression_rate = (n_actual_compression_active / n_shared) if n_shared > 0 else None
+
+    retention_values = [p.rkv_f1_retention_ratio for p in pair_results if p.rkv_f1_retention_ratio is not None]
+    mean_f1_rkv_retention_ratio = (
+        sum(retention_values) / len(retention_values) if retention_values else None
+    )
+
+    screen_valid, screen_invalid_reasons = build_screen_validity(
+        n_eligible=n_eligible,
+        actual_compression_rate=actual_compression_rate,
+        mean_f1_rkv_retention_ratio=mean_f1_rkv_retention_ratio,
+        settings=settings,
+    )
+    # Never report a characterization of the result ("positive"/"negative"/
+    # "gap exists"/"gap does not exist") — this screen's job is kill/continue,
+    # not a significance claim. "screened" only means the validity gates
+    # passed, i.e. mean_delta_pss/the curves above are backed by enough
+    # eligible, actually-compressed examples to be worth reading at all —
+    # it is still a descriptive count, not a statistical result.
+    hypothesis_status = "screened" if screen_valid else "not_tested"
 
     return {
         "claim_boundary_notice": CLAIM_BOUNDARY_NOTICE,
@@ -360,10 +555,18 @@ def build_fixed_trace_decision(
         ),
         "n_shared": n_shared,
         "n_eligible": n_eligible,
+        "n_boxed_f1_full": n_boxed_f1_full,
+        "n_boxed_f1_rkv": n_boxed_f1_rkv,
+        "n_actual_compression_active": n_actual_compression_active,
+        "actual_compression_rate": actual_compression_rate,
+        "mean_f1_rkv_retention_ratio": mean_f1_rkv_retention_ratio,
         "mean_delta_pss": mean_delta_pss,
         "n_positive": n_positive,
         "n_negative": n_negative,
         "n_ties": n_ties,
+        "screen_valid": screen_valid,
+        "screen_invalid_reasons": screen_invalid_reasons,
+        "hypothesis_status": hypothesis_status,
         "full_curve": {str(k): v for k, v in full_curve.items()},
         "rkv_curve": {str(k): v for k, v in rkv_curve.items()},
         "match_rate_delta_rkv_minus_full": {
@@ -379,6 +582,8 @@ def build_fixed_trace_decision(
                 "pss_full": p.pss_full,
                 "pss_rkv": p.pss_rkv,
                 "delta_pss": p.delta_pss,
+                "rkv_actual_compression_at_f1": p.rkv_actual_compression_at_f1,
+                "rkv_f1_retention_ratio": p.rkv_f1_retention_ratio,
             }
             for p in pair_results
         ],
@@ -390,6 +595,7 @@ def run_fixed_trace_analysis(
     trace_condition: str,
     replay_condition: str,
     stage_name: str,
+    settings: "FixedTraceSettings",
 ) -> int:
     """End-to-end: read the canonical base file plus both replay policies'
     fixed-trace probe files from `output_dir`, pair/score them, and write
@@ -411,11 +617,11 @@ def run_fixed_trace_analysis(
     full_curve = fixed_trace_curve_by_fraction(full_probes)
     rkv_curve = fixed_trace_curve_by_fraction(rkv_probes)
 
-    decision = build_fixed_trace_decision(len(pairs), pairs, full_curve, rkv_curve)
+    decision = build_fixed_trace_decision(len(pairs), pairs, full_curve, rkv_curve, settings)
     out_path = Path("results/decisions") / f"{stage_name}_fixed_trace.json"
     write_json(out_path, decision)
     print(
         f"wrote {out_path}: n_shared={decision['n_shared']} n_eligible={decision['n_eligible']} "
-        f"mean_delta_pss={decision['mean_delta_pss']}"
+        f"mean_delta_pss={decision['mean_delta_pss']} hypothesis_status={decision['hypothesis_status']}"
     )
     return 0

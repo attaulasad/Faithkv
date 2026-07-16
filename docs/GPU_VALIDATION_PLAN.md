@@ -164,6 +164,7 @@ manifest first:
 
 ```bash
 kvcot generate --config configs/early_gap_b512.yaml --condition full
+kvcot inspect-fixed-trace --config configs/early_gap_b512.yaml --trace-condition full  # CPU preflight; stops if no trace exceeds the budget
 kvcot replay-fixed-trace --config configs/early_gap_b512.yaml --trace-condition full --replay-condition full
 kvcot replay-fixed-trace --config configs/early_gap_b512.yaml --trace-condition full --replay-condition rkv_b512
 kvcot analyze-fixed-trace --config configs/early_gap_b512.yaml --trace-condition full --replay-condition rkv_b512
@@ -173,5 +174,49 @@ Reads `results/decisions/early_gap_b512_fixed_trace.json` — descriptive
 counts only (n=10, one seed), no p-value. See `docs/EXPERIMENT.md` §11 and
 `CHANGELOG.md`'s 2026-07-16 entry for what this measures and why it is
 additive to, not a substitute for, Stage 0-2 above. `early_gap_b256.yaml`/
-`early_gap_b1024.yaml` are budget-escalation fallbacks (same three commands,
-substituting the condition/config names).
+`early_gap_b1024.yaml` are budget-escalation fallbacks (same commands,
+substituting the condition/config names). **Protocol v2 (2026-07-16):** any
+`results/raw/early_gap_b*` directory generated before this date is protocol
+v1 (`schema_version` `"1.1.0"`, empty fixed-trace suffix, event-count
+eligibility) and produced zero eligible examples — do not resume it; start
+a fresh `output_dir` (or delete/rename the old one) before rerunning.
+
+### One-example gate before a full rerun
+
+Per the corrected protocol's own validation order: run ONE fixed-trace
+example first (`--limit 1 --problem-index <n>` on each command above) and
+confirm, from the written records/decision JSON, all of the following before
+running the full n=10 screen:
+
+- Both FullKV and R-KV f=1 extraction status is `"boxed"` (never
+  `final_number_fallback`).
+- Both f=1 answers equal gold.
+- Neither f=1 probe hit its token cap (`probe_cap_hit` is `False`).
+- R-KV shows `actual_compression_at_cut: true` at f=1 with
+  `instantaneous_retention_ratio < 1.0`.
+- `probe_actual_eviction_during_answer` is `False` for R-KV's scored probes.
+- `git status` shows a clean tree (`git_dirty: false` in the record's own
+  provenance) before the run started.
+
+If any of these fail, stop and fix the specific cause rather than running
+the full n=10 screen — the full screen only adds sample size to a result
+that is already known-invalid at n=1.
+
+### GPU test process isolation (§ Step 13/14, 2026-07-16)
+
+`tests/integration/test_replay_gpu.py` and `test_probe_stability_gpu.py` now
+run every patched-R-KV test (and the FullKV identity test in
+`test_replay_gpu.py`) inside its own `spawn`ed subprocess — never in the
+shared pytest process. This matters because the R-KV monkeypatch on
+`transformers.models.qwen2` is process-global with no per-instance undo
+(`docs/UPSTREAM_AUDIT.md` H1); mixing a stock and a patched test (or two
+different R-KV configs) in one process is unsafe even though
+`kvcot.generation.state.declare_process_mode` will usually catch and refuse
+the conflict first. Both files must still pass as complete files, not just as
+individually-run tests — a change that passes one test alone but breaks the
+file as a whole reintroduces exactly this class of bug:
+
+```bash
+pytest -m gpu tests/integration/test_replay_gpu.py -v
+pytest -m gpu tests/integration/test_probe_stability_gpu.py -v
+```

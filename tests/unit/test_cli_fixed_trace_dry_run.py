@@ -22,7 +22,7 @@ from kvcot.cli import (
     cmd_analyze_fixed_trace,
     cmd_replay_fixed_trace,
 )
-from kvcot.config import StageConfig
+from kvcot.config import FixedTraceSettings, StageConfig
 from kvcot.utils.io import JsonlWriter
 
 EARLY_GAP_CONFIG = "configs/early_gap_b512.yaml"
@@ -34,6 +34,7 @@ def _stage(conditions, **overrides):
         dataset_manifest="data/manifests/gsm8k_calibration_50.jsonl",
         conditions=conditions,
         output_dir="results/raw/early_gap_b512",
+        fixed_trace=FixedTraceSettings(),
     )
     defaults.update(overrides)
     return StageConfig(**defaults)
@@ -173,6 +174,38 @@ def test_replay_fixed_trace_dry_run_works_for_rkv_replay_condition(capsys):
 def test_replay_fixed_trace_dry_run_rejects_unknown_replay_condition():
     with pytest.raises(SystemExit):
         cmd_replay_fixed_trace(_fixed_trace_args(replay_condition="rkv_b999"))
+
+
+def test_replay_fixed_trace_requires_fixed_trace_settings(monkeypatch, capsys):
+    # §ステップ2/4: a stage config missing `fixed_trace:` must refuse to run —
+    # falling back to the frozen primary probes.* settings would silently let
+    # a fixed-trace-motivated change alter the frozen EAS experiment.
+    from kvcot.config import load_stage_config as real_load_stage_config
+
+    def _load_without_fixed_trace(path):
+        stage, lock = real_load_stage_config(path)
+        stage.fixed_trace = None
+        return stage, lock
+
+    monkeypatch.setattr("kvcot.cli.load_stage_config", _load_without_fixed_trace)
+    with pytest.raises(SystemExit):
+        cmd_replay_fixed_trace(_fixed_trace_args())
+
+
+def test_analyze_fixed_trace_requires_fixed_trace_settings(monkeypatch):
+    from kvcot.config import load_stage_config as real_load_stage_config
+
+    def _load_without_fixed_trace(path):
+        stage, lock = real_load_stage_config(path)
+        stage.fixed_trace = None
+        return stage, lock
+
+    monkeypatch.setattr("kvcot.cli.load_stage_config", _load_without_fixed_trace)
+    args = SimpleNamespace(
+        config=EARLY_GAP_CONFIG, trace_condition="full", replay_condition="rkv_b512", dry_run=True
+    )
+    with pytest.raises(SystemExit):
+        cmd_analyze_fixed_trace(args)
 
 
 # --- analyze-fixed-trace --dry-run ---

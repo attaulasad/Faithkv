@@ -7,6 +7,7 @@ from kvcot.config import (
     load_lock_config,
     load_stage_config,
     config_identity,
+    FixedTraceSettings,
     PROBE_FRACTIONS_ALL,
     PROBE_FRACTIONS_SCORED,
     StageConfig,
@@ -101,3 +102,55 @@ def test_seeds_override_must_be_subset_of_lock_seeds():
     stage.seeds_override = [999]
     with pytest.raises(ValueError):
         stage.resolve_seeds(lock)
+
+
+# --- FixedTraceSettings (§ Step 2/15) ---
+
+def test_fixed_trace_settings_defaults():
+    settings = FixedTraceSettings()
+    assert settings.probe_max_new_tokens == 64
+    assert settings.require_boxed_extraction is True
+    assert settings.min_eligible_examples == 5
+    assert settings.min_actual_compression_rate == 0.7
+    assert settings.max_mean_f1_retention_ratio == 0.7
+
+
+def test_fixed_trace_settings_rejects_zero_or_negative_probe_limit():
+    with pytest.raises(ValidationError):
+        FixedTraceSettings(probe_max_new_tokens=0)
+    with pytest.raises(ValidationError):
+        FixedTraceSettings(probe_max_new_tokens=-1)
+
+
+def test_fixed_trace_settings_rejects_out_of_range_rates():
+    with pytest.raises(ValidationError):
+        FixedTraceSettings(min_actual_compression_rate=1.5)
+    with pytest.raises(ValidationError):
+        FixedTraceSettings(min_actual_compression_rate=-0.1)
+    with pytest.raises(ValidationError):
+        FixedTraceSettings(max_mean_f1_retention_ratio=0.0)
+    with pytest.raises(ValidationError):
+        FixedTraceSettings(max_mean_f1_retention_ratio=1.1)
+
+
+def test_fixed_trace_settings_rejects_zero_min_eligible_examples():
+    with pytest.raises(ValidationError):
+        FixedTraceSettings(min_eligible_examples=0)
+
+
+def test_early_gap_configs_load_fixed_trace_settings():
+    stage, _lock = load_stage_config("configs/early_gap_b512.yaml")
+    assert stage.fixed_trace is not None
+    assert stage.fixed_trace.probe_max_new_tokens == 64
+
+
+def test_stage_config_fixed_trace_defaults_to_none():
+    stage, _lock = load_stage_config("configs/stage0_smoke.yaml")
+    assert stage.fixed_trace is None
+
+
+def test_primary_lock_probes_max_new_tokens_is_unchanged():
+    # Frozen §4 value — the fixed-trace screen must never touch this;
+    # its own decoding budget lives in FixedTraceSettings.probe_max_new_tokens.
+    lock = load_lock_config(LOCK_PATH)
+    assert lock.probes.max_new_tokens == 48

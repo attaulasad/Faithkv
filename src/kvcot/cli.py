@@ -581,7 +581,7 @@ def cmd_replay_probe(args: argparse.Namespace) -> int:
     from kvcot.probes.early_answering import ThinkSpanResult, absolute_cut_position
     from kvcot.probes.templates import render_control_suffix
     from kvcot.schemas import ProbeRunRecord, ProvenanceState
-    from kvcot.utils.answers import answers_match, extract_answer
+    from kvcot.utils.answers import answers_match_or_none, extract_answer
     from kvcot.utils.io import JsonlWriter, read_jsonl
 
     policy = build_policy(condition, lock)
@@ -670,7 +670,7 @@ def cmd_replay_probe(args: argparse.Namespace) -> int:
                 probe_output_text=probe_text,
                 normalized_probe_answer=probe_answer.normalized_value,
                 probe_extraction_status=probe_answer.method,
-                matches_own_condition_base_answer=answers_match(probe_answer.normalized_value, base_answer),
+                matches_own_condition_base_answer=answers_match_or_none(probe_answer.normalized_value, base_answer),
                 is_f1_stability_probe=(fraction == 1.0),
                 snapshot_cache_hash=_hash_snapshot_cache_content(snap),
                 snapshot_provenance_hash=_hash_snapshot_provenance_content(snap),
@@ -734,6 +734,8 @@ def _add_fixed_trace_run_args(parser: argparse.ArgumentParser) -> None:
 
 def cmd_replay_fixed_trace(args: argparse.Namespace) -> int:
     stage, lock = load_stage_config(args.config)
+    if stage.fixed_trace is None:
+        raise SystemExit(f"{stage.stage_name}: missing required fixed_trace settings")
     trace_condition = _resolve_condition_name(stage, args.trace_condition)
     replay_condition = _resolve_condition_name(stage, args.replay_condition)
 
@@ -781,8 +783,8 @@ def cmd_replay_fixed_trace(args: argparse.Namespace) -> int:
     from kvcot.generation.replay import branch_and_probe, replay_and_snapshot
     from kvcot.probes.early_answering import ThinkSpanResult, absolute_cut_position
     from kvcot.probes.templates import render_fixed_trace_suffix
-    from kvcot.schemas import FixedTraceProbeRecord, ProvenanceState
-    from kvcot.utils.answers import answers_match, extract_answer
+    from kvcot.schemas import FixedTraceProbeRecord, ProvenanceState, RetentionSummary
+    from kvcot.utils.answers import answers_match_or_none, extract_answer, has_complete_boxed_answer
     from kvcot.utils.io import JsonlWriter, read_jsonl
 
     policy = build_policy(replay_condition, lock)
@@ -792,6 +794,15 @@ def cmd_replay_fixed_trace(args: argparse.Namespace) -> int:
     close_ids = tokenizer.encode("</think>", add_special_tokens=False)
     fixed_suffix_ids = tokenizer.encode(render_fixed_trace_suffix(), add_special_tokens=False)
     device = "cuda"
+    probe_max_new_tokens = stage.fixed_trace.probe_max_new_tokens
+
+    def boxed_answer_complete(generated_ids: list[int]) -> bool:
+        """Stop as soon as the box closes (§ Step 5): reconstructs the same
+        prefix+generated text `extract_answer` will later see and checks for
+        a complete `\\boxed{...}`, so decoding never continues into a second
+        solution attempt once the answer is already unambiguous."""
+        text = tokenizer.decode(fixed_suffix_ids + generated_ids, skip_special_tokens=True)
+        return has_complete_boxed_answer(text)
 
     if output_path.exists():
         _verify_resumable_record_ids(output_path, FixedTraceProbeRecord, expected_identity)
@@ -860,15 +871,71 @@ def cmd_replay_fixed_trace(args: argparse.Namespace) -> int:
             snap = snapshots[fraction]
             result = branch_and_probe(
                 model, DynamicCache(), snap, close_ids, fixed_suffix_ids,
-                lock.probes.max_new_tokens, tokenizer.eos_token_id, device,
+                probe_max_new_tokens, tokenizer.eos_token_id, device,
+                stop_predicate=boxed_answer_complete,
             )
-            probe_text = tokenizer.decode(result.probe_output_token_ids, skip_special_tokens=True)
-            probe_answer = extract_answer(probe_text)
+            # §7: extraction must run over the RECONSTRUCTED text (teacher-
+            # forced boxed-answer prefix + generated tokens), never the
+            # generated tokens alone — the opening `\boxed{` lives in the
+            # prefix, not in anything the model itself generated.
+            probe_output_text = tokenizer.decode(result.probe_output_token_ids, skip_special_tokens=True)
+            probe_extraction_text = tokenizer.decode(
+                fixed_suffix_ids + result.probe_output_token_ids, skip_special_tokens=True
+            )
+            probe_answer = extract_answer(probe_extraction_text)
+
+            # §7 realized retention/compression AT THE CUT (the snapshot this
+            # probe branched from) — measured, never derived from the
+            # configured budget (§9). A recorded compaction event count > 0
+            # is not sufficient evidence of actual compression (the exact-
+            # budget-boundary zero-eviction case, kvcot.generation.replay
+            # module docstring), so this checks physical cache length
+            # directly against what FullKV would have at this position.
+            snapshot_cache_lengths = [int(t.shape[-2]) for t in snap.key_cache]
+            fullkv_equivalent_slots = snap.absolute_position
+            mean_physical_slots = sum(snapshot_cache_lengths) / len(snapshot_cache_lengths)
+            retention_ratio = (
+                mean_physical_slots / fullkv_equivalent_slots if fullkv_equivalent_slots > 0 else 0.0
+            )
+            actual_compression_at_cut = any(
+                cache_length < fullkv_equivalent_slots for cache_length in snapshot_cache_lengths
+            )
+            replay_retention_at_cut = RetentionSummary(
+                fullkv_equivalent_slots=fullkv_equivalent_slots,
+                physical_cache_slots_per_layer=snapshot_cache_lengths,
+                instantaneous_retention_ratio=retention_ratio,
+                post_compaction_budget_tokens=(
+                    policy.method_config.budget if hasattr(policy, "method_config") else None
+                ),
+                tokens_since_last_compaction=snap.tokens_since_last_compaction,
+            )
+
+            # §8: detect compression that happened WHILE writing the answer
+            # (after the cut), which the cut snapshot above cannot show —
+            # the answer should reflect the cache state at the reasoning
+            # cut, not a further eviction during its own decoding.
+            tokens_fed_during_probe = result.final_absolute_position - snap.absolute_position
+            expected_lengths_without_eviction = [
+                start_length + tokens_fed_during_probe for start_length in snapshot_cache_lengths
+            ]
+            probe_actual_eviction_during_answer = any(
+                final_length < expected_length
+                for final_length, expected_length in zip(
+                    result.final_cache_lengths_per_layer, expected_lengths_without_eviction
+                )
+            )
+
             temp_results[fraction] = {
                 "snapshot": snap,
                 "probe_output_token_ids": result.probe_output_token_ids,
-                "probe_text": probe_text,
+                "probe_output_text": probe_output_text,
+                "probe_extraction_text": probe_extraction_text,
                 "probe_answer": probe_answer,
+                "probe_stop_reason": result.stop_reason,
+                "replay_retention_at_cut": replay_retention_at_cut,
+                "actual_compression_at_cut": actual_compression_at_cut,
+                "probe_cache_length_final_per_layer": result.final_cache_lengths_per_layer,
+                "probe_actual_eviction_during_answer": probe_actual_eviction_during_answer,
             }
 
         # Anchor: this replay policy's OWN greedy f=1 answer — never the
@@ -876,8 +943,8 @@ def cmd_replay_fixed_trace(args: argparse.Namespace) -> int:
         # FixedTraceProbeRecord docstring; kvcot.analysis.fixed_trace).
         f1_answer = temp_results[1.0]["probe_answer"].normalized_value
         source_base_answer = base["extracted_answer"]
-        f1_matches_source_base = answers_match(f1_answer, source_base_answer)
-        f1_is_correct = answers_match(f1_answer, base["dataset"]["normalized_gold"])
+        f1_matches_source_base = answers_match_or_none(f1_answer, source_base_answer)
+        f1_is_correct = answers_match_or_none(f1_answer, base["dataset"]["normalized_gold"])
 
         for fraction in lock.probes.fractions_all:
             n_attempted += 1
@@ -908,13 +975,20 @@ def cmd_replay_fixed_trace(args: argparse.Namespace) -> int:
                 cut_index=cut_positions[fraction] - len(base["prompt_token_ids"]) - span.think_start_index,
                 close_marker_token_ids=close_ids,
                 control_suffix_token_ids=fixed_suffix_ids,
-                probe_decoding_max_new_tokens=lock.probes.max_new_tokens,
+                probe_decoding_max_new_tokens=probe_max_new_tokens,
                 probe_output_token_ids=item["probe_output_token_ids"],
-                probe_output_text=item["probe_text"],
+                probe_output_text=item["probe_output_text"],
+                probe_extraction_text=item["probe_extraction_text"],
                 normalized_probe_answer=probe_answer.normalized_value,
                 probe_extraction_status=probe_answer.method,
+                probe_stop_reason=item["probe_stop_reason"],
+                probe_cap_hit=(item["probe_stop_reason"] == "max_new_tokens"),
+                replay_retention_at_cut=item["replay_retention_at_cut"],
+                actual_compression_at_cut=item["actual_compression_at_cut"],
+                probe_cache_length_final_per_layer=item["probe_cache_length_final_per_layer"],
+                probe_actual_eviction_during_answer=item["probe_actual_eviction_during_answer"],
                 normalized_f1_anchor_answer=f1_answer,
-                matches_f1_anchor_answer=answers_match(probe_answer.normalized_value, f1_answer),
+                matches_f1_anchor_answer=answers_match_or_none(probe_answer.normalized_value, f1_answer),
                 f1_anchor_matches_source_base_answer=f1_matches_source_base,
                 f1_anchor_is_correct=f1_is_correct,
                 replay_compaction_count_at_cut=len(snap.compaction_event_steps),
@@ -1200,6 +1274,8 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
 def cmd_analyze_fixed_trace(args: argparse.Namespace) -> int:
     stage, _lock = load_stage_config(args.config)
+    if stage.fixed_trace is None:
+        raise SystemExit(f"{stage.stage_name}: missing required fixed_trace settings")
     trace_condition = _resolve_condition_name(stage, args.trace_condition)
     replay_condition = _resolve_condition_name(stage, args.replay_condition)
 
@@ -1221,7 +1297,107 @@ def cmd_analyze_fixed_trace(args: argparse.Namespace) -> int:
         trace_condition=trace_condition,
         replay_condition=replay_condition,
         stage_name=stage.stage_name,
+        settings=stage.fixed_trace,
     )
+
+
+# ------------------------------------------------------------------ inspect-fixed-trace
+
+_THINK_PARSE_OK_STATUSES = ("ok", "generation_prompt_preopened_ok")
+
+
+def cmd_inspect_fixed_trace(args: argparse.Namespace) -> int:
+    """CPU-only trace-length preflight (§ Step 16) for the fixed-trace
+    screen — run BEFORE spending any GPU time on `replay-fixed-trace`.
+    Reads one condition's already-generated base file (normally
+    `--trace-condition full`, the canonical trace source) and reports think-
+    span/prompt+think-span length statistics against the stage's configured
+    R-KV budget. If no trace in the file is even longer than the budget,
+    R-KV can never compress anything during replay (`rkv_no_replay_compaction`
+    for every example, guaranteed) — this command stops immediately in that
+    case rather than letting a GPU run discover it. This cannot by itself
+    prove compression will happen (a longer-than-budget trace can still
+    fail to compact if e.g. its think span is short relative to
+    divide_length), only rule out the "definitely can't" case cheaply.
+    """
+    import statistics
+
+    from kvcot.utils.io import read_jsonl
+
+    stage, lock = load_stage_config(args.config)
+    trace_condition = _resolve_condition_name(stage, args.trace_condition)
+    base_path = Path(stage.output_dir) / f"{trace_condition}.jsonl"
+
+    if args.dry_run:
+        print(f"inspect-fixed-trace plan: stage={stage.stage_name} trace_condition={trace_condition}")
+        print(f"  reads: {base_path}")
+        return 0
+
+    records = list(read_jsonl(base_path))
+    if not records:
+        print(f"inspect-fixed-trace: no records found in {base_path} — run `kvcot generate` first.")
+        return 1
+
+    n_total = len(records)
+    n_correct = sum(1 for r in records if r.get("is_correct") is True)
+    n_cap_hits = sum(1 for r in records if r.get("cap_hit"))
+    n_think_parse_failures = sum(
+        1 for r in records if r["think_span"]["think_parse_status"] not in _THINK_PARSE_OK_STATUSES
+    )
+
+    think_lengths: list[int] = []
+    prompt_plus_think_lengths: list[int] = []
+    for r in records:
+        span = r["think_span"]
+        if span["think_parse_status"] not in _THINK_PARSE_OK_STATUSES:
+            continue
+        start, end = span["think_start_index"], span["think_end_index"]
+        if start is None or end is None:
+            continue
+        length = max(0, end - start)
+        think_lengths.append(length)
+        prompt_plus_think_lengths.append(len(r["prompt_token_ids"]) + length)
+
+    budget = stage.rkv_budgets[0] if stage.rkv_budgets else None
+    n_longer_than_budget = (
+        sum(1 for L in prompt_plus_think_lengths if L > budget) if budget is not None else None
+    )
+    fraction_longer = (
+        n_longer_than_budget / len(prompt_plus_think_lengths)
+        if (budget is not None and prompt_plus_think_lengths)
+        else None
+    )
+
+    def _fmt(fn, values):
+        return fn(values) if values else None
+
+    print(f"inspect-fixed-trace: {base_path}")
+    print(f"  number of records: {n_total}")
+    print(f"  number correct: {n_correct}")
+    print(f"  cap hits: {n_cap_hits}")
+    print(f"  think parse failures: {n_think_parse_failures}")
+    print(
+        f"  think length: min={_fmt(min, think_lengths)} "
+        f"median={_fmt(statistics.median, think_lengths)} max={_fmt(max, think_lengths)}"
+    )
+    print(
+        f"  prompt+think length: min={_fmt(min, prompt_plus_think_lengths)} "
+        f"median={_fmt(statistics.median, prompt_plus_think_lengths)} "
+        f"max={_fmt(max, prompt_plus_think_lengths)}"
+    )
+    print(f"  configured R-KV budget: {budget}")
+    print(f"  fraction of traces longer than budget: {fraction_longer}")
+
+    if budget is not None and prompt_plus_think_lengths and n_longer_than_budget == 0:
+        print(
+            "inspect-fixed-trace: STOP — no trace in this file is longer than the configured "
+            f"budget ({budget}); R-KV compression can never fire during replay at this budget. "
+            "Choose a smaller budget or a longer-trace manifest before running replay-fixed-trace. "
+            "(This preflight cannot prove compression will happen — only rule out the case where "
+            "it definitely cannot.)"
+        )
+        return 1
+    return 0
 
 
 # ------------------------------------------------------------------ calibrate-budget
@@ -1398,6 +1574,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--replay-condition", required=True)
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_analyze_fixed_trace)
+
+    p = sub.add_parser("inspect-fixed-trace")
+    p.add_argument("--config", required=True)
+    p.add_argument("--trace-condition", default="full")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_inspect_fixed_trace)
 
     p = sub.add_parser("calibrate-budget")
     p.add_argument("--config-dir", default="configs")

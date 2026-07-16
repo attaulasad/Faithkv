@@ -55,23 +55,40 @@ def render_control_suffix() -> str:
 # Used only by the secondary, additive fixed-trace probe
 # (kvcot.cli.cmd_replay_fixed_trace / kvcot.analysis.fixed_trace) — never by
 # the frozen replay-probe/EAS pipeline above, which always uses
-# CONTROL_SUFFIX_TEXT. Deliberately empty: unlike the early-answering probe
-# (which must work when branched from f=0, almost no visible reasoning yet,
-# and so needs an explicit "stop and answer" instruction), the fixed-trace
-# probe's whole point is prefix-sufficiency under a shared canonical trace —
-# injecting "Stop reasoning now. Based on everything above..." risks cueing
-# the model to recompute the answer directly from the question rather than
-# from the (possibly-compressed) reasoning prefix actually in its cache,
-# which would confound the two conditions' cache states with two different
-# answer-elicitation strategies. The closing </think> marker alone supplies
-# the next-token logits needed to start greedy answer decoding (see
-# kvcot.generation.replay.branch_and_probe: it only requires the closing
-# marker and suffix not both be empty).
-FIXED_TRACE_SUFFIX_TEXT = ""
+# CONTROL_SUFFIX_TEXT.
+#
+# Protocol v2 (2026-07-16, CHANGELOG.md): the original design left this
+# empty, relying on the closing `</think>` marker alone to start greedy
+# answer decoding in the model's normal answer mode. In practice R1-Distill's
+# answer mode is a verbose structured write-up that essentially never reaches
+# a `\boxed{...}` (or even `Final answer:`) within the frozen 48-token probe
+# budget, so extraction fell through to the conservative final-number
+# fallback on nearly every probe — an incidental mid-sentence number, not an
+# intended answer. That silently contaminated every fixed-trace match/PSS
+# value (kvcot.utils.answers.extract_answer's fallback tier is documented as
+# "conservative", not "reliable enough to anchor a metric on").
+#
+# The fix is a teacher-forced FORMAT prefix, not a recomputation instruction:
+# "\n\nFinal answer: \\boxed{" forces the model directly into the box, with
+# no natural-language content that could cue it to re-derive the answer from
+# the question rather than continue from the (possibly-compressed) reasoning
+# prefix actually in its cache. This is identical across conditions (fed as
+# plain teacher-forced tokens before probe decoding begins, exactly like the
+# closing marker), so it cannot itself introduce a policy-dependent confound.
+# Never add instructions such as "solve again" / "recalculate" / "use the
+# question" / "explain your answer" here — those would encourage
+# recomputation, defeating the fixed-trace design's whole point (prefix
+# sufficiency under a SHARED reasoning prefix, kvcot.analysis.fixed_trace's
+# module docstring).
+FIXED_TRACE_SUFFIX_TEXT = "\n\nFinal answer: \\boxed{"
 
 
 def render_fixed_trace_suffix() -> str:
-    """No natural-language intervention. The replay branch feeds the model's
-    native </think> marker and then allows greedy answer generation to begin
-    in the model's normal answer mode."""
+    """Teacher-forced format prefix only (see FIXED_TRACE_SUFFIX_TEXT) — no
+    natural-language instruction. The replay branch feeds the model's native
+    </think> marker, then this prefix, then allows greedy answer decoding to
+    continue writing the box's contents (kvcot.cli.cmd_replay_fixed_trace
+    reconstructs the full answer text as this prefix + the generated tokens,
+    kvcot.utils.answers.has_complete_boxed_answer/extract_answer operate on
+    that reconstructed text, never on the generated tokens alone)."""
     return FIXED_TRACE_SUFFIX_TEXT

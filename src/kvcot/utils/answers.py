@@ -170,3 +170,30 @@ def answers_match(normalized_a: str | None, normalized_b: str | None) -> bool:
     if normalized_a is None or normalized_b is None:
         return False
     return normalized_a == normalized_b
+
+
+def answers_match_or_none(normalized_a: str | None, normalized_b: str | None) -> bool | None:
+    """Three-valued match, for call sites that must not conflate "the model
+    produced a valid but different answer" (False) with "we could not
+    extract a valid answer at all" (None) — the two are scientifically
+    different failure modes and coercing the second into the first silently
+    (as plain `==` comparison would) hides extraction breakage inside what
+    looks like a normal disagreement rate. `answers_match` above is kept
+    separate (and still used by the frozen primary replay-probe path, whose
+    §8 match_i,c,s(f) definition is explicitly two-valued) — this function
+    is for newer call sites (fixed-trace probe matching) that need the
+    third value."""
+    if normalized_a is None or normalized_b is None:
+        return None
+    return normalized_a == normalized_b
+
+
+def has_complete_boxed_answer(text: str) -> bool:
+    """True iff `text` contains at least one well-formed (balanced-brace)
+    `\\boxed{...}` occurrence — used as a stopping predicate during greedy
+    fixed-trace probe decoding (kvcot.generation.replay.branch_and_probe's
+    `stop_predicate`) so decoding halts the instant the box closes, rather
+    than continuing to `max_new_tokens` and risking a second solution
+    attempt inside the same generation. An unclosed `\\boxed{` does not
+    count (mirrors `_find_all_boxed`'s own malformed-box handling)."""
+    return bool(_find_all_boxed(text))

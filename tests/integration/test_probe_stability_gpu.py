@@ -8,11 +8,28 @@ protocol (control suffix wording, decoding config), not a scientific result
 — §10 is explicit that a failure here means "inspect the control suffix and
 decoding protocol first, report, ask," not tune the statistic to pass.
 
+Process isolation (§ Step 14, 2026-07-16): the original version ran both
+parametrized conditions ("full", "rkv_b{RKV_BUDGET}") inside one pytest
+process. `kvcot.generation.state.declare_process_mode` would already refuse
+that (stock vs. patched in one process raises `ProcessModeConflictError`),
+and even without that guard the R-KV monkeypatch on
+`transformers.models.qwen2` is process-global with no per-instance undo
+(docs/UPSTREAM_AUDIT.md H1) — a second condition loaded in the same process
+would silently run against an already-patched class. Each condition's
+`_run_condition_stability` body now runs inside its own `spawn`ed
+subprocess (never `fork`, so neither process inherits an already-imported,
+possibly-patched `transformers.models.qwen2` from the other), mirroring the
+pattern already used successfully in
+tests/integration/test_patched_noop_parity_gpu.py. The parent pytest
+process receives only a small `{"n_valid", "n_stable"}` dict back over the
+queue — the model/tensors themselves never cross the process boundary.
+
 Implemented in full, marked `@pytest.mark.gpu`; auto-skipped on this build
 machine (no CUDA device). See docs/GPU_VALIDATION_PLAN.md.
 """
 from __future__ import annotations
 
+import multiprocessing as mp
 import os
 
 import pytest
@@ -42,7 +59,7 @@ def _load_manifest_rows(n: int) -> list[dict]:
     return rows[:n]
 
 
-def _run_condition_stability(condition: str) -> dict:
+def _run_condition_stability(condition: str) -> dict:  # pragma: no cover - runs in a spawned process
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from transformers.cache_utils import DynamicCache
@@ -118,10 +135,25 @@ def _run_condition_stability(condition: str) -> dict:
     return {"n_valid": n_valid, "n_stable": n_stable}
 
 
+def _stability_worker(condition: str, result_queue: "mp.Queue") -> None:  # pragma: no cover - runs in a spawned process
+    result_queue.put(_run_condition_stability(condition))
+
+
+def _run_in_subprocess(condition: str) -> dict:
+    ctx = mp.get_context("spawn")
+    queue = ctx.Queue()
+    proc = ctx.Process(target=_stability_worker, args=(condition, queue))
+    proc.start()
+    result = queue.get(timeout=1200)
+    proc.join(timeout=1200)
+    assert proc.exitcode == 0, f"subprocess for condition={condition} exited with {proc.exitcode}"
+    return result
+
+
 @pytest.mark.gpu
 @pytest.mark.parametrize("condition", ["full", f"rkv_b{RKV_BUDGET}"])
 def test_f1_probe_stability_meets_threshold(condition):
-    result = _run_condition_stability(condition)
+    result = _run_in_subprocess(condition)
     assert result["n_valid"] > 0, "no valid (non-cap-hit, both-extractable) examples to evaluate stability on"
     rate = result["n_stable"] / result["n_valid"]
     print(f"condition={condition}: f=1 stability rate = {rate:.3f} ({result['n_stable']}/{result['n_valid']})")
