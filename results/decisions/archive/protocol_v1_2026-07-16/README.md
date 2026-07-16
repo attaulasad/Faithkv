@@ -20,7 +20,9 @@ raw per-example retention/compaction numbers were the basis for choosing
 config's own header comment).
 
 `kvcot.analysis.fixed_trace.run_fixed_trace_analysis` now validates every
-input record's schema (`schema_version` is a Pydantic `Literal["1.2.0"]`)
-and (config, model, upstream-commit) identity before analyzing anything, so
-these files — or any other protocol-v1/mismatched-run data — cannot be
-silently re-read as if they were current protocol-v2 output.
+input record's schema (`schema_version` is a Pydantic `Literal`, currently
+`"1.3.0"` — see `docs/SCHEMA.md`'s Versioning section for the current value
+and full history) and (config, model, upstream-commit) identity before
+analyzing anything, so these files — or any other protocol-v1/mismatched-run
+data — cannot be silently re-read as if they were current protocol-v2
+output.

@@ -5,6 +5,54 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-16 — Fixed-trace protocol v2, fourth pass: policy-role validation, resume identity gap (secondary, additive; no frozen §1/§4/§8/§9 value changed)
+
+A fourth external review of the third-pass cross-file identity commit found
+the identity checks it added still had two gaps, both in the same spirit
+(catching a mislabeled/stale file before it silently corrupts a comparison):
+
+- **A record's own `replay_policy_condition` was never checked against the
+  file it was loaded from.** `_assert_consistent_identity`/
+  `_assert_shared_trace_source` (prior entry) check `config_sha256`/
+  `upstream_rkv_commit`/`model_revision`/`tokenizer_revision` and
+  `trace_source_condition` agreement, but nothing checked that a probe
+  file's records actually declare the replay policy the filename convention
+  implies. A `full_on_full_fixed_trace_probes.jsonl` file whose records
+  declare `replay_policy_condition="rkv_b128"` (e.g. from an accidental file
+  swap or rename) was silently accepted, which can flip which curve gets
+  called FullKV vs. R-KV. Fixed: `load_fixed_trace_records` now raises if any
+  row's `replay_policy_condition` disagrees with the `replay_condition` it
+  was called with. Also added: `_validate_base_records` now checks the
+  canonical base file's own `condition` field against `trace_condition`, so
+  a base file recorded under a different condition (e.g. an R-KV file
+  passed in as the canonical trace by mistake) is rejected too.
+- **`cmd_replay_fixed_trace`'s `--resume` identity check omitted
+  `model_revision`/`tokenizer_revision`.** `FixedTraceProbeRecord` has
+  carried both fields since the 1.2.0 -> 1.3.0 bump (prior entry)
+  specifically so cross-file identity could be checked — but the
+  `expected_identity` dict `cmd_replay_fixed_trace` builds for `--resume`
+  still only carried `config_sha256`/`upstream_rkv_commit`, so resuming into
+  a fixed-trace probe file recorded under a stale model/tokenizer revision
+  was accepted at resume time. `run_fixed_trace_analysis` would eventually
+  reject the resulting mixed-identity output directory, but only after
+  wasting GPU time producing it. Fixed: `expected_identity` now also carries
+  `model_revision`/`tokenizer_revision`, matching what `cmd_generate` already
+  did.
+- Also corrected two stale comments found during this pass: a
+  `_validate_fixed_trace_probe_records` docstring still claimed
+  `load_fixed_trace_records` "keeps the last" duplicate `(base_record_id,
+  fraction)` row, when it has raised on that case since the prior entry; and
+  a schema test's comment still described the fixed-trace suffix as always
+  empty, a protocol-v1 behavior protocol v2 (two entries ago) replaced with a
+  non-empty teacher-forced boxed-answer prefix. `docs/SCHEMA.md` and the
+  archived protocol-v1 README were also still citing schema `"1.2.0"` after
+  the prior entry's bump to `"1.3.0"`.
+- 224 CPU tests pass (up from 217 — new coverage for both validation gaps
+  plus the two stale-comment fixes). GPU test files still only collect and
+  skip (11 skipped) — no GPU exists in this environment. Same still-open
+  items as the prior entry (unrecoverable b256/b1024 raw data, unimplemented
+  MATH-500 answer equivalence, no reviewed PR for this pass either).
+
 ## 2026-07-16 — Fixed-trace protocol v2, third pass: config-limit ignored, cross-file identity, duplicate rows (secondary, additive; no frozen §1/§4/§8/§9 value changed)
 
 A third external review of the protocol-v2 hardening commit found two

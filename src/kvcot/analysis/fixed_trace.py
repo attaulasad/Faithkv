@@ -296,11 +296,30 @@ def load_fixed_trace_records(path: str | Path, replay_condition: str) -> FixedTr
     `record_id` within one run, so two rows sharing a `(base_record_id,
     fraction)` key can only mean the file was corrupted, hand-edited, or
     concatenated from two different runs, none of which should be silently
-    "resolved" by picking whichever row happened to come last."""
+    "resolved" by picking whichever row happened to come last.
+
+    Every row's own `replay_policy_condition` must equal `replay_condition`
+    (§ external review 2026-07-16): the caller passes `replay_condition`
+    based on which ROLE this file is being read for (e.g. `full_on_full_
+    fixed_trace_probes.jsonl` is always read as the "full" replay policy's
+    probes) — nothing about a filename is otherwise checked, so a file that
+    was swapped or renamed with its sibling would be silently accepted and
+    read as the wrong policy, which can flip the sign of the whole
+    comparison. Checking the record's own declared field, not just the
+    filename convention, catches exactly that swap."""
     probes_by_base: dict[str, dict[float, dict]] = {}
     trace_source_condition: str | None = None
     for rec in read_jsonl(path):
         base_id, fraction = rec["base_record_id"], float(rec["fraction"])
+        if rec["replay_policy_condition"] != replay_condition:
+            raise ValueError(
+                f"{path}: record {rec.get('record_id')!r} declares replay_policy_condition="
+                f"{rec['replay_policy_condition']!r}, but this file is being read as the "
+                f"{replay_condition!r} replay policy's probes — refusing to analyze a file whose "
+                "records' declared policy does not match the role this file is being loaded for "
+                "(this is exactly what a swapped or renamed pair of fixed-trace probe files would "
+                "look like)."
+            )
         group = probes_by_base.setdefault(base_id, {})
         if fraction in group:
             raise ValueError(
@@ -639,7 +658,7 @@ def _record_identity(row: dict) -> tuple:
     )
 
 
-def _validate_base_records(rows: list[dict], path: Path) -> tuple | None:
+def _validate_base_records(rows: list[dict], path: Path, expected_condition: str) -> tuple | None:
     """Reject anything that isn't a schema-valid, current-protocol
     `BaseRunRecord` — in particular, a stale protocol-v1/v2 (`schema_version`
     below the current `Literal`) file fails validation immediately, rather
@@ -648,7 +667,15 @@ def _validate_base_records(rows: list[dict], path: Path) -> tuple | None:
     a file mixing two runs (different config/model/upstream pin) is not a
     single coherent trace source. Returns that shared identity (or `None` if
     `rows` is empty) so the caller can additionally cross-check it against
-    the other two files this analysis reads (`_assert_consistent_identity`)."""
+    the other two files this analysis reads (`_assert_consistent_identity`).
+
+    Also requires every row's own `condition` field to equal
+    `expected_condition` (§ external review 2026-07-16) — the base file this
+    analysis reads is always the canonical TRACE SOURCE, i.e.
+    `trace_condition` (in practice always "full", per kvcot.cli.
+    cmd_replay_fixed_trace's critical rule), and a base file actually
+    recorded under a different condition means the wrong file was passed in
+    as the canonical trace, which nothing else here checks."""
     identities: set[tuple] = set()
     for row in rows:
         try:
@@ -661,6 +688,13 @@ def _validate_base_records(rows: list[dict], path: Path) -> tuple | None:
                 "produced under an old protocol version — regenerate it under the current "
                 "protocol into a fresh output_dir rather than reusing old output."
             ) from e
+        if row.get("condition") != expected_condition:
+            raise ValueError(
+                f"{path}: base record {row.get('record_id')!r} has condition="
+                f"{row.get('condition')!r}, but this analysis expected the canonical trace source "
+                f"condition {expected_condition!r} -- refusing to treat a "
+                f"{row.get('condition')!r}-condition file as the canonical trace source."
+            )
         identities.add(_record_identity(row))
     if len(identities) > 1:
         raise ValueError(
@@ -675,10 +709,11 @@ def _validate_fixed_trace_probe_records(records: FixedTraceRecords, path: Path) 
     """Same discipline as `_validate_base_records`, for fixed-trace probe
     files: schema-valid `FixedTraceProbeRecord` (rejects a stale
     `schema_version`) plus one shared `_record_identity` across every row.
-    Also rejects a duplicate `(base_record_id, fraction)` pair silently
-    overwriting an earlier row of the same key — `load_fixed_trace_records`
-    itself only ever keeps the LAST such row per key, which would otherwise
-    hide a corrupted/concatenated file instead of refusing to analyze it."""
+    A duplicate `(base_record_id, fraction)` pair is already rejected
+    upstream, in `load_fixed_trace_records` itself — it raises rather than
+    silently keeping the last row of the same key — so by the time
+    `records.probes_by_base` reaches this function, at most one row exists
+    per key."""
     identities: set[tuple] = set()
     for base_id, group in records.probes_by_base.items():
         for row in group.values():
@@ -769,7 +804,7 @@ def run_fixed_trace_analysis(
     base_records = list(read_jsonl(base_path))
     full_probes = load_fixed_trace_records(full_probes_path, trace_condition)
     rkv_probes = load_fixed_trace_records(rkv_probes_path, replay_condition)
-    base_identity = _validate_base_records(base_records, base_path)
+    base_identity = _validate_base_records(base_records, base_path, trace_condition)
     full_probes_identity = _validate_fixed_trace_probe_records(full_probes, full_probes_path)
     rkv_probes_identity = _validate_fixed_trace_probe_records(rkv_probes, rkv_probes_path)
     _assert_consistent_identity(

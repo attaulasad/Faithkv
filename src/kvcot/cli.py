@@ -760,6 +760,8 @@ def cmd_replay_fixed_trace(args: argparse.Namespace) -> int:
     upstream_commit = upstream_submodule_commit(lock)
     expected_identity = {
         "config_sha256": config_sha256,
+        "model_revision": lock.model.revision,
+        "tokenizer_revision": lock.model.tokenizer_revision,
         "provenance.upstream_rkv_commit": upstream_commit,
     }
 
