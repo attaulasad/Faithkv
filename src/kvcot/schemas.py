@@ -11,7 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-SCHEMA_VERSION = "1.0.0"
+SCHEMA_VERSION = "1.1.0"
 
 Condition = str  # "full" | "patched_noop" | f"rkv_b{budget}" — validated by callers against configs, not hardcoded here
 ThinkParseStatus = Literal[
@@ -185,6 +185,79 @@ class ProbeRunRecord(BaseModel):
 
     matches_own_condition_base_answer: bool | None  # None iff either side failed extraction
     is_f1_stability_probe: bool
+
+    snapshot_cache_hash: str
+    snapshot_provenance_hash: str
+    snapshot_state_hash: str
+
+
+class FixedTraceProbeRecord(BaseModel):
+    """Secondary, additive diagnostic — NOT the frozen primary record type.
+
+    `ProbeRunRecord` has one `condition` field because its probe always
+    branches from that same condition's own generated trace. This schema
+    exists because the fixed-trace design intentionally decouples those two
+    things: `trace_source_condition` is always the condition whose tokens
+    were teacher-forced (always "full" in practice — see
+    kvcot.cli.cmd_replay_fixed_trace's critical rule), `replay_policy_condition`
+    is the cache policy actually applied while replaying them. Matching is
+    against `normalized_f1_anchor_answer` (this replay policy's own greedy
+    f=1 answer), never `source_base_answer` (the trace source's SAMPLED
+    natural answer) — see kvcot.analysis.fixed_trace's module docstring for
+    why that distinction is the entire point of this record type.
+    """
+
+    schema_version: str = SCHEMA_VERSION
+    record_id: str
+    parent_record_id: str  # the base_record_id this probe branched from
+    record_type: Literal["fixed_trace_probe"] = "fixed_trace_probe"
+    timestamp_utc: str = Field(default_factory=utc_now_iso)
+
+    config_path: str
+    config_sha256: str
+    provenance: ProvenanceState
+    versions: VersionInfo
+
+    # Canonical trace identity
+    base_record_id: str
+    trace_source_condition: Condition
+    replay_policy_condition: Condition
+    source_row_index: int
+    global_seed: int
+
+    # Problem references
+    normalized_gold: str
+    source_base_answer: str | None  # the trace source's own SAMPLED answer — diagnostic only, never the match target
+    source_base_is_correct: bool | None
+
+    # Probe position
+    fraction: float
+    think_span_length: int = Field(description="L: number of tokens strictly inside the think span")
+    cut_index: int = Field(description="floor(fraction * L)")
+
+    # Probe generation
+    close_marker_token_ids: list[int]
+    control_suffix_token_ids: list[int]  # always [] for the fixed-trace suffix — see kvcot.probes.templates.render_fixed_trace_suffix
+    probe_decoding_max_new_tokens: int
+    probe_output_token_ids: list[int]
+    probe_output_text: str
+    normalized_probe_answer: str | None
+    probe_extraction_status: ExtractionMethod
+
+    # f=1 anchored measurement (this replay policy's own greedy f=1 answer —
+    # the metric target every fraction, including f=1 itself, is matched
+    # against; NOT the trace source's sampled natural answer)
+    anchor_fraction: float = 1.0
+    normalized_f1_anchor_answer: str | None
+    matches_f1_anchor_answer: bool | None  # None iff either side failed extraction
+    f1_anchor_matches_source_base_answer: bool | None  # diagnostic only — never used for eligibility or the metric
+    f1_anchor_is_correct: bool | None
+
+    # Compression observed during THIS replay (under replay_policy_condition),
+    # never the trace source's own generation-time compaction count — the
+    # trace source is always FullKV in practice, which never compacts.
+    replay_compaction_count_at_cut: int
+    replay_compaction_event_steps_at_cut: list[int]
 
     snapshot_cache_hash: str
     snapshot_provenance_hash: str

@@ -1,0 +1,21 @@
+# Fixed-trace prefix-sufficiency screen, candidate budget=512 — secondary,
+# additive diagnostic (kvcot.analysis.fixed_trace), NOT a Stage 0-2 config
+# and NOT part of the frozen stage funnel (docs/EXPERIMENT.md §4). Uses
+# `kvcot replay-fixed-trace`/`analyze-fixed-trace`, never `replay-probe`.
+stage_name: early_gap_b512
+lock_config_path: configs/lock.yaml
+dataset_manifest: data/manifests/gsm8k_calibration_50.jsonl
+conditions: [full, rkv_b512]
+rkv_budgets: [512]
+output_dir: results/raw/early_gap_b512
+limit: 10
+seeds_override: [42]
+
+notes: >
+  Ten-example, one-seed fixed-trace gap screen. Not a publishable estimate —
+  PSS/Delta_PSS at n=10 produces descriptive counts only, no p-value
+  (kvcot.analysis.fixed_trace). FullKV supplies the canonical trace; the same
+  trace is replayed under FullKV and R-KV via `kvcot replay-fixed-trace`.
+  Budget escalation: if compression rarely fires at 512, try
+  early_gap_b256.yaml; if it fires but destroys accuracy, try
+  early_gap_b1024.yaml instead of stepping down to 256.

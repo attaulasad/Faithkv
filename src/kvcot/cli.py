@@ -24,6 +24,7 @@ from kvcot.runtime import (
     upstream_submodule_commit,
 )
 from kvcot.schemas import RunManifest, utc_now_iso
+from kvcot.utils.hashing import sha256_bytes, sha256_int_ids, sha256_json
 from kvcot.utils.io import read_existing_record_ids, write_json
 from kvcot.utils.logging import get_logger
 
@@ -47,6 +48,33 @@ def _load_manifest_filtered(stage, args) -> list[dict]:
     if args.limit is not None:
         rows = rows[: args.limit]
     return rows
+
+
+def _filter_base_records_for_run(stage, args, base_records: list[dict]) -> list[dict]:
+    """Restrict already-generated base records (read from a `{condition}.jsonl`
+    file) to the ones `--limit`/`--problem-index`/`--seed` actually asked for.
+
+    `replay-fixed-trace` reads its canonical trace from a base file that may
+    contain more rows than this particular invocation was asked to probe
+    (e.g. a shared `full.jsonl` reused across several `early_gap_b*.yaml`
+    screens) — without this filter, `--limit 10` on the CLI would still probe
+    every record in the file, which is exactly the "accidentally probing 50
+    records when you intended 10" failure this function exists to prevent.
+    Reuses `_load_manifest_filtered` for the problem-index/limit half (so
+    that filtering logic isn't duplicated), then additionally filters by
+    `--seed` directly against each base record's own `global_seed` — manifest
+    rows have no seed dimension, so that part can't be expressed as a
+    manifest filter.
+    """
+    manifest_rows = _load_manifest_filtered(stage, args)
+    allowed_indices = {row["source_row_index"] for row in manifest_rows}
+
+    filtered = [record for record in base_records if record["dataset"]["source_row_index"] in allowed_indices]
+
+    if args.seed is not None:
+        filtered = [record for record in filtered if record["global_seed"] == args.seed]
+
+    return filtered
 
 
 def _build_method_config(condition: str, policy):
@@ -76,15 +104,19 @@ def _build_method_config(condition: str, policy):
     )
 
 
-def _resolve_condition(stage, args) -> str:
-    """Validate `--condition` against this stage's declared conditions and
-    resolve the `rkv_selected` placeholder (used only by stage2_main.yaml)
-    into a concrete `rkv_b{budget}` condition name, by reading
-    `configs/selected_operating_point.yaml` (kvcot.runtime.resolve_conditions).
+def _resolve_condition_name(stage, condition: str) -> str:
+    """Validate a condition string against this stage's declared conditions
+    and resolve the `rkv_selected` placeholder (used only by
+    stage2_main.yaml) into a concrete `rkv_b{budget}` condition name, by
+    reading `configs/selected_operating_point.yaml`
+    (kvcot.runtime.resolve_conditions).
 
-    Both `generate` and `replay-probe` MUST use this same resolution — they
-    write/read the same `{condition}.jsonl` / `{condition}_probes.jsonl`
-    file pair, and `build_policy(condition, lock)` only understands concrete
+    Every command that accepts a condition-like argument MUST use this same
+    resolution — `generate`/`replay-probe` write/read the same
+    `{condition}.jsonl` / `{condition}_probes.jsonl` file pair, and
+    `replay-fixed-trace`/`analyze-fixed-trace` resolve two independent
+    condition-like arguments (`--trace-condition`, `--replay-condition`)
+    through it. `build_policy(condition, lock)` only understands concrete
     condition names ("full", "patched_noop", "rkv_b{budget}"), never the
     "rkv_selected" placeholder itself. Do not resolve this inline at each
     call site — that duplication is exactly what let `replay-probe` drift out
@@ -93,11 +125,15 @@ def _resolve_condition(stage, args) -> str:
     placeholder string to `build_policy`, which raises `ValueError`).
     """
     resolved_conditions = resolve_conditions(stage)
-    if args.condition not in stage.conditions and args.condition not in resolved_conditions:
-        raise SystemExit(f"condition {args.condition!r} is not one of this stage's conditions {stage.conditions}")
-    if args.condition == "rkv_selected":
+    if condition not in stage.conditions and condition not in resolved_conditions:
+        raise SystemExit(f"condition {condition!r} is not one of this stage's conditions {stage.conditions}")
+    if condition == "rkv_selected":
         return resolved_conditions[stage.conditions.index("rkv_selected")]
-    return args.condition
+    return condition
+
+
+def _resolve_condition(stage, args) -> str:
+    return _resolve_condition_name(stage, args.condition)
 
 
 class ResumeIdentityMismatchError(RuntimeError):
@@ -449,6 +485,59 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
 # ------------------------------------------------------------------ replay-probe
 
+def _hash_snapshot_cache_content(snap) -> str:
+    """Real content hash of the snapshot's K/V cache — NOT just shapes
+    (the old `sha256_int_ids([t.shape[-2] for t in snap.key_cache])` would
+    hash equal for two snapshots with the same lengths but different
+    values, which defeats the point of a divergence-detecting hash).
+    Upcast to float32 before extracting bytes: two bf16 tensors holding
+    the same values upcast to identical float32 bytes, so this only
+    changes when the actual content differs, not the storage dtype.
+
+    Module-level (not a closure) so both `cmd_replay_probe` and
+    `cmd_replay_fixed_trace` share exactly one implementation."""
+    parts = [
+        t.detach().float().cpu().contiguous().numpy().tobytes()
+        for t in list(snap.key_cache) + list(snap.value_cache)
+    ]
+    return sha256_bytes(b"".join(parts))
+
+
+def _hash_snapshot_provenance_content(snap) -> str:
+    """Real content hash of per-layer, per-KV-head absolute source
+    positions (kvcot.generation.provenance.LayerProvenance) plus the
+    prompt/think boundaries — NOT just the compaction event-step list
+    (the old hash), which says nothing about which positions survived."""
+    prov = snap.provenance
+    ints: list[int] = [
+        prov.prompt_length,
+        prov.think_start_absolute if prov.think_start_absolute is not None else -1,
+        prov.think_end_absolute if prov.think_end_absolute is not None else -1,
+    ]
+    for layer_idx in sorted(prov.layers):
+        ints.extend(int(x) for x in prov.layers[layer_idx].positions.flatten().tolist())
+    return sha256_int_ids(ints)
+
+
+def _hash_snapshot_state(snap) -> str:
+    """Real content hash of the remaining scheduling/bookkeeping state —
+    NOT just [model_length, absolute_position] (the old hash), which
+    ignores compression flags, after_think, and R1KV's own eviction
+    bookkeeping entirely."""
+    return sha256_json(
+        {
+            "model_length": snap.model_length,
+            "after_think": snap.after_think,
+            "compression_flags_per_layer": snap.compression_flags_per_layer,
+            "tokens_since_last_compaction": snap.tokens_since_last_compaction,
+            "absolute_position": snap.absolute_position,
+            "evicted_token_num_per_layer": [
+                bk.get("evicted_token_num") for bk in (snap.kv_cluster_bookkeeping_per_layer or [])
+            ],
+        }
+    )
+
+
 def cmd_replay_probe(args: argparse.Namespace) -> int:
     stage, lock = load_stage_config(args.config)
     # Resolve the `rkv_selected` placeholder the SAME way `generate` does —
@@ -493,55 +582,7 @@ def cmd_replay_probe(args: argparse.Namespace) -> int:
     from kvcot.probes.templates import render_control_suffix
     from kvcot.schemas import ProbeRunRecord, ProvenanceState
     from kvcot.utils.answers import answers_match, extract_answer
-    from kvcot.utils.hashing import sha256_bytes, sha256_int_ids, sha256_json
     from kvcot.utils.io import JsonlWriter, read_jsonl
-
-    def _hash_snapshot_cache_content(snap) -> str:
-        """Real content hash of the snapshot's K/V cache — NOT just shapes
-        (the old `sha256_int_ids([t.shape[-2] for t in snap.key_cache])` would
-        hash equal for two snapshots with the same lengths but different
-        values, which defeats the point of a divergence-detecting hash).
-        Upcast to float32 before extracting bytes: two bf16 tensors holding
-        the same values upcast to identical float32 bytes, so this only
-        changes when the actual content differs, not the storage dtype."""
-        parts = [
-            t.detach().float().cpu().contiguous().numpy().tobytes()
-            for t in list(snap.key_cache) + list(snap.value_cache)
-        ]
-        return sha256_bytes(b"".join(parts))
-
-    def _hash_snapshot_provenance_content(snap) -> str:
-        """Real content hash of per-layer, per-KV-head absolute source
-        positions (kvcot.generation.provenance.LayerProvenance) plus the
-        prompt/think boundaries — NOT just the compaction event-step list
-        (the old hash), which says nothing about which positions survived."""
-        prov = snap.provenance
-        ints: list[int] = [
-            prov.prompt_length,
-            prov.think_start_absolute if prov.think_start_absolute is not None else -1,
-            prov.think_end_absolute if prov.think_end_absolute is not None else -1,
-        ]
-        for layer_idx in sorted(prov.layers):
-            ints.extend(int(x) for x in prov.layers[layer_idx].positions.flatten().tolist())
-        return sha256_int_ids(ints)
-
-    def _hash_snapshot_state(snap) -> str:
-        """Real content hash of the remaining scheduling/bookkeeping state —
-        NOT just [model_length, absolute_position] (the old hash), which
-        ignores compression flags, after_think, and R1KV's own eviction
-        bookkeeping entirely."""
-        return sha256_json(
-            {
-                "model_length": snap.model_length,
-                "after_think": snap.after_think,
-                "compression_flags_per_layer": snap.compression_flags_per_layer,
-                "tokens_since_last_compaction": snap.tokens_since_last_compaction,
-                "absolute_position": snap.absolute_position,
-                "evicted_token_num_per_layer": [
-                    bk.get("evicted_token_num") for bk in (snap.kv_cluster_bookkeeping_per_layer or [])
-                ],
-            }
-        )
 
     policy = build_policy(condition, lock)
     dtype = getattr(torch, lock.model.dtype)
@@ -659,6 +700,255 @@ def cmd_replay_probe(args: argparse.Namespace) -> int:
     )
     write_json(Path(stage.output_dir) / f"{condition}_replay_probe_manifest.json", manifest.model_dump(mode="json"))
 
+    return 0
+
+
+# ------------------------------------------------------------------ replay-fixed-trace
+#
+# Secondary, additive diagnostic — NOT a replacement for `replay-probe`/EAS
+# above. `replay-probe` matches each condition's probe answer against that
+# SAME condition's own untruncated base answer (§8 sign convention,
+# kvcot.analysis.metrics), which conflates two different things whenever
+# FullKV and R-KV generate different natural traces for the same problem:
+# how much the *cache policy* affects truncation sensitivity, and how much
+# the *trace itself differs* between conditions. `replay-fixed-trace`
+# isolates the first question alone: it takes ONE canonical trace (FullKV's
+# own generated tokens) and replays those exact tokens under both FullKV and
+# R-KV cache policies, so both conditions see identical prompt and reasoning
+# tokens — only the cache policy varies. See kvcot.analysis.fixed_trace's
+# module docstring for the resulting metric (PSS) and why it is scored
+# against each policy's own f=1 answer, never the trace source's sampled
+# natural answer.
+
+
+def _add_fixed_trace_run_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--trace-condition", default="full")
+    parser.add_argument("--replay-condition", required=True)
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--problem-index", type=int, default=None, help="restrict to a single source_row_index")
+    parser.add_argument("--seed", type=int, default=None, help="restrict to a single seed (must be one of the frozen seeds)")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+
+
+def cmd_replay_fixed_trace(args: argparse.Namespace) -> int:
+    stage, lock = load_stage_config(args.config)
+    trace_condition = _resolve_condition_name(stage, args.trace_condition)
+    replay_condition = _resolve_condition_name(stage, args.replay_condition)
+
+    # Critical rule: the model is LOADED under replay_condition's policy, but
+    # the token sequence being replayed is always read from trace_condition's
+    # OWN base file — never from replay_condition's base file (which, for an
+    # R-KV replay_condition, would be a different, independently-sampled
+    # trace, defeating the entire point of holding the trace fixed).
+    base_path = Path(stage.output_dir) / f"{trace_condition}.jsonl"
+    output_path = Path(stage.output_dir) / f"{replay_condition}_on_{trace_condition}_fixed_trace_probes.jsonl"
+
+    config_sha256 = config_identity(args.config)
+    upstream_commit = upstream_submodule_commit(lock)
+    expected_identity = {
+        "config_sha256": config_sha256,
+        "provenance.upstream_rkv_commit": upstream_commit,
+    }
+
+    if args.dry_run:
+        from kvcot.schemas import FixedTraceProbeRecord
+
+        manifest_rows = _load_manifest_filtered(stage, args)
+        seeds = _resolve_seeds_for_run(stage, lock, args)
+        n_examples = len(manifest_rows) * len(seeds)
+        n_fractions = len(lock.probes.fractions_all)
+        already_written = set()
+        if output_path.exists():
+            already_written = _verify_resumable_record_ids(output_path, FixedTraceProbeRecord, expected_identity)
+            print(f"  already written: {len(already_written)}")
+        print(f"replay-fixed-trace plan: stage={stage.stage_name}")
+        print(f"  trace_condition={trace_condition}  replay_condition={replay_condition}")
+        print(f"  planned examples: {n_examples}")
+        print(f"  fixed-trace fractions per example: {n_fractions}")
+        print(f"  planned probe records: {n_examples * n_fractions}")
+        print(f"  reads canonical trace: {base_path}")
+        print(f"  output: {output_path}")
+        return 0
+
+    # ---- real path: every GPU-dependent import deferred to here ----
+    import torch
+    from transformers import AutoTokenizer
+    from transformers.cache_utils import DynamicCache
+
+    from kvcot.generation.policies import build_policy
+    from kvcot.generation.replay import branch_and_probe, replay_and_snapshot
+    from kvcot.probes.early_answering import ThinkSpanResult, absolute_cut_position
+    from kvcot.probes.templates import render_fixed_trace_suffix
+    from kvcot.schemas import FixedTraceProbeRecord, ProvenanceState
+    from kvcot.utils.answers import answers_match, extract_answer
+    from kvcot.utils.io import JsonlWriter, read_jsonl
+
+    policy = build_policy(replay_condition, lock)
+    dtype = getattr(torch, lock.model.dtype)
+    model = policy.load(lock.model.name, lock.model.revision, dtype, lock.attention.primary)
+    tokenizer = AutoTokenizer.from_pretrained(lock.model.tokenizer_name, revision=lock.model.tokenizer_revision, use_fast=True)
+    close_ids = tokenizer.encode("</think>", add_special_tokens=False)
+    fixed_suffix_ids = tokenizer.encode(render_fixed_trace_suffix(), add_special_tokens=False)
+    device = "cuda"
+
+    if output_path.exists():
+        _verify_resumable_record_ids(output_path, FixedTraceProbeRecord, expected_identity)
+    writer = JsonlWriter(output_path, validator=lambda r: FixedTraceProbeRecord.model_validate(r).model_dump(mode="json"))
+    versions = capture_version_info()
+    run_start_utc = utc_now_iso()
+    run_start = time.monotonic()
+    n_attempted = 0
+    n_completed = 0
+    n_skipped_resumed = 0
+    n_extraction_failures = 0
+
+    base_records = list(read_jsonl(base_path))
+    base_records = _filter_base_records_for_run(stage, args, base_records)
+
+    # f=1 first, always — every other fraction's record needs its answer as
+    # the anchor before it can be written (§ kvcot.analysis.fixed_trace).
+    ordered_fractions = [1.0] + [f for f in lock.probes.fractions_all if f != 1.0]
+
+    for base in base_records:
+        if base["think_span"]["think_parse_status"] not in ("ok", "generation_prompt_preopened_ok"):
+            continue
+        span = ThinkSpanResult(
+            think_start_index=base["think_span"]["think_start_index"],
+            think_end_index=base["think_span"]["think_end_index"],
+            think_parse_status=base["think_span"]["think_parse_status"],
+            generation_prompt_preopened_think=base["think_span"]["generation_prompt_preopened_think"],
+        )
+        cut_positions = {
+            f: len(base["prompt_token_ids"]) + absolute_cut_position(span, f) for f in lock.probes.fractions_all
+        }
+
+        planned_ids = {
+            f: f"fixed-probe-{replay_condition}-on-{trace_condition}-{base['record_id']}-f{f}"
+            for f in lock.probes.fractions_all
+        }
+        # Whole-base-record resumability: the teacher-forced replay pass that
+        # produces every fraction's snapshot is one sequential walk through
+        # the trace regardless of how many of the resulting probes end up
+        # written (snapshotting more points along an already-required pass is
+        # not meaningfully more expensive), so there is no efficiency reason
+        # to reconstruct a partially-written anchor from disk. Skip the whole
+        # base record only when EVERY one of its fixed-trace records is
+        # already present; otherwise recompute all 9 and let the per-record
+        # `already_written` check below dedupe the append.
+        if all(writer.already_written(rid) for rid in planned_ids.values()):
+            n_attempted += len(planned_ids)
+            n_skipped_resumed += len(planned_ids)
+            continue
+
+        # replay_and_snapshot resets state itself via fresh_cache_factory —
+        # no explicit reset_patched_state call needed here (mirrors
+        # cmd_replay_probe, which does not call it either).
+        snapshots = replay_and_snapshot(
+            model=model,
+            fresh_cache_factory=lambda: DynamicCache(),
+            prompt_token_ids=base["prompt_token_ids"],
+            generated_token_ids=base["generated_token_ids"],
+            think_span=span,
+            snapshot_absolute_positions=cut_positions,
+            device=device,
+        )
+
+        temp_results: dict[float, dict] = {}
+        for fraction in ordered_fractions:
+            snap = snapshots[fraction]
+            result = branch_and_probe(
+                model, DynamicCache(), snap, close_ids, fixed_suffix_ids,
+                lock.probes.max_new_tokens, tokenizer.eos_token_id, device,
+            )
+            probe_text = tokenizer.decode(result.probe_output_token_ids, skip_special_tokens=True)
+            probe_answer = extract_answer(probe_text)
+            temp_results[fraction] = {
+                "snapshot": snap,
+                "probe_output_token_ids": result.probe_output_token_ids,
+                "probe_text": probe_text,
+                "probe_answer": probe_answer,
+            }
+
+        # Anchor: this replay policy's OWN greedy f=1 answer — never the
+        # trace source's sampled natural base answer (kvcot.schemas.
+        # FixedTraceProbeRecord docstring; kvcot.analysis.fixed_trace).
+        f1_answer = temp_results[1.0]["probe_answer"].normalized_value
+        source_base_answer = base["extracted_answer"]
+        f1_matches_source_base = answers_match(f1_answer, source_base_answer)
+        f1_is_correct = answers_match(f1_answer, base["dataset"]["normalized_gold"])
+
+        for fraction in lock.probes.fractions_all:
+            n_attempted += 1
+            record_id = planned_ids[fraction]
+            if writer.already_written(record_id):
+                n_skipped_resumed += 1
+                continue
+            item = temp_results[fraction]
+            probe_answer = item["probe_answer"]
+            snap = item["snapshot"]
+            record = FixedTraceProbeRecord(
+                record_id=record_id,
+                parent_record_id=base["record_id"],
+                config_path=args.config,
+                config_sha256=config_sha256,
+                provenance=ProvenanceState(upstream_rkv_commit=upstream_commit, git_commit=git_commit(), git_dirty=git_is_dirty()),
+                versions=versions,
+                base_record_id=base["record_id"],
+                trace_source_condition=trace_condition,
+                replay_policy_condition=replay_condition,
+                source_row_index=base["dataset"]["source_row_index"],
+                global_seed=base["global_seed"],
+                normalized_gold=base["dataset"]["normalized_gold"],
+                source_base_answer=source_base_answer,
+                source_base_is_correct=base.get("is_correct"),
+                fraction=fraction,
+                think_span_length=span.think_token_count,
+                cut_index=cut_positions[fraction] - len(base["prompt_token_ids"]) - span.think_start_index,
+                close_marker_token_ids=close_ids,
+                control_suffix_token_ids=fixed_suffix_ids,
+                probe_decoding_max_new_tokens=lock.probes.max_new_tokens,
+                probe_output_token_ids=item["probe_output_token_ids"],
+                probe_output_text=item["probe_text"],
+                normalized_probe_answer=probe_answer.normalized_value,
+                probe_extraction_status=probe_answer.method,
+                normalized_f1_anchor_answer=f1_answer,
+                matches_f1_anchor_answer=answers_match(probe_answer.normalized_value, f1_answer),
+                f1_anchor_matches_source_base_answer=f1_matches_source_base,
+                f1_anchor_is_correct=f1_is_correct,
+                replay_compaction_count_at_cut=len(snap.compaction_event_steps),
+                replay_compaction_event_steps_at_cut=list(snap.compaction_event_steps),
+                snapshot_cache_hash=_hash_snapshot_cache_content(snap),
+                snapshot_provenance_hash=_hash_snapshot_provenance_content(snap),
+                snapshot_state_hash=_hash_snapshot_state(snap),
+            )
+            writer.append(record.model_dump(mode="json"))
+            n_completed += 1
+            if probe_answer.normalized_value is None:
+                n_extraction_failures += 1
+
+    manifest = RunManifest(
+        command="replay-fixed-trace",
+        config_path=args.config,
+        config_sha256=config_sha256,
+        git_commit=git_commit(),
+        git_dirty=git_is_dirty(),
+        versions=versions,
+        start_time_utc=run_start_utc,
+        end_time_utc=utc_now_iso(),
+        n_attempted=n_attempted,
+        n_completed=n_completed,
+        n_skipped_resumed=n_skipped_resumed,
+        n_failed=0,
+        n_extraction_failures=n_extraction_failures,
+        wall_time_seconds=time.monotonic() - run_start,
+        peak_vram_bytes=(torch.cuda.max_memory_allocated() if torch.cuda.is_available() else None),
+    )
+    write_json(
+        Path(stage.output_dir) / f"{replay_condition}_on_{trace_condition}_replay_fixed_trace_manifest.json",
+        manifest.model_dump(mode="json"),
+    )
     return 0
 
 
@@ -906,6 +1196,34 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return _cmd_analyze_full_rkv_pipeline(output_dir)
 
 
+# ------------------------------------------------------------------ analyze-fixed-trace
+
+def cmd_analyze_fixed_trace(args: argparse.Namespace) -> int:
+    stage, _lock = load_stage_config(args.config)
+    trace_condition = _resolve_condition_name(stage, args.trace_condition)
+    replay_condition = _resolve_condition_name(stage, args.replay_condition)
+
+    if args.dry_run:
+        print(f"analyze-fixed-trace plan: stage={stage.stage_name}")
+        print(f"  trace_condition={trace_condition}  replay_condition={replay_condition}")
+        print(
+            f"  reads: {stage.output_dir}/{trace_condition}.jsonl, "
+            f"{stage.output_dir}/{trace_condition}_on_{trace_condition}_fixed_trace_probes.jsonl, "
+            f"{stage.output_dir}/{replay_condition}_on_{trace_condition}_fixed_trace_probes.jsonl"
+        )
+        print(f"  writes: results/decisions/{stage.stage_name}_fixed_trace.json")
+        return 0
+
+    from kvcot.analysis.fixed_trace import run_fixed_trace_analysis
+
+    return run_fixed_trace_analysis(
+        output_dir=Path(stage.output_dir),
+        trace_condition=trace_condition,
+        replay_condition=replay_condition,
+        stage_name=stage.stage_name,
+    )
+
+
 # ------------------------------------------------------------------ calibrate-budget
 
 def _stage1b_candidate_budgets(config_dir: Path) -> list[int]:
@@ -1002,8 +1320,28 @@ def cmd_calibrate_budget(args: argparse.Namespace) -> int:
 
 # --------------------------------------------------------------------- validate-run
 
+def _schema_for_record(row: dict):
+    """Dispatch on the row's own `record_type` field, not the filename it
+    came from. Filename-based dispatch (`path.name.endswith("_probes.jsonl")`)
+    silently misclassified fixed-trace probe files once they existed: a
+    `{replay_condition}_on_{trace_condition}_fixed_trace_probes.jsonl` file
+    still ends in `_probes.jsonl`, so it would have validated against
+    `ProbeRunRecord` (missing `trace_source_condition`/`replay_policy_condition`/
+    the f=1-anchor fields) instead of `FixedTraceProbeRecord`."""
+    from kvcot.schemas import BaseRunRecord, FixedTraceProbeRecord, ProbeRunRecord
+
+    record_type = row.get("record_type")
+    mapping = {
+        "base_generation": BaseRunRecord,
+        "probe": ProbeRunRecord,
+        "fixed_trace_probe": FixedTraceProbeRecord,
+    }
+    if record_type not in mapping:
+        raise ValueError(f"unknown record_type: {record_type!r}")
+    return mapping[record_type]
+
+
 def cmd_validate_run(args: argparse.Namespace) -> int:
-    from kvcot.schemas import BaseRunRecord, ProbeRunRecord
     from kvcot.utils.io import read_jsonl
 
     run_dir = Path(args.run_dir)
@@ -1013,9 +1351,9 @@ def cmd_validate_run(args: argparse.Namespace) -> int:
     n_valid = 0
     n_invalid = 0
     for path in sorted(run_dir.glob("*.jsonl")):
-        model_cls = ProbeRunRecord if path.name.endswith("_probes.jsonl") else BaseRunRecord
         for row in read_jsonl(path):
             try:
+                model_cls = _schema_for_record(row)
                 model_cls.model_validate(row)
                 n_valid += 1
             except Exception as e:
@@ -1045,10 +1383,21 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_run_args(p)
     p.set_defaults(func=cmd_replay_probe)
 
+    p = sub.add_parser("replay-fixed-trace")
+    _add_fixed_trace_run_args(p)
+    p.set_defaults(func=cmd_replay_fixed_trace)
+
     p = sub.add_parser("analyze")
     p.add_argument("--config", required=True)
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_analyze)
+
+    p = sub.add_parser("analyze-fixed-trace")
+    p.add_argument("--config", required=True)
+    p.add_argument("--trace-condition", default="full")
+    p.add_argument("--replay-condition", required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_analyze_fixed_trace)
 
     p = sub.add_parser("calibrate-budget")
     p.add_argument("--config-dir", default="configs")

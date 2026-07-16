@@ -84,6 +84,19 @@ prints the planned record count; it's the only end-to-end check available
 on a non-GPU machine, and every stage's dry-run was exercised during this
 build (see the final build report).
 
+### Secondary diagnostic: fixed-trace prefix-sufficiency screen
+
+`kvcot replay-fixed-trace` / `kvcot analyze-fixed-trace`
+(`configs/early_gap_b512.yaml` and its budget-escalation siblings) replay
+ONE canonical trace (FullKV's own generated tokens) under both FullKV and
+R-KV cache policies, so both conditions teacher-force identical reasoning
+tokens — only the cache policy varies. This is a smaller-sample,
+kill/continue screen (Prefix-Sufficiency Sensitivity / Delta_PSS,
+`kvcot.analysis.fixed_trace`), additive alongside the frozen
+`replay-probe`/EAS/Delta_EAS pipeline above, not a replacement for it — see
+`CHANGELOG.md`'s 2026-07-16 entry. Same `--limit`/`--problem-index`/`--seed`/
+`--resume`/`--dry-run` support.
+
 **Resume behavior:** re-running the same command with `--resume` skips any
 `record_id` already present in the output JSONL file
 (`kvcot.utils.io.JsonlWriter`/`read_existing_record_ids`) — safe to
@@ -116,6 +129,12 @@ It does not implement faithfulness-aware eviction, KIVI, mistake insertion,
 7B model support, vLLM/SGLang serving, multi-GPU, an LLM judge, or a
 benchmark suite. See `docs/EXPERIMENT.md` for why, and the build brief this
 repository was built from for the full scope boundary.
+
+The fixed-trace prefix-sufficiency screen above (`replay-fixed-trace`/
+`analyze-fixed-trace`) stays within this boundary — same method, same model,
+still a truncation-sensitivity measurement, added alongside the frozen
+pipeline rather than replacing it (`CHANGELOG.md`, 2026-07-16). Mistake
+insertion in particular remains **not implemented**, per the line above.
 
 ## License
 

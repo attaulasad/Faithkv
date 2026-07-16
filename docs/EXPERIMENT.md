@@ -145,3 +145,44 @@ attrition funnel (`kvcot.analysis.summaries.build_attrition_funnel_table`,
 written to `results/tables/attrition_funnel.csv`) exists specifically so a
 reader can see whether R-KV loses substantially more problems at any stage
 — that finding, if present, belongs in the headline, not a footnote.
+
+## 11. Secondary, additive diagnostic: fixed-trace prefix-sufficiency (added 2026-07-16, see CHANGELOG.md)
+
+Everything in §1-§10 above describes the frozen, primary pipeline
+(`replay-probe`/EAS/Delta_EAS) and is unchanged by this section. This
+section documents a smaller, **secondary** screen that runs alongside it,
+never in place of it — the research question in §1 remains this
+repository's headline claim.
+
+**Why.** §5's match rule is "same condition, same seed" — FullKV and R-KV
+are each scored against their *own* sampled natural trace. That is the
+correct design for §1's research question (a reasoning model's dependence
+on *its own* visible trace), but it means a Delta_EAS effect could in
+principle be attributable in part to the two conditions' traces differing
+from each other, not only to the cache policy. `kvcot replay-fixed-trace`
+isolates the cache-policy question alone: it replays ONE canonical trace
+(always FullKV's own generated tokens — R-KV never supplies the canonical
+trace, since the whole point is holding the token sequence fixed while only
+the cache policy varies) under both FullKV and R-KV cache policies.
+
+**Metric.** Prefix-Sufficiency Sensitivity (PSS), scored against each
+replay policy's own greedy f=1 answer under the shared trace — never
+against the trace source's sampled natural answer, which would reintroduce
+the sampled-vs-greedy confound §7 above already documents for the f=1
+stability probe. `Delta_PSS = PSS_full - PSS_rkv`, same subtraction order
+and sign meaning as Delta_EAS. PSS/Delta_PSS is a **different metric**;
+never pool or directly compare it with EAS/Delta_EAS values
+(`kvcot.analysis.fixed_trace` module docstring).
+
+**Sample size.** `configs/early_gap_b512.yaml` runs n=10, one seed —
+descriptive counts only (`n_positive`/`n_negative`/`n_ties`/`mean_delta_pss`),
+no p-value or confidence interval. This is a kill/continue screen, not a
+claim of any distributional result — the same discipline §8 above applies
+to Stage 1B's `coarse_screen` (n=50, ~±14pp CI, never labeled
+`equivalence`) applies here even more strongly: n=10 has far less power
+still.
+
+**Claim boundary.** Unchanged from §1: this still measures counterfactual
+behavioral dependence on visible generated tokens under an intervention
+(here, cache-policy substitution over a fixed trace, rather than
+truncation) — not internal faithfulness, not whether reasoning is "real."

@@ -70,7 +70,7 @@ def test_base_run_record_valid_construction():
         compaction_event_steps=[],
         cache_length_final_per_layer=[3, 3],
     )
-    assert rec.schema_version == "1.0.0"
+    assert rec.schema_version == "1.1.0"  # bumped for FixedTraceProbeRecord's addition
     assert rec.record_type == "base_generation"
 
 
