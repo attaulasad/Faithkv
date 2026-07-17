@@ -773,6 +773,61 @@ def _add_fixed_trace_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--seed", type=int, default=None, help="restrict to a single seed (must be one of the frozen seeds)")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--selection-file", default=None,
+        help="protocol v3: results/selections/{stage}.json from `inspect-fixed-trace --write-selection` -- "
+        "restricts replay/analysis to exactly the selected base_record_ids, after verifying the "
+        "selection was computed against this exact config/base-file/budget/divide_length",
+    )
+
+
+class SelectionFileMismatchError(ValueError):
+    pass
+
+
+def _load_fixed_trace_selection(selection_path: str, args, stage, lock, base_path: Path) -> dict:
+    """Load and verify a `results/selections/{stage}.json` file (protocol v3,
+    CHANGELOG.md 2026-07-17/2026-07-18) before trusting it to restrict any
+    replay or analysis run. A selection computed against a different
+    config, base file, budget, or divide_length must never be silently
+    applied — that would replay/analyze the wrong set of examples, or
+    examples whose predicted retention no longer means what the selection
+    file claims it means.
+    """
+    from kvcot.utils.io import read_json
+
+    selection = read_json(selection_path)
+    mismatches = []
+    expected_config_sha256 = config_identity(args.config)
+    if selection.get("config_sha256") != expected_config_sha256:
+        mismatches.append(
+            f"config_sha256: selection has {selection.get('config_sha256')!r}, current config is "
+            f"{expected_config_sha256!r}"
+        )
+    if base_path.exists():
+        expected_base_sha256 = sha256_file(base_path)
+        if selection.get("base_file_sha256") != expected_base_sha256:
+            mismatches.append(
+                f"base_file_sha256: selection has {selection.get('base_file_sha256')!r}, {base_path} "
+                f"currently hashes to {expected_base_sha256!r} -- the base file changed since the "
+                "selection was written"
+            )
+    expected_budget = stage.rkv_budgets[0] if stage.rkv_budgets else None
+    if selection.get("budget") != expected_budget:
+        mismatches.append(f"budget: selection has {selection.get('budget')!r}, stage config has {expected_budget!r}")
+    if selection.get("divide_length") != lock.rkv.divide_length:
+        mismatches.append(
+            f"divide_length: selection has {selection.get('divide_length')!r}, "
+            f"lock.yaml has {lock.rkv.divide_length!r}"
+        )
+    if selection.get("stage_name") != stage.stage_name:
+        mismatches.append(f"stage_name: selection has {selection.get('stage_name')!r}, current stage is {stage.stage_name!r}")
+    if mismatches:
+        raise SelectionFileMismatchError(
+            f"{selection_path} does not match the current config/base file/lock -- refusing to use a "
+            "stale or mismatched selection:\n" + "\n".join(f"  - {m}" for m in mismatches)
+        )
+    return selection
 
 
 def cmd_replay_fixed_trace(args: argparse.Namespace) -> int:
@@ -799,12 +854,46 @@ def cmd_replay_fixed_trace(args: argparse.Namespace) -> int:
         "provenance.upstream_rkv_commit": upstream_commit,
     }
 
+    # Protocol v3 (2026-07-18 review): --selection-file restricts this run to
+    # exactly the base_record_ids `inspect-fixed-trace --write-selection`
+    # predicted eligible, after verifying the selection matches this exact
+    # config/base-file/budget/divide_length. Without this, the ONLY way to
+    # run a selected subset was one --problem-index invocation per example
+    # (reloading the model every time) -- selection was written but never
+    # actually consumed.
+    selected_base_record_ids: set[str] | None = None
+    selection_path_str: str | None = None
+    selection_file_sha256: str | None = None
+    selection_file_arg = getattr(args, "selection_file", None)
+    if selection_file_arg:
+        selection = _load_fixed_trace_selection(selection_file_arg, args, stage, lock, base_path)
+        selected_base_record_ids = set(selection["selected_base_record_ids"])
+        selection_path_str = str(selection_file_arg)
+        selection_file_sha256 = sha256_file(selection_file_arg)
+        if len(selected_base_record_ids) < stage.fixed_trace.min_eligible_examples:
+            raise SystemExit(
+                f"{selection_file_arg}: n_selected ({len(selected_base_record_ids)}) is below "
+                f"min_eligible_examples ({stage.fixed_trace.min_eligible_examples}) -- refusing to "
+                "spend GPU time replaying a selection that cannot pass the screen's own validity gate."
+            )
+
     if args.dry_run:
         from kvcot.schemas import FixedTraceProbeRecord
+        from kvcot.utils.io import read_jsonl as _read_jsonl_dry_run
 
         manifest_rows = _load_manifest_filtered(stage, args)
         seeds = _resolve_seeds_for_run(stage, lock, args)
         n_examples = len(manifest_rows) * len(seeds)
+        if selected_base_record_ids is not None:
+            # Exact count from the selection intersected with --limit/
+            # --problem-index/--seed, computed the same way the real path
+            # filters base_records below -- never the raw manifest count
+            # (2026-07-18 review: dry-run must reflect what a selection-file
+            # run will actually replay, not the full manifest).
+            base_records_for_count = _filter_base_records_for_run(
+                stage, args, list(_read_jsonl_dry_run(base_path))
+            ) if base_path.exists() else []
+            n_examples = sum(1 for r in base_records_for_count if r["record_id"] in selected_base_record_ids)
         n_fractions = len(lock.probes.fractions_all)
         already_written = set()
         if output_path.exists():
@@ -812,6 +901,8 @@ def cmd_replay_fixed_trace(args: argparse.Namespace) -> int:
             print(f"  already written: {len(already_written)}")
         print(f"replay-fixed-trace plan: stage={stage.stage_name}")
         print(f"  trace_condition={trace_condition}  replay_condition={replay_condition}")
+        if selected_base_record_ids is not None:
+            print(f"  selection_file={args.selection_file}  n_selected={len(selected_base_record_ids)}")
         print(f"  planned examples: {n_examples}")
         print(f"  fixed-trace fractions per example: {n_fractions}")
         print(f"  planned probe records: {n_examples * n_fractions}")
@@ -862,6 +953,8 @@ def cmd_replay_fixed_trace(args: argparse.Namespace) -> int:
 
     base_records = list(read_jsonl(base_path))
     base_records = _filter_base_records_for_run(stage, args, base_records)
+    if selected_base_record_ids is not None:
+        base_records = [r for r in base_records if r["record_id"] in selected_base_record_ids]
 
     # f=1 first, always — every other fraction's record needs its answer as
     # the anchor before it can be written (§ kvcot.analysis.fixed_trace).
@@ -1080,6 +1173,8 @@ def cmd_replay_fixed_trace(args: argparse.Namespace) -> int:
         n_extraction_failures=n_extraction_failures,
         wall_time_seconds=time.monotonic() - run_start,
         peak_vram_bytes=(torch.cuda.max_memory_allocated() if torch.cuda.is_available() else None),
+        selection_path=selection_path_str,
+        selection_file_sha256=selection_file_sha256,
     )
     _write_run_manifest(stage.stage_name, f"replay_fixed_trace_{replay_condition}_on_{trace_condition}", manifest)
     return 0
@@ -1361,6 +1456,13 @@ def cmd_analyze_fixed_trace(args: argparse.Namespace) -> int:
         lock.model.tokenizer_revision,
     )
 
+    selected_base_record_ids = None
+    selection_arg = getattr(args, "selection_file", None)
+    if selection_arg:
+        base_path = Path(stage.output_dir) / f"{trace_condition}.jsonl"
+        selection = _load_fixed_trace_selection(selection_arg, args, stage, lock, base_path)
+        selected_base_record_ids = set(selection["selected_base_record_ids"])
+
     return run_fixed_trace_analysis(
         output_dir=Path(stage.output_dir),
         trace_condition=trace_condition,
@@ -1368,7 +1470,74 @@ def cmd_analyze_fixed_trace(args: argparse.Namespace) -> int:
         stage_name=stage.stage_name,
         settings=stage.fixed_trace,
         expected_identity=expected_identity,
+        selected_base_record_ids=selected_base_record_ids,
     )
+
+
+# ------------------------------------------------------------ check-fixed-trace-accuracy
+
+def cmd_check_fixed_trace_accuracy(args: argparse.Namespace) -> int:
+    """CPU-only pilot-accuracy gate (protocol v3, 2026-07-18 review). Reads
+    ONLY the natural (non-fixed-trace) `full.jsonl`/`{replay_condition}.jsonl`
+    base files — never the fixed-trace probe files. This is what makes the
+    documented run order in `docs/GPU_VALIDATION_PLAN.md` actually work:
+    `analyze-fixed-trace` requires the fixed-trace probe files to already
+    exist (it reads them unconditionally), so running it right after natural
+    generation — before any `replay-fixed-trace` has ever run — would crash.
+    This command has no such dependency and can run immediately after
+    `kvcot generate --condition {replay_condition}`.
+
+    Wraps `kvcot.analysis.fixed_trace.build_strict_accuracy_gate`, which
+    requires an EXACT expected record count and an IDENTICAL
+    `(source_row_index, global_seed)` key set between the two files —
+    `build_accuracy_screen`'s own intersection-only pairing could otherwise
+    report `pilot_accuracy_plausible: True` from a single matching pair
+    while the other 49 R-KV records were never generated at all.
+    """
+    stage, lock = load_stage_config(args.config)
+    if stage.fixed_trace is None:
+        raise SystemExit(f"{stage.stage_name}: missing required fixed_trace settings")
+    replay_condition = _resolve_condition_name(stage, args.replay_condition)
+    full_path = Path(stage.output_dir) / "full.jsonl"
+    rkv_path = Path(stage.output_dir) / f"{replay_condition}.jsonl"
+
+    if args.dry_run:
+        print(f"check-fixed-trace-accuracy plan: stage={stage.stage_name}  replay_condition={replay_condition}")
+        print(f"  reads: {full_path}, {rkv_path}")
+        print(f"  writes: results/decisions/{stage.stage_name}_accuracy_gate.json")
+        return 0
+
+    from kvcot.analysis.fixed_trace import build_strict_accuracy_gate
+    from kvcot.utils.io import read_jsonl
+
+    manifest_rows = _load_manifest_filtered(stage, args)
+    seeds = _resolve_seeds_for_run(stage, lock, args)
+    expected_n = len(manifest_rows) * len(seeds)
+
+    full_records = list(read_jsonl(full_path))
+    rkv_records = list(read_jsonl(rkv_path))
+
+    expected_identity = (
+        config_identity(args.config),
+        upstream_submodule_commit(lock),
+        lock.model.revision,
+        lock.model.tokenizer_revision,
+    )
+
+    gate = build_strict_accuracy_gate(
+        full_records, rkv_records, expected_n=expected_n, settings=stage.fixed_trace,
+        expected_identity=expected_identity,
+    )
+    out_path = Path("results/decisions") / f"{stage.stage_name}_accuracy_gate.json"
+    write_json(out_path, gate)
+    print(
+        f"wrote {out_path}: gate_passed={gate['gate_passed']} n_full={gate['n_full']} "
+        f"n_rkv={gate['n_rkv']} expected_n={gate['expected_n']}"
+    )
+    if not gate["gate_passed"]:
+        for reason in gate["reasons"]:
+            print(f"  - {reason}")
+    return 0 if gate["gate_passed"] else 1
 
 
 # ------------------------------------------------------------------ inspect-fixed-trace
@@ -1525,31 +1694,43 @@ def cmd_inspect_fixed_trace(args: argparse.Namespace) -> int:
             raise SystemExit(f"{stage.stage_name}: --write-selection requires stage fixed_trace settings")
         if budget is None:
             raise SystemExit(f"{stage.stage_name}: --write-selection requires stage.rkv_budgets[0]")
-        _write_fixed_trace_selection(
+        n_selected = _write_fixed_trace_selection(
             stage=stage, lock=lock, records=records, base_path=base_path,
             budget=budget, args=args,
         )
+        if n_selected < stage.fixed_trace.min_eligible_examples:
+            return 1
     return 0
 
 
-def _write_fixed_trace_selection(stage, lock, records: list[dict], base_path: Path, budget: int, args) -> None:
+def _write_fixed_trace_selection(stage, lock, records: list[dict], base_path: Path, budget: int, args) -> int:
     """Protocol v3 (CHANGELOG.md 2026-07-17): deterministic, outcome-blind
     trace selection using ONLY this FullKV base file's own correctness/cap/
     think-parse validity plus `kvcot.analysis.rkv_schedule`'s PREDICTED
     retention — never any fixed-trace probe answer, PSS, or CPSS value (a
     selection built from outcomes would not be a pre-registered screen; it
     would let the data that determines which examples get analyzed also
-    influence what the analysis finds). Candidates are sorted by
-    `source_row_index` and truncated at `--max-selected` (if given) — sort
-    key and truncation are both independent of anything this function
-    computes about a candidate's own predicted retention, so an unlimited
-    run and a truncated run would rank identically.
+    influence what the analysis finds).
+
+    Ranking/capping order (fixed 2026-07-18 review — a real bug): ALL valid
+    candidates are ranked (sorted by `source_row_index`) and their
+    `predicted_eligible` flag computed FIRST, uncapped. Only THEN is
+    `predicted_eligible` used to build the eligible subset, which is capped
+    at `max_selected` (if given) — capping the full ranked list BEFORE
+    filtering to eligible candidates (an earlier version of this function)
+    could select zero examples even when plenty of eligible ones existed
+    later in `source_row_index` order, whenever the first `max_selected`
+    candidates by row index happened to be ineligible. The cap itself is
+    still independent of any retention VALUE (only of the boolean
+    eligibility outcome and the deterministic row-index sort), so this
+    remains a pre-registered, outcome-blind selection.
     """
     from kvcot.analysis.rkv_schedule import meaningfully_compressed_fractions, predict_retention_by_fraction
     from kvcot.probes.early_answering import ThinkSpanResult, absolute_cut_position
 
     ft = stage.fixed_trace
-    max_selected = getattr(args, "max_selected", None)
+    max_selected_arg = getattr(args, "max_selected", None)
+    effective_max_selected = max_selected_arg if max_selected_arg is not None else ft.max_selected_examples
     scored_fractions = set(lock.probes.fractions_scored)
     candidates = []
     n_rejected_invalid = 0
@@ -1592,16 +1773,17 @@ def _write_fixed_trace_selection(stage, lock, records: list[dict], base_path: Pa
             }
         )
 
-    # Sort/truncate using ONLY source_row_index -- never predicted_eligible
-    # or any retention value, so truncation cannot bias which predicted-
-    # eligible candidates happen to be kept.
+    # Rank ALL candidates by source_row_index FIRST, uncapped -- this is the
+    # complete, deterministic ranking `n_ranked` describes.
     candidates.sort(key=lambda c: c["source_row_index"])
-    if max_selected is not None:
-        candidates = candidates[:max_selected]
 
-    selected = [c for c in candidates if c["predicted_eligible"]]
+    # THEN filter to predicted-eligible candidates (still in source_row_index
+    # order) and cap THAT list -- never the other way around.
+    eligible_candidates = [c for c in candidates if c["predicted_eligible"]]
+    selected = eligible_candidates[:effective_max_selected] if effective_max_selected is not None else eligible_candidates
+    selected_ids = {c["base_record_id"] for c in selected}
     for c in candidates:
-        c["selected"] = c["predicted_eligible"]
+        c["selected"] = c["base_record_id"] in selected_ids
 
     selection = {
         "stage_name": stage.stage_name,
@@ -1613,10 +1795,11 @@ def _write_fixed_trace_selection(stage, lock, records: list[dict], base_path: Pa
         "divide_length": lock.rkv.divide_length,
         "meaningful_retention_ceiling": ft.meaningful_retention_ceiling,
         "min_meaningfully_compressed_scored_fractions": ft.min_meaningfully_compressed_scored_fractions,
-        "max_selected": max_selected,
+        "max_selected": effective_max_selected,
         "n_candidates_considered": len(records),
         "n_rejected_invalid_base": n_rejected_invalid,
         "n_ranked": len(candidates),
+        "n_predicted_eligible": len(eligible_candidates),
         "n_selected": len(selected),
         "selected_source_row_indices": [c["source_row_index"] for c in selected],
         "selected_base_record_ids": [c["base_record_id"] for c in selected],
@@ -1625,9 +1808,18 @@ def _write_fixed_trace_selection(stage, lock, records: list[dict], base_path: Pa
     out_path = Path("results/selections") / f"{stage.stage_name}.json"
     write_json(out_path, selection)
     print(
-        f"wrote {out_path}: n_ranked={len(candidates)} n_selected={len(selected)} "
-        f"(of {len(records)} base records, {n_rejected_invalid} rejected on correctness/cap/think-parse)"
+        f"wrote {out_path}: n_ranked={len(candidates)} n_predicted_eligible={len(eligible_candidates)} "
+        f"n_selected={len(selected)} (of {len(records)} base records, {n_rejected_invalid} rejected on "
+        "correctness/cap/think-parse)"
     )
+    if len(selected) < ft.min_eligible_examples:
+        print(
+            f"inspect-fixed-trace --write-selection: STOP -- n_selected ({len(selected)}) is below "
+            f"min_eligible_examples ({ft.min_eligible_examples}); a full replay under this selection "
+            "cannot pass the screen's own validity gate. Consider a smaller budget, a longer-trace "
+            "manifest, or generating more natural traces before spending GPU time on replay."
+        )
+    return len(selected)
 
 
 # ------------------------------------------------------------------ calibrate-budget
@@ -1803,7 +1995,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--trace-condition", default="full")
     p.add_argument("--replay-condition", required=True)
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument(
+        "--selection-file", default=None,
+        help="protocol v3: restrict analysis to exactly the selected base_record_ids and require "
+        "complete (all 9 fractions, both policies) coverage of every one of them -- abort otherwise",
+    )
     p.set_defaults(func=cmd_analyze_fixed_trace)
+
+    p = sub.add_parser("check-fixed-trace-accuracy")
+    p.add_argument("--config", required=True)
+    p.add_argument("--replay-condition", required=True)
+    p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--problem-index", type=int, default=None)
+    p.add_argument("--seed", type=int, default=None)
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_check_fixed_trace_accuracy)
 
     p = sub.add_parser("inspect-fixed-trace")
     p.add_argument("--config", required=True)

@@ -172,6 +172,28 @@ GPU — the one-example frozen-probe/schedule-prediction gate
 (`docs/GPU_VALIDATION_PLAN.md`) is required before any full replay under
 this config.
 
+**Second-pass v3 hardening (2026-07-18):** a follow-up review found the
+selection file from `--write-selection` was never actually consumed by
+`replay-fixed-trace`/`analyze-fixed-trace` (both now take
+`--selection-file`), a real bug in `--max-selected` (capped the ranked list
+before filtering to predicted-eligible candidates, fixed — filter first,
+cap second), the documented run order calling `analyze-fixed-trace` before
+any fixed-trace replay existed (impossible — fixed with a new CPU-only
+`kvcot check-fixed-trace-accuracy` command that reads only the natural
+`full.jsonl`/`{condition}.jsonl` files and requires an exact, identical
+record count/key-set/schema/identity match before trusting
+`pilot_accuracy_plausible`), and a screen-validity gap where
+`require_meaningful_compression=True` still checked the loose any-eviction
+rate at the SCREEN level (fixed: checks `meaningful_compression_rate`
+against new `min_meaningful_compression_rate` instead). Also added: the two
+GPU tests the 2026-07-17 entry promised but did not yet contain
+(`tests/integration/test_rkv_schedule_prediction_gpu.py`,
+`test_frozen_probe_gpu.py`), plus a CPU-only fake-model regression suite
+(`tests/integration/test_frozen_probe_fake_model.py`, runs on any machine
+with a plain CPU torch install — no GPU needed) that directly verifies
+`frozen_at_cut` forces compression off before every fed token, not just
+once. See `CHANGELOG.md`'s 2026-07-18 entry for full detail.
+
 **Resume behavior:** re-running the same command with `--resume` skips any
 `record_id` already present in the output JSONL file
 (`kvcot.utils.io.JsonlWriter`/`read_existing_record_ids`) — safe to

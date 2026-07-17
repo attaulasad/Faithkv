@@ -261,29 +261,69 @@ Fixes both causes above: `probe_cache_mode: frozen_at_cut`
 for the duration of every probe and hard-asserts the cache did not move;
 `require_meaningful_compression: true` with `meaningful_retention_ceiling:
 0.7` requires a SUBSTANTIAL measured retention drop, never just a nonzero
-one. Required order:
+one.
+
+**Required order (revised 2026-07-18 — the original v3 pass's documented
+order called `analyze-fixed-trace` before any fixed-trace replay had ever
+run, which cannot work: that command unconditionally reads the fixed-trace
+probe files, which do not exist yet at that point):**
 
 ```bash
-kvcot generate --config configs/early_gap_v3_b128.yaml --condition full          # 50 natural FullKV traces
+# 1. Mandatory GPU correctness gates, including the two new v3-specific ones.
+pytest -m "not gpu" -q
+pytest -m gpu tests/integration/test_patched_noop_parity_gpu.py -v
+pytest -m gpu tests/integration/test_no_state_leak_gpu.py -v
+pytest -m gpu tests/integration/test_replay_gpu.py -v
+pytest -m gpu tests/integration/test_probe_stability_gpu.py -v
+pytest -m gpu tests/integration/test_rkv_schedule_prediction_gpu.py -v   # new: simulator vs real measured cache length
+pytest -m gpu tests/integration/test_frozen_probe_gpu.py -v              # new: frozen_at_cut vs native, real model
+
+# 2. Natural FullKV generation, then CPU-only, outcome-blind selection --
+#    BEFORE any R-KV replay.
+kvcot generate --config configs/early_gap_v3_b128.yaml --condition full
 kvcot inspect-fixed-trace --config configs/early_gap_v3_b128.yaml --trace-condition full --write-selection
-# ^ CPU-only. Predicts realized retention per example via
-#   kvcot.analysis.rkv_schedule BEFORE any R-KV replay and writes
-#   results/selections/early_gap_v3_b128.json. Stop here if
-#   n_selected < fixed_trace.min_eligible_examples.
-kvcot generate --config configs/early_gap_v3_b128.yaml --condition rkv_b128      # SAME 50 problems, natural R-KV
-kvcot analyze-fixed-trace --config configs/early_gap_v3_b128.yaml --replay-condition rkv_b128
-# ^ automatically reads the natural rkv_b128.jsonl above (require_meaningful_compression
-#   triggers this) and reports pilot_accuracy_plausible in the decision JSON's
-#   "accuracy_screen" key. Stop here if it is false.
+# ^ Predicts realized retention per example via kvcot.analysis.rkv_schedule.
+#   Writes results/selections/early_gap_v3_b128.json. Exit code is already 1
+#   if n_selected < fixed_trace.min_eligible_examples -- stop here if so.
+
+# 3. Natural R-KV generation on the SAME 50 problems, then the CPU-only
+#    strict accuracy gate -- this now has no ordering dependency on any
+#    fixed-trace replay, unlike the superseded 2026-07-17 order.
+kvcot generate --config configs/early_gap_v3_b128.yaml --condition rkv_b128
+kvcot check-fixed-trace-accuracy --config configs/early_gap_v3_b128.yaml --replay-condition rkv_b128
+# ^ Reads ONLY full.jsonl/rkv_b128.jsonl (never fixed-trace probes). Requires
+#   an exact expected record count, an IDENTICAL key set between the two
+#   files, schema-valid records, one shared identity, and
+#   pilot_accuracy_plausible -- exits nonzero (and writes
+#   results/decisions/early_gap_v3_b128_accuracy_gate.json documenting why)
+#   if any of those fail. Stop here if it does not pass.
+
+# 4. One-example frozen-probe/schedule-prediction gate (below), using
+#    --selection-file + --problem-index together to replay exactly one
+#    SELECTED example without touching the rest.
+FIRST_SELECTED=<first entry of selected_source_row_indices in the selection file>
+kvcot replay-fixed-trace --config configs/early_gap_v3_b128.yaml --trace-condition full --replay-condition full \
+  --selection-file results/selections/early_gap_v3_b128.json --problem-index "$FIRST_SELECTED"
+kvcot replay-fixed-trace --config configs/early_gap_v3_b128.yaml --trace-condition full --replay-condition rkv_b128 \
+  --selection-file results/selections/early_gap_v3_b128.json --problem-index "$FIRST_SELECTED"
+# Validate against the checklist below. Only then:
+
+# 5. Replay the REST of the selected examples in two model loads --
+#    --resume skips the one example already written above.
+kvcot replay-fixed-trace --config configs/early_gap_v3_b128.yaml --trace-condition full --replay-condition full \
+  --selection-file results/selections/early_gap_v3_b128.json --resume
+kvcot replay-fixed-trace --config configs/early_gap_v3_b128.yaml --trace-condition full --replay-condition rkv_b128 \
+  --selection-file results/selections/early_gap_v3_b128.json --resume
+
+# 6. Analysis, restricted to exactly the selected set -- aborts (does not
+#    silently under-report) if any selected example is missing or
+#    incomplete under either policy.
+kvcot analyze-fixed-trace --config configs/early_gap_v3_b128.yaml --replay-condition rkv_b128 \
+  --selection-file results/selections/early_gap_v3_b128.json
 ```
 
-Then run the frozen-probe/schedule-prediction one-example gate (below)
-before replaying the rest of the selected examples with
-`replay-fixed-trace --trace-condition full --replay-condition full` and
-`--replay-condition rkv_b128`.
-
-**One-example frozen-probe/schedule-prediction gate — mandatory, before any
-full v3 replay.** This is IN ADDITION to (does not replace) the one-example
+**One-example frozen-probe/schedule-prediction gate — mandatory, before
+step 5 above.** This is IN ADDITION to (does not replace) the one-example
 gate two sections above (extraction/correctness/no-cap/clean-tree still
 apply identically). Additionally confirm, for that one example:
 
@@ -299,7 +339,9 @@ apply identically). Additionally confirm, for that one example:
   even one token means the CPU simulator does not actually reproduce real
   R-KV behavior on this build/version combination — stop and re-derive the
   simulator against the currently-pinned upstream commit before trusting it
-  for selection on any further example.
+  for selection on any further example. (`test_rkv_schedule_prediction_gpu.
+  py` in step 1 already checks this on a synthetic fixture; this step
+  re-checks it on a REAL selected example from this actual manifest.)
 
 ### GPU test process isolation (§ Step 13/14, 2026-07-16)
 

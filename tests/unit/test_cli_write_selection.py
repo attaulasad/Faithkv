@@ -50,6 +50,8 @@ def _stage(tmp_path, budget: int, **overrides):
         min_actual_compression_rate=0.0, max_mean_f1_retention_ratio=1.0,
         meaningful_retention_ceiling=overrides.pop("meaningful_retention_ceiling", 0.7),
         min_meaningfully_compressed_scored_fractions=overrides.pop("min_meaningfully_compressed_scored_fractions", 0),
+        min_eligible_examples=overrides.pop("min_eligible_examples", 1),
+        max_selected_examples=overrides.pop("max_selected_examples", None),
     )
     return StageConfig(
         stage_name="test_v3_selection",
@@ -132,9 +134,81 @@ def test_write_selection_truncation_uses_only_source_row_index_never_predicted_v
     args.max_selected = 3
     cmd_inspect_fixed_trace(args)
     selection = read_json(tmp_path / "results" / "selections" / "test_v3_selection.json")
-    # Sorted by source_row_index, then truncated to the first 3 -- 0, 1, 2 --
-    # regardless of the order rows appeared in the file.
-    assert [c["source_row_index"] for c in selection["candidates"]] == [0, 1, 2]
+    # `candidates` holds every ranked candidate, uncapped (2026-07-18 fix) --
+    # only the SELECTED subset is capped, sorted by source_row_index -- 0, 1,
+    # 2 -- regardless of the order rows appeared in the file.
+    assert [c["source_row_index"] for c in selection["candidates"]] == [0, 1, 2, 3, 4, 5]
+    assert selection["selected_source_row_indices"] == [0, 1, 2]
+    assert selection["n_ranked"] == 6
+    assert selection["n_selected"] == 3
+
+
+def test_write_selection_caps_eligible_set_not_the_full_ranked_list(tmp_path, monkeypatch):
+    # Regression for the exact bug the 2026-07-18 review found: rows 0-2 are
+    # short (never exceed budget=128, predicted_eligible=False); rows 3-5 are
+    # long (well above budget, predicted_eligible=True). With max_selected=2,
+    # the BUGGY behavior (cap the full source_row_index-sorted list BEFORE
+    # filtering to eligible) would keep only rows [0, 1] -- both ineligible,
+    # n_selected=0 -- even though two perfectly good eligible candidates (3,
+    # 4) exist. The FIXED behavior must select [3, 4].
+    rows = [_base_row(prompt_len=10, think_len=10, idx=i) for i in (0, 1, 2)]
+    rows += [_base_row(prompt_len=50, think_len=250, idx=i) for i in (3, 4, 5)]
+    _write_base_file(tmp_path / "full.jsonl", rows)
+    stage = _stage(tmp_path, budget=128)
+    lock = load_lock_config("configs/lock.yaml")
+    monkeypatch.setattr("kvcot.cli.load_stage_config", lambda path: (stage, lock))
+    monkeypatch.chdir(tmp_path)
+
+    args = _args(_LOCK_PATH, tmp_path)
+    args.max_selected = 2
+    cmd_inspect_fixed_trace(args)
+    selection = read_json(tmp_path / "results" / "selections" / "test_v3_selection.json")
+    assert selection["n_ranked"] == 6
+    assert selection["n_predicted_eligible"] == 3  # rows 3, 4, 5
+    assert selection["n_selected"] == 2
+    assert selection["selected_source_row_indices"] == [3, 4]
+
+
+def test_write_selection_returns_exit_1_when_below_min_eligible_examples(tmp_path, monkeypatch):
+    rows = [_base_row(prompt_len=50, think_len=250, idx=0)]  # only 1 candidate
+    _write_base_file(tmp_path / "full.jsonl", rows)
+    stage = _stage(tmp_path, budget=128, min_eligible_examples=5)  # need 5, only 1 exists
+    lock = load_lock_config("configs/lock.yaml")
+    monkeypatch.setattr("kvcot.cli.load_stage_config", lambda path: (stage, lock))
+    monkeypatch.chdir(tmp_path)
+
+    rc = cmd_inspect_fixed_trace(_args(_LOCK_PATH, tmp_path))
+    assert rc == 1
+
+
+def test_write_selection_config_max_selected_examples_used_when_cli_flag_omitted(tmp_path, monkeypatch):
+    rows = [_base_row(prompt_len=50, think_len=250, idx=i) for i in range(5)]
+    _write_base_file(tmp_path / "full.jsonl", rows)
+    stage = _stage(tmp_path, budget=128, max_selected_examples=2)
+    lock = load_lock_config("configs/lock.yaml")
+    monkeypatch.setattr("kvcot.cli.load_stage_config", lambda path: (stage, lock))
+    monkeypatch.chdir(tmp_path)
+
+    args = _args(_LOCK_PATH, tmp_path)  # args.max_selected stays None
+    cmd_inspect_fixed_trace(args)
+    selection = read_json(tmp_path / "results" / "selections" / "test_v3_selection.json")
+    assert selection["n_selected"] == 2
+    assert selection["max_selected"] == 2
+
+
+def test_write_selection_cli_flag_overrides_config_max_selected_examples(tmp_path, monkeypatch):
+    rows = [_base_row(prompt_len=50, think_len=250, idx=i) for i in range(5)]
+    _write_base_file(tmp_path / "full.jsonl", rows)
+    stage = _stage(tmp_path, budget=128, max_selected_examples=2)
+    lock = load_lock_config("configs/lock.yaml")
+    monkeypatch.setattr("kvcot.cli.load_stage_config", lambda path: (stage, lock))
+    monkeypatch.chdir(tmp_path)
+
+    args = _args(_LOCK_PATH, tmp_path)
+    args.max_selected = 4  # explicit CLI override wins over the config's 2
+    cmd_inspect_fixed_trace(args)
+    selection = read_json(tmp_path / "results" / "selections" / "test_v3_selection.json")
+    assert selection["n_selected"] == 4
 
 
 def test_write_selection_is_deterministic_across_repeated_calls(tmp_path, monkeypatch):

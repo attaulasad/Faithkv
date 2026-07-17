@@ -12,10 +12,12 @@ from pathlib import Path
 import pytest
 
 from kvcot.analysis.fixed_trace import (
+    _verify_selection_completeness,
     build_accuracy_screen,
     build_fixed_trace_decision,
     build_fixed_trace_pairs,
     build_screen_validity,
+    build_strict_accuracy_gate,
     compute_cpss,
     compute_delta_cpss,
     fixed_trace_curve_by_fraction_eligible_only,
@@ -299,6 +301,72 @@ def test_screen_validity_invalidated_by_missing_accuracy_screen():
     assert any("pilot_accuracy_plausible" in r for r in reasons)
 
 
+def test_screen_validity_gates_on_meaningful_not_actual_compression_rate_when_required():
+    # 2026-07-18 review: require_meaningful_compression=True must gate the
+    # SCREEN on meaningful_compression_rate, not actual_compression_rate --
+    # a batch where every example evicted at least one token (actual=1.0)
+    # but almost none evicted enough to be "meaningful" (meaningful=0.1)
+    # must NOT pass the screen just because actual_compression_rate looks
+    # perfect.
+    settings = FixedTraceSettings(
+        min_eligible_examples=1, min_actual_compression_rate=0.0, max_mean_f1_retention_ratio=1.0,
+        require_meaningful_compression=True, min_meaningful_compression_rate=0.7,
+    )
+    valid, reasons = build_screen_validity(
+        n_eligible=5, actual_compression_rate=1.0, mean_f1_rkv_retention_ratio=0.3, settings=settings,
+        meaningful_compression_rate=0.1,
+    )
+    assert valid is False
+    assert any("meaningful_compression_rate" in r for r in reasons)
+
+
+def test_screen_validity_passes_on_high_meaningful_compression_rate_when_required():
+    settings = FixedTraceSettings(
+        min_eligible_examples=1, min_actual_compression_rate=0.0, max_mean_f1_retention_ratio=1.0,
+        require_meaningful_compression=True, min_meaningful_compression_rate=0.7,
+    )
+    valid, reasons = build_screen_validity(
+        n_eligible=5, actual_compression_rate=1.0, mean_f1_rkv_retention_ratio=0.3, settings=settings,
+        meaningful_compression_rate=0.8,
+    )
+    assert valid is True
+    assert reasons == []
+
+
+def test_screen_validity_v2_stages_still_gate_on_actual_compression_rate():
+    # require_meaningful_compression defaults to False (v2 semantics) --
+    # meaningful_compression_rate must be completely ignored, even if given.
+    settings = FixedTraceSettings(min_eligible_examples=1, min_actual_compression_rate=0.7, max_mean_f1_retention_ratio=1.0)
+    valid, reasons = build_screen_validity(
+        n_eligible=5, actual_compression_rate=0.8, mean_f1_rkv_retention_ratio=0.3, settings=settings,
+        meaningful_compression_rate=0.0,  # would fail if mistakenly checked
+    )
+    assert valid is True
+    assert reasons == []
+
+
+def test_decision_meaningful_compression_rate_drives_v3_screen_validity(tmp_path):
+    # End-to-end: build_fixed_trace_decision must actually wire
+    # meaningful_compression_rate into build_screen_validity when
+    # require_meaningful_compression=True.
+    settings = FixedTraceSettings(
+        min_eligible_examples=1, min_actual_compression_rate=0.0, max_mean_f1_retention_ratio=1.0,
+        require_meaningful_compression=True, meaningful_retention_ceiling=0.7,
+        min_meaningful_compression_rate=0.7,
+    )
+    # retention=0.9 -> actual_compression_at_cut True (still < fullkv-equivalent
+    # in the fixture's construction) but NOT meaningful (0.9 > 0.7 ceiling).
+    base, base_records, full_probes, rkv_probes = _make_run(tmp_path, retention=0.9, rkv_actual_compression=True)
+    pairs = build_fixed_trace_pairs(base_records, full_probes, rkv_probes, settings=settings)
+    decision = build_fixed_trace_decision(
+        len(pairs), pairs, full_curve={}, rkv_curve={}, settings=settings,
+        full_probes=full_probes, rkv_probes=rkv_probes,
+    )
+    assert decision["meaningful_compression_rate"] == pytest.approx(0.0)
+    assert decision["screen_valid"] is False
+    assert any("meaningful_compression_rate" in r for r in decision["screen_invalid_reasons"])
+
+
 def test_screen_validity_unaffected_when_accuracy_screen_omitted():
     # v2 callers never pass accuracy_screen -- must not spuriously invalidate.
     settings = FixedTraceSettings(min_eligible_examples=1, min_actual_compression_rate=0.5, max_mean_f1_retention_ratio=0.7)
@@ -396,3 +464,180 @@ def _make_run(
     full_probes = load_fixed_trace_records(d / "full_on_full_fixed_trace_probes.jsonl", "full")
     rkv_probes = load_fixed_trace_records(d / "rkv_b512_on_full_fixed_trace_probes.jsonl", "rkv_b512")
     return base, base_records, full_probes, rkv_probes
+
+
+# --- selection-file completeness guard (2026-07-18 review) ---
+
+def test_verify_selection_completeness_passes_when_fully_covered(tmp_path):
+    base, base_records, full_probes, rkv_probes = _make_run(tmp_path, retention=0.5, rkv_actual_compression=True)
+    _verify_selection_completeness({base["record_id"]}, base_records, full_probes, rkv_probes)  # must not raise
+
+
+def test_verify_selection_completeness_raises_when_selected_id_missing_from_base(tmp_path):
+    base, base_records, full_probes, rkv_probes = _make_run(tmp_path, retention=0.5, rkv_actual_compression=True)
+    with pytest.raises(ValueError, match="not present in the canonical base file"):
+        _verify_selection_completeness({"nonexistent-base-id"}, base_records, full_probes, rkv_probes)
+
+
+def test_verify_selection_completeness_raises_when_full_probes_missing_entirely(tmp_path):
+    base, base_records, full_probes, rkv_probes = _make_run(tmp_path, retention=0.5, rkv_actual_compression=True)
+    # Simulate a selected example whose FullKV replay never ran at all.
+    empty_full_probes = load_fixed_trace_records(tmp_path / "empty_full.jsonl", "full")
+    _write(tmp_path / "empty_full.jsonl", [])
+    with pytest.raises(ValueError, match="missing from FullKV fixed-trace probes entirely"):
+        _verify_selection_completeness({base["record_id"]}, base_records, empty_full_probes, rkv_probes)
+
+
+def test_verify_selection_completeness_raises_when_a_fraction_is_missing(tmp_path):
+    base, base_records, full_probes, rkv_probes = _make_run(tmp_path, retention=0.5, rkv_actual_compression=True)
+    # Drop one fraction from the R-KV side's group to simulate an
+    # incomplete (interrupted) replay.
+    del rkv_probes.probes_by_base[base["record_id"]][0.5]
+    with pytest.raises(ValueError, match=r"R-KV missing fraction"):
+        _verify_selection_completeness({base["record_id"]}, base_records, full_probes, rkv_probes)
+
+
+# Note: end-to-end run_fixed_trace_analysis(selected_base_record_ids=...)
+# tests live in test_fixed_trace_analysis.py, which already has the
+# full-schema-valid BaseRunRecord/FixedTraceProbeRecord fixture builders
+# run_fixed_trace_analysis's schema validation requires (_valid_base_run_
+# record/_valid_fixed_trace_probe_record) -- the lightweight dicts here are
+# sufficient for build_fixed_trace_pairs/_verify_selection_completeness
+# directly, but not for the full pipeline's Pydantic validation step.
+
+
+# --- build_strict_accuracy_gate (2026-07-18 review) ---
+
+def _natural_schema_record(idx: int, seed: int, condition: str, is_correct: bool = True, **overrides) -> dict:
+    from kvcot.schemas import (
+        BaseRunRecord, DatasetProvenance, MethodConfig, ProvenanceState, ThinkSpanInfo, VersionInfo,
+    )
+
+    defaults = dict(
+        record_id=f"base-{condition}-ds-{idx}-seed{seed}",
+        config_path="configs/early_gap_v3_b128.yaml",
+        config_sha256="a" * 64,
+        provenance=ProvenanceState(upstream_rkv_commit="45eaa7d69d20b7388321f077020a610d9afb65bd", git_commit="deadbeef", git_dirty=False),
+        versions=VersionInfo(python="3.10.0"),
+        model_name="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        model_revision="ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562",
+        tokenizer_name="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        tokenizer_revision="ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562",
+        dataset=DatasetProvenance(dataset_name="gsm8k", source_row_index=idx, question_hash="b" * 64, normalized_gold="42"),
+        condition=condition,
+        method_config=MethodConfig(method="fullkv" if condition == "full" else "rkv"),
+        global_seed=seed,
+        derived_seed=123,
+        prompt_text="hello",
+        prompt_token_ids=[1, 2, 3],
+        generated_token_ids=[4, 5, 6],
+        decoded_output="42",
+        think_span=ThinkSpanInfo(think_start_index=0, think_end_index=3, think_parse_status="generation_prompt_preopened_ok", generation_prompt_preopened_think=True),
+        extracted_answer="42",
+        extraction_method="boxed",
+        is_correct=is_correct,
+        cap_hit=False,
+        wall_time_seconds=1.0,
+        generated_token_count=3,
+        compaction_count=0,
+        compaction_event_steps=[],
+        cache_length_final_per_layer=[3, 3],
+    )
+    defaults.update(overrides)
+    return BaseRunRecord(**defaults).model_dump(mode="json")
+
+
+def _identity(rec: dict) -> tuple:
+    return (rec["config_sha256"], rec["provenance"]["upstream_rkv_commit"], rec["model_revision"], rec["tokenizer_revision"])
+
+
+def test_strict_accuracy_gate_passes_with_complete_matching_data():
+    full_records = [_natural_schema_record(i, 42, "full") for i in range(10)]
+    rkv_records = [_natural_schema_record(i, 42, "rkv_b128") for i in range(10)]
+    settings = FixedTraceSettings(max_pilot_accuracy_drop=0.10)
+    gate = build_strict_accuracy_gate(full_records, rkv_records, expected_n=10, settings=settings)
+    assert gate["gate_passed"] is True
+    assert gate["reasons"] == []
+
+
+def test_strict_accuracy_gate_fails_on_missing_records_even_with_one_matching_pair():
+    # The exact scenario the review flagged: one matching pair, 9 missing --
+    # build_accuracy_screen alone would compute a "perfect" n=1 comparison;
+    # the strict gate must fail on count/key-set grounds regardless.
+    full_records = [_natural_schema_record(i, 42, "full") for i in range(10)]
+    rkv_records = [_natural_schema_record(0, 42, "rkv_b128")]  # only 1 of 10
+    settings = FixedTraceSettings(max_pilot_accuracy_drop=0.10)
+    gate = build_strict_accuracy_gate(full_records, rkv_records, expected_n=10, settings=settings)
+    assert gate["gate_passed"] is False
+    assert any("rkv record count" in r for r in gate["reasons"])
+    assert any("key sets differ" in r for r in gate["reasons"])
+
+
+def test_strict_accuracy_gate_fails_on_duplicate_keys():
+    full_records = [_natural_schema_record(0, 42, "full", record_id="dup-a"), _natural_schema_record(0, 42, "full", record_id="dup-b")]
+    rkv_records = [_natural_schema_record(0, 42, "rkv_b128")]
+    settings = FixedTraceSettings()
+    gate = build_strict_accuracy_gate(full_records, rkv_records, expected_n=1, settings=settings)
+    assert gate["gate_passed"] is False
+    assert any("duplicate" in r for r in gate["reasons"])
+
+
+def test_strict_accuracy_gate_fails_on_schema_invalid_record():
+    full_records = [_natural_schema_record(0, 42, "full")]
+    bad = _natural_schema_record(0, 42, "rkv_b128")
+    del bad["is_correct"]  # required field missing -> schema invalid
+    gate = build_strict_accuracy_gate(full_records, [bad], expected_n=1, settings=FixedTraceSettings())
+    assert gate["gate_passed"] is False
+    assert any("failed schema validation" in r for r in gate["reasons"])
+
+
+def test_strict_accuracy_gate_fails_on_identity_mismatch_within_rkv_records():
+    full_records = [_natural_schema_record(i, 42, "full") for i in range(2)]
+    rkv_records = [
+        _natural_schema_record(0, 42, "rkv_b128"),
+        _natural_schema_record(1, 42, "rkv_b128", model_revision="some-other-revision"),
+    ]
+    gate = build_strict_accuracy_gate(full_records, rkv_records, expected_n=2, settings=FixedTraceSettings())
+    assert gate["gate_passed"] is False
+    assert any("different identities" in r for r in gate["reasons"])
+
+
+def test_strict_accuracy_gate_fails_against_mismatched_expected_identity():
+    full_records = [_natural_schema_record(i, 42, "full") for i in range(2)]
+    rkv_records = [_natural_schema_record(i, 42, "rkv_b128") for i in range(2)]
+    mismatched_expected = ("a" * 64, "45eaa7d69d20b7388321f077020a610d9afb65bd", "some-other-model-revision", "ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562")
+    gate = build_strict_accuracy_gate(
+        full_records, rkv_records, expected_n=2, settings=FixedTraceSettings(), expected_identity=mismatched_expected,
+    )
+    assert gate["gate_passed"] is False
+    assert any("do not share one" in r for r in gate["reasons"])
+
+
+def test_strict_accuracy_gate_passes_against_matching_expected_identity():
+    full_records = [_natural_schema_record(i, 42, "full") for i in range(2)]
+    rkv_records = [_natural_schema_record(i, 42, "rkv_b128") for i in range(2)]
+    matching_expected = _identity(full_records[0])
+    gate = build_strict_accuracy_gate(
+        full_records, rkv_records, expected_n=2, settings=FixedTraceSettings(), expected_identity=matching_expected,
+    )
+    assert gate["gate_passed"] is True
+
+
+def test_strict_accuracy_gate_fails_on_wrong_condition_field():
+    mislabeled = _natural_schema_record(0, 42, "full")
+    mislabeled["condition"] = "rkv_b128"  # as if the wrong file were passed in as "full"
+    full_records = [mislabeled]
+    rkv_records = [_natural_schema_record(0, 42, "rkv_b128")]
+    gate = build_strict_accuracy_gate(full_records, rkv_records, expected_n=1, settings=FixedTraceSettings())
+    assert gate["gate_passed"] is False
+    assert any("condition field is 'full'" in r for r in gate["reasons"])
+
+
+def test_strict_accuracy_gate_fails_on_accuracy_drop_even_with_complete_data():
+    full_records = [_natural_schema_record(i, 42, "full", is_correct=True) for i in range(10)]
+    rkv_records = [_natural_schema_record(i, 42, "rkv_b128", is_correct=(i < 5)) for i in range(10)]
+    settings = FixedTraceSettings(max_pilot_accuracy_drop=0.10)
+    gate = build_strict_accuracy_gate(full_records, rkv_records, expected_n=10, settings=settings)
+    assert gate["gate_passed"] is False
+    assert any("pilot_accuracy_plausible" in r for r in gate["reasons"])
+    assert gate["accuracy_screen"]["accuracy_difference_rkv_minus_full"] == pytest.approx(-0.5)

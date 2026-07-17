@@ -5,6 +5,97 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-18 — Fixed-trace protocol v3, second pass: selection-to-replay wiring, strict accuracy gate, screen-validity fix (secondary, additive; no frozen §1/§4/§8/§9 value changed)
+
+A second review of the 2026-07-17 protocol-v3 commit (`45bf2d8`) found the
+frozen-cache design and cache-schedule simulator sound (independently
+re-checked against the archived protocol-v2 raw GPU data: 0 mismatches
+across all 90 (example, fraction) comparisons), but four gaps that would
+have wasted GPU time or produced an untrustworthy screen on the next real
+run. Fixed here, still before any GPU spend:
+
+- **The selection file was written but never consumed.** `kvcot
+  inspect-fixed-trace --write-selection` wrote `results/selections/
+  {stage}.json`, but neither `replay-fixed-trace` nor `analyze-fixed-trace`
+  had any way to read it back — the only way to run a selected subset was
+  one `--problem-index` invocation per example, reloading the model every
+  time. Fixed: both commands gained `--selection-file`
+  (`kvcot.cli._load_fixed_trace_selection`), which verifies the selection
+  was computed against THIS exact config/base-file/budget/divide_length/
+  stage_name before trusting it (raises `SelectionFileMismatchError`
+  otherwise), then restricts the run to exactly the selected
+  `base_record_id`s. `replay-fixed-trace` refuses to proceed (`SystemExit`)
+  if the selection's `n_selected` is already below `min_eligible_examples`.
+  The selection path and its SHA-256 are now recorded on every
+  `replay-fixed-trace` `RunManifest` (`RunManifest.selection_path`/
+  `selection_file_sha256`, new optional fields).
+- **`--max-selected` capped the ranked candidate list BEFORE filtering to
+  predicted-eligible ones** (`kvcot.cli._write_fixed_trace_selection`) — a
+  real bug: if the first `--max-selected` candidates by `source_row_index`
+  happened to be predicted-ineligible, the selection could come back with
+  `n_selected=0` even though plenty of eligible candidates existed later in
+  the ranking. Fixed: candidates are ranked (uncapped) first, filtered to
+  `predicted_eligible`, and ONLY THEN capped. New `FixedTraceSettings.
+  max_selected_examples` lets the cap be pre-registered in the stage config
+  itself, not chosen after seeing the selection; `--max-selected` on the
+  CLI still overrides it when explicitly given.
+- **The documented accuracy-gate run order was impossible.**
+  `docs/GPU_VALIDATION_PLAN.md` said to run `analyze-fixed-trace` right
+  after natural R-KV generation, before any fixed-trace replay, to get the
+  pilot accuracy screen — but `analyze-fixed-trace`/`run_fixed_trace_
+  analysis` unconditionally reads the fixed-trace probe files too, which do
+  not exist yet at that point in the order; the command would simply crash.
+  Separately, `build_accuracy_screen`'s intersection-only pairing means one
+  matching `(source_row_index, global_seed)` pair could report
+  `pilot_accuracy_plausible: True` even while 49 of 50 R-KV records were
+  never generated at all. Fixed with a new CPU-only command, **`kvcot
+  check-fixed-trace-accuracy`**, that reads ONLY the natural `full.jsonl`/
+  `{replay_condition}.jsonl` files (never fixed-trace probes) and wraps the
+  pairing in `kvcot.analysis.fixed_trace.build_strict_accuracy_gate`, which
+  requires (all independently, never silently skipped): an exact expected
+  record count on both sides, no duplicate `(source_row_index, global_seed)`
+  keys, an IDENTICAL key set between the two files (not just a
+  large-enough intersection), every record schema-valid, one shared
+  `(config_sha256, upstream_rkv_commit, model_revision, tokenizer_revision)`
+  identity matching the current invocation's own config/lock, consistent
+  `condition` fields, and `pilot_accuracy_plausible`. Writes `results/
+  decisions/{stage_name}_accuracy_gate.json`, exits nonzero on any failure.
+  `build_accuracy_screen` itself is unchanged (still an honest, low-level
+  intersection-based pairing helper) — the strict gate wraps it, rather
+  than changing what it means.
+- **Screen-level validity still gated on `actual_compression_rate`, not
+  `meaningful_compression_rate`, even under `require_meaningful_compression
+  =True`.** The per-PAIR eligibility gate (`FixedTraceEligibility.
+  rkv_meaningful_compression_at_f1`, 2026-07-17) worked correctly, but
+  `build_screen_validity` kept checking the old any-eviction rate at the
+  SCREEN level regardless — a batch where every example evicted at least
+  one token (`actual_compression_rate=1.0`) but almost none evicted enough
+  to be "meaningful" could still report `screen_valid: True`. Fixed: when
+  `require_meaningful_compression=True`, the screen gate now checks
+  `meaningful_compression_rate` against new setting `FixedTraceSettings.
+  min_meaningful_compression_rate` (default 0.7) INSTEAD of
+  `actual_compression_rate`/`min_actual_compression_rate`; v2 stages
+  (`require_meaningful_compression=False`, the default) are completely
+  unaffected.
+- **Analysis completeness guard added**: `run_fixed_trace_analysis` gained
+  `selected_base_record_ids` (wired from `--selection-file`) — when given,
+  `kvcot.analysis.fixed_trace._verify_selection_completeness` requires
+  every selected example to have all 9 fractions recorded under BOTH
+  replay policies, and raises `ValueError` (abort, never silent attrition)
+  if any are missing — a partially-completed replay (e.g. 5 of 20 selected
+  examples actually written) could otherwise still clear
+  `min_eligible_examples` and produce a decision JSON as if the screen were
+  actually complete. All curves/counts are also scoped to exactly the
+  selected set once a selection is active (`n_shared == n_selected`
+  becomes an enforced invariant, not just a hope).
+- Still true from the 2026-07-17 entry: no GPU exists on this machine.
+  `tests/integration/test_rkv_schedule_prediction_gpu.py` (new) and
+  `tests/integration/test_frozen_probe_gpu.py` (new) implement the two
+  mandatory GPU gates that entry promised but did not yet contain — both
+  collect and auto-skip cleanly here (13 GPU tests skipped, up from 11) and
+  must be run for real, and pass, before trusting either the schedule
+  simulator or `frozen_at_cut` against a real model.
+
 ## 2026-07-17 — Fixed-trace protocol v3: frozen-cache causal probe, meaningful-compression gating, exact cache-schedule simulator (secondary, additive; no frozen §1/§4/§8/§9 value changed)
 
 **Protocol v2's real GPU screen (`configs/early_gap_v2_b128.yaml`, committed

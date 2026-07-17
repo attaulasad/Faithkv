@@ -176,6 +176,29 @@ class FixedTraceSettings(BaseModel):
     # only test allowed to claim distributional accuracy preservation).
     max_pilot_accuracy_drop: float = Field(default=0.10, ge=0.0, le=1.0)
 
+    # --- Second-pass v3 hardening (2026-07-18 review) ---
+    # Screen-level validity gate (kvcot.analysis.fixed_trace.
+    # build_screen_validity) used to check actual_compression_rate (any
+    # nonzero eviction) even when require_meaningful_compression=True,
+    # defeating the entire point of the meaningful-compression gate at the
+    # SCREEN level even though it worked correctly at the per-PAIR
+    # eligibility level. When require_meaningful_compression=True, the
+    # screen gate now checks meaningful_compression_rate against this
+    # threshold instead of min_actual_compression_rate. Unused (and
+    # irrelevant) when require_meaningful_compression=False (v2 semantics).
+    min_meaningful_compression_rate: float = Field(default=0.7, ge=0.0, le=1.0)
+    # Preregistered cap on how many PREDICTED-ELIGIBLE candidates
+    # `kvcot inspect-fixed-trace --write-selection` selects, applied AFTER
+    # ranking by predicted eligibility (never before — capping the ranked-
+    # but-not-yet-filtered candidate list first, as an earlier version of
+    # this code did, could select zero examples even when plenty of
+    # eligible ones existed later in source_row_index order). Set here
+    # (rather than only via a `--max-selected` CLI flag) so the cap is
+    # pre-registered in the frozen stage config, not chosen after seeing
+    # the selection. `--max-selected` on the CLI still overrides this when
+    # explicitly given.
+    max_selected_examples: int | None = Field(default=None, ge=1)
+
 
 class StageConfig(BaseModel):
     stage_name: str

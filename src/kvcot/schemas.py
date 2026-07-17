@@ -373,3 +373,12 @@ class RunManifest(BaseModel):
 
     wall_time_seconds: float | None = None
     peak_vram_bytes: int | None = None
+
+    # Protocol v3 (2026-07-18 review): which results/selections/{stage}.json
+    # (if any) this replay-fixed-trace invocation was restricted to -- lets a
+    # reader verify after the fact which examples a run actually covered,
+    # without having to cross-reference the selection file's own mtime.
+    # None for every command that doesn't take --selection-file (generate,
+    # replay-probe) or when replay-fixed-trace ran without one.
+    selection_path: str | None = None
+    selection_file_sha256: str | None = None

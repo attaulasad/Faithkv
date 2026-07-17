@@ -32,7 +32,7 @@ from kvcot.analysis.fixed_trace import (
 )
 from kvcot.config import FixedTraceSettings, PROBE_FRACTIONS_ALL, PROBE_FRACTIONS_SCORED
 from kvcot.schemas import BaseRunRecord, FixedTraceProbeRecord
-from kvcot.utils.io import JsonlWriter, read_jsonl
+from kvcot.utils.io import JsonlWriter, read_json, read_jsonl
 
 
 def _base_record(
@@ -873,6 +873,100 @@ def test_run_fixed_trace_analysis_accepts_matching_current_config(tmp_path, monk
     rc = run_fixed_trace_analysis(
         output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
         stage_name="early_gap_v2_b128", settings=_SETTINGS, expected_identity=matching_expected_identity,
+    )
+    assert rc == 0
+
+
+# --- selection-file completeness guard, end-to-end (2026-07-18 review) ---
+
+def _all_fraction_records(base_record_id: str, replay_policy_condition: str, **overrides) -> list[dict]:
+    return [
+        _valid_fixed_trace_probe_record(
+            record_id=f"fixed-probe-{replay_policy_condition}-on-full-{base_record_id}-f{f}",
+            base_record_id=base_record_id,
+            parent_record_id=base_record_id,
+            fraction=f,
+            replay_policy_condition=replay_policy_condition,
+            **overrides,
+        )
+        for f in PROBE_FRACTIONS_ALL
+    ]
+
+
+def test_run_fixed_trace_analysis_aborts_on_incomplete_selection(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    base = _valid_base_run_record()
+    full_recs = _all_fraction_records(base["record_id"], "full")
+    rkv_recs = _all_fraction_records(base["record_id"], "rkv_b128")
+    del rkv_recs[-1]  # drop f=1.0 -- simulates a partially-completed replay
+    _write(tmp_path / "full.jsonl", [base])
+    _write(tmp_path / "full_on_full_fixed_trace_probes.jsonl", full_recs)
+    _write(tmp_path / "rkv_b128_on_full_fixed_trace_probes.jsonl", rkv_recs)
+
+    with pytest.raises(ValueError, match="selection completeness check failed"):
+        run_fixed_trace_analysis(
+            output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
+            stage_name="test_v3_selection", settings=_SETTINGS,
+            selected_base_record_ids={base["record_id"]},
+        )
+
+
+def test_run_fixed_trace_analysis_passes_with_complete_selection(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    base = _valid_base_run_record()
+    full_recs = _all_fraction_records(base["record_id"], "full")
+    rkv_recs = _all_fraction_records(base["record_id"], "rkv_b128")
+    _write(tmp_path / "full.jsonl", [base])
+    _write(tmp_path / "full_on_full_fixed_trace_probes.jsonl", full_recs)
+    _write(tmp_path / "rkv_b128_on_full_fixed_trace_probes.jsonl", rkv_recs)
+
+    rc = run_fixed_trace_analysis(
+        output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
+        stage_name="test_v3_selection", settings=_SETTINGS,
+        selected_base_record_ids={base["record_id"]},
+    )
+    assert rc == 0
+    decision = read_json(Path("results/decisions/test_v3_selection_fixed_trace.json"))
+    assert decision["n_shared"] == 1
+
+
+def test_run_fixed_trace_analysis_scopes_n_shared_to_selection(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    # Two complete problems on disk; selection only names one -- n_shared in
+    # the resulting decision must be 1, not 2 (2026-07-18 review: analysis
+    # must scope to exactly the selection, not just require it as a floor).
+    base_a = _valid_base_run_record(record_id="base-a", dataset={"dataset_name": "gsm8k", "source_row_index": 0, "question_hash": "b" * 64, "normalized_gold": "42"})
+    base_b = _valid_base_run_record(record_id="base-b", dataset={"dataset_name": "gsm8k", "source_row_index": 1, "question_hash": "c" * 64, "normalized_gold": "42"})
+    full_recs = _all_fraction_records("base-a", "full") + _all_fraction_records("base-b", "full")
+    rkv_recs = _all_fraction_records("base-a", "rkv_b128") + _all_fraction_records("base-b", "rkv_b128")
+    _write(tmp_path / "full.jsonl", [base_a, base_b])
+    _write(tmp_path / "full_on_full_fixed_trace_probes.jsonl", full_recs)
+    _write(tmp_path / "rkv_b128_on_full_fixed_trace_probes.jsonl", rkv_recs)
+
+    rc = run_fixed_trace_analysis(
+        output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
+        stage_name="test_v3_selection_scoped", settings=_SETTINGS,
+        selected_base_record_ids={"base-a"},
+    )
+    assert rc == 0
+    decision = read_json(Path("results/decisions/test_v3_selection_scoped_fixed_trace.json"))
+    assert decision["n_shared"] == 1
+
+
+def test_run_fixed_trace_analysis_without_selection_file_is_unaffected(tmp_path, monkeypatch):
+    # selected_base_record_ids=None (every pre-2026-07-18 caller) must
+    # preserve the exact prior behavior -- no completeness requirement.
+    monkeypatch.chdir(tmp_path)
+    base = _valid_base_run_record()
+    full_rec = _valid_fixed_trace_probe_record(replay_policy_condition="full")
+    rkv_rec = _valid_fixed_trace_probe_record(record_id="fixed-probe-rkv-f1", replay_policy_condition="rkv_b128")
+    _write(tmp_path / "full.jsonl", [base])
+    _write(tmp_path / "full_on_full_fixed_trace_probes.jsonl", [full_rec])
+    _write(tmp_path / "rkv_b128_on_full_fixed_trace_probes.jsonl", [rkv_rec])
+
+    rc = run_fixed_trace_analysis(
+        output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
+        stage_name="test_v3_no_selection", settings=_SETTINGS,
     )
     assert rc == 0
 

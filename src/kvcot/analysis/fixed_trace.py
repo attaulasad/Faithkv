@@ -773,6 +773,101 @@ def build_accuracy_screen(
     }
 
 
+def build_strict_accuracy_gate(
+    full_records: list[dict],
+    rkv_records: list[dict],
+    expected_n: int,
+    settings: "FixedTraceSettings",
+    expected_identity: tuple | None = None,
+) -> dict:
+    """Protocol v3 (2026-07-18 review): `build_accuracy_screen` above pairs
+    only the INTERSECTION of `(source_row_index, global_seed)` keys present
+    in both files — by itself, one matching pair could report
+    `pilot_accuracy_plausible: True` even if 49 of 50 R-KV records never got
+    generated at all. This function wraps it with hard preconditions that
+    must ALL hold before the accuracy screen is trusted at all: exact
+    expected record counts on both sides, no duplicate keys, an IDENTICAL
+    key set between the two files (not just a large-enough intersection),
+    every record schema-valid, and (when `expected_identity` is given) every
+    record sharing one (config_sha256, upstream_rkv_commit, model_revision,
+    tokenizer_revision) identity that also matches the current invocation's
+    own config/lock. Never raises — returns `gate_passed: False` and the
+    specific `reasons` instead, so a CLI caller can always write a decision
+    JSON documenting exactly why, rather than a raw traceback.
+    """
+    reasons: list[str] = []
+
+    def _key(row: dict) -> tuple[int, int]:
+        return (row["dataset"]["source_row_index"], row["global_seed"])
+
+    if len(full_records) != expected_n:
+        reasons.append(f"full record count ({len(full_records)}) != expected ({expected_n})")
+    if len(rkv_records) != expected_n:
+        reasons.append(f"rkv record count ({len(rkv_records)}) != expected ({expected_n})")
+
+    full_keys = [_key(r) for r in full_records]
+    rkv_keys = [_key(r) for r in rkv_records]
+    if len(set(full_keys)) != len(full_keys):
+        reasons.append("duplicate (source_row_index, global_seed) keys within the full records")
+    if len(set(rkv_keys)) != len(rkv_keys):
+        reasons.append("duplicate (source_row_index, global_seed) keys within the rkv records")
+    if set(full_keys) != set(rkv_keys):
+        missing_in_rkv = sorted(set(full_keys) - set(rkv_keys))
+        missing_in_full = sorted(set(rkv_keys) - set(full_keys))
+        reasons.append(
+            f"(source_row_index, global_seed) key sets differ: {len(missing_in_rkv)} present in full but "
+            f"missing from rkv ({missing_in_rkv[:5]}{'...' if len(missing_in_rkv) > 5 else ''}), "
+            f"{len(missing_in_full)} present in rkv but missing from full "
+            f"({missing_in_full[:5]}{'...' if len(missing_in_full) > 5 else ''})"
+        )
+
+    for label, records in (("full", full_records), ("rkv", rkv_records)):
+        for r in records:
+            try:
+                BaseRunRecord.model_validate(r)
+            except Exception as e:
+                reasons.append(f"{label} record {r.get('record_id')!r} failed schema validation: {e}")
+
+    full_identities = {_record_identity(r) for r in full_records}
+    rkv_identities = {_record_identity(r) for r in rkv_records}
+    if len(full_identities) > 1:
+        reasons.append(f"full records were produced under {len(full_identities)} different identities")
+    if len(rkv_identities) > 1:
+        reasons.append(f"rkv records were produced under {len(rkv_identities)} different identities")
+    combined_identities = full_identities | rkv_identities
+    if expected_identity is not None:
+        combined_identities = combined_identities | {expected_identity}
+    if len(combined_identities) > 1:
+        reasons.append(
+            "full/rkv records (and/or the current config/lock) do not share one "
+            f"(config_sha256, upstream_rkv_commit, model_revision, tokenizer_revision) identity: "
+            f"{sorted(combined_identities)}"
+        )
+
+    if any(r.get("condition") != "full" for r in full_records):
+        reasons.append("not every full record's own condition field is 'full'")
+    rkv_conditions = {r.get("condition") for r in rkv_records}
+    if len(rkv_conditions) > 1:
+        reasons.append(f"rkv records have inconsistent condition values: {sorted(rkv_conditions)}")
+
+    accuracy_screen = build_accuracy_screen(full_records, rkv_records, settings)
+    if not accuracy_screen["pilot_accuracy_plausible"]:
+        reasons.append(
+            f"pilot_accuracy_plausible is False (accuracy_difference_rkv_minus_full="
+            f"{accuracy_screen['accuracy_difference_rkv_minus_full']}, "
+            f"max_pilot_accuracy_drop={settings.max_pilot_accuracy_drop})"
+        )
+
+    return {
+        "gate_passed": len(reasons) == 0,
+        "reasons": reasons,
+        "expected_n": expected_n,
+        "n_full": len(full_records),
+        "n_rkv": len(rkv_records),
+        "accuracy_screen": accuracy_screen,
+    }
+
+
 def match_rate_delta_rkv_minus_full(
     full_curve: dict[float, float | None], rkv_curve: dict[float, float | None]
 ) -> dict[float, float | None]:
@@ -797,6 +892,7 @@ def build_screen_validity(
     mean_f1_rkv_retention_ratio: float | None,
     settings: "FixedTraceSettings",
     accuracy_screen: dict | None = None,
+    meaningful_compression_rate: float | None = None,
 ) -> tuple[bool, list[str]]:
     """§ Step 11: whether this screen cleared the minimum bar to be
     interpreted AT ALL — insufficient eligible examples, compression that
@@ -813,6 +909,21 @@ def build_screen_validity(
     "accuracy-preserving operating point" (CLAUDE.md §1), so a screen that
     cannot even clear a small-n plausibility check has no business reporting
     `hypothesis_status: "screened"`.
+
+    `meaningful_compression_rate` (2026-07-18 second-pass review): a real
+    gap in the first v3 pass — `require_meaningful_compression=True` made
+    PER-PAIR eligibility require a substantial retention drop
+    (`FixedTraceEligibility.rkv_meaningful_compression_at_f1`), but this
+    SCREEN-level gate kept checking `actual_compression_rate` (any nonzero
+    eviction) regardless, so a screen could still report `screen_valid:
+    True` on a batch of examples that mostly only evicted a token or two.
+    When `settings.require_meaningful_compression` is `True`, this function
+    now checks `meaningful_compression_rate` against
+    `settings.min_meaningful_compression_rate` INSTEAD of
+    `actual_compression_rate`/`min_actual_compression_rate` — v2 stages
+    (`require_meaningful_compression=False`, the default) are completely
+    unaffected and keep checking `actual_compression_rate` exactly as
+    before.
     """
     reasons: list[str] = []
     if n_eligible < settings.min_eligible_examples:
@@ -820,11 +931,21 @@ def build_screen_validity(
             f"n_eligible ({n_eligible}) below min_eligible_examples "
             f"({settings.min_eligible_examples})"
         )
-    if actual_compression_rate is None or actual_compression_rate < settings.min_actual_compression_rate:
-        reasons.append(
-            f"actual_compression_rate ({actual_compression_rate}) below "
-            f"min_actual_compression_rate ({settings.min_actual_compression_rate})"
-        )
+    if settings.require_meaningful_compression:
+        if (
+            meaningful_compression_rate is None
+            or meaningful_compression_rate < settings.min_meaningful_compression_rate
+        ):
+            reasons.append(
+                f"meaningful_compression_rate ({meaningful_compression_rate}) below "
+                f"min_meaningful_compression_rate ({settings.min_meaningful_compression_rate})"
+            )
+    else:
+        if actual_compression_rate is None or actual_compression_rate < settings.min_actual_compression_rate:
+            reasons.append(
+                f"actual_compression_rate ({actual_compression_rate}) below "
+                f"min_actual_compression_rate ({settings.min_actual_compression_rate})"
+            )
     if mean_f1_rkv_retention_ratio is None or mean_f1_rkv_retention_ratio > settings.max_mean_f1_retention_ratio:
         reasons.append(
             f"mean_f1_rkv_retention_ratio ({mean_f1_rkv_retention_ratio}) above "
@@ -891,6 +1012,7 @@ def build_fixed_trace_decision(
         mean_f1_rkv_retention_ratio=mean_f1_rkv_retention_ratio,
         settings=settings,
         accuracy_screen=accuracy_screen,
+        meaningful_compression_rate=meaningful_compression_rate,
     )
     # Never report a characterization of the result ("positive"/"negative"/
     # "gap exists"/"gap does not exist") — this screen's job is kill/continue,
@@ -1120,6 +1242,45 @@ def _assert_consistent_identity(
             )
 
 
+def _verify_selection_completeness(
+    selected_base_record_ids: set[str],
+    base_records: list[dict],
+    full_probes: FixedTraceRecords,
+    rkv_probes: FixedTraceRecords,
+    fractions: tuple[float, ...] = PROBE_FRACTIONS_ALL,
+) -> None:
+    """Protocol v3 (2026-07-18 review): when analysis is restricted to a
+    `--selection-file`, every selected example must be fully replayed under
+    BOTH policies before analysis runs at all — a partially-completed replay
+    (e.g. 5 of 20 selected examples actually written) could otherwise still
+    clear `min_eligible_examples` and produce a decision JSON, silently
+    treating "not yet run" the same as ordinary attrition (an ineligible
+    pair). Missing or incomplete records must ABORT analysis instead.
+    """
+    base_ids = {b["record_id"] for b in base_records}
+    problems: list[str] = []
+    for base_id in sorted(selected_base_record_ids):
+        if base_id not in base_ids:
+            problems.append(f"{base_id}: not present in the canonical base file at all")
+            continue
+        for label, records in (("FullKV", full_probes), ("R-KV", rkv_probes)):
+            group = records.probes_by_base.get(base_id)
+            if group is None:
+                problems.append(f"{base_id}: missing from {label} fixed-trace probes entirely")
+                continue
+            missing_fractions = [f for f in fractions if f not in group]
+            if missing_fractions:
+                problems.append(f"{base_id}: {label} missing fraction(s) {missing_fractions}")
+    if problems:
+        raise ValueError(
+            f"selection completeness check failed: {len(problems)} of {len(selected_base_record_ids)} "
+            "selected example(s) are missing or incomplete -- every selected example must have all "
+            f"{len(fractions)} fractions recorded under BOTH replay policies before analysis can run "
+            "(this must abort analysis, not become ordinary per-pair attrition):\n"
+            + "\n".join(f"  - {p}" for p in problems)
+        )
+
+
 def run_fixed_trace_analysis(
     output_dir: str | Path,
     trace_condition: str,
@@ -1127,6 +1288,7 @@ def run_fixed_trace_analysis(
     stage_name: str,
     settings: "FixedTraceSettings",
     expected_identity: tuple | None = None,
+    selected_base_record_ids: set[str] | None = None,
 ) -> int:
     """End-to-end: read the canonical base file plus both replay policies'
     fixed-trace probe files from `output_dir`, pair/score them, and write
@@ -1144,6 +1306,16 @@ def run_fixed_trace_analysis(
     computed by the caller from the config/lock this invocation is actually
     using) a directory produced under a config/model/upstream pin different
     from the one currently pinned.
+
+    `selected_base_record_ids` (protocol v3, 2026-07-18 review): when given
+    (from `kvcot.cli._load_fixed_trace_selection`), analysis is restricted
+    to exactly this set of base records, and `_verify_selection_completeness`
+    ABORTS (raises `ValueError`) unless every one of them has all 9
+    fractions recorded under BOTH replay policies — a partial replay must
+    never silently masquerade as ordinary per-pair attrition. `None` (every
+    existing caller before this parameter existed, and every protocol-v2
+    invocation) preserves the exact prior behavior: analyze whatever is
+    present, no completeness requirement.
     """
     output_dir = Path(output_dir)
     base_path = output_dir / f"{trace_condition}.jsonl"
@@ -1165,6 +1337,29 @@ def run_fixed_trace_analysis(
         expected=expected_identity,
     )
     _assert_shared_trace_source(full_probes, rkv_probes, trace_condition)
+
+    if selected_base_record_ids is not None:
+        _verify_selection_completeness(selected_base_record_ids, base_records, full_probes, rkv_probes)
+        base_records = [b for b in base_records if b["record_id"] in selected_base_record_ids]
+        # Scope EVERYTHING (curves included, not just the pairing step) to
+        # exactly the selected set -- otherwise a probe file containing
+        # leftover records from a different/superset selection would still
+        # leak into the "all_shared" curves below, defeating the point of
+        # n_shared == n_selected.
+        full_probes = FixedTraceRecords(
+            replay_condition=full_probes.replay_condition,
+            trace_source_condition=full_probes.trace_source_condition,
+            probes_by_base={
+                bid: g for bid, g in full_probes.probes_by_base.items() if bid in selected_base_record_ids
+            },
+        )
+        rkv_probes = FixedTraceRecords(
+            replay_condition=rkv_probes.replay_condition,
+            trace_source_condition=rkv_probes.trace_source_condition,
+            probes_by_base={
+                bid: g for bid, g in rkv_probes.probes_by_base.items() if bid in selected_base_record_ids
+            },
+        )
 
     pairs = build_fixed_trace_pairs(base_records, full_probes, rkv_probes, settings=settings)
     full_curve = fixed_trace_curve_by_fraction(full_probes)
