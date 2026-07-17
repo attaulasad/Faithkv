@@ -1,0 +1,19 @@
+Probe stability test completed but did not meet the frozen >=0.90 threshold.
+
+FullKV:
+  stable = 7/10
+  rate = 0.700
+
+R-KV b256:
+  stable = 7/10
+  rate = 0.700
+
+Interpretation:
+The identical result under FullKV and R-KV indicates a shared probe-protocol
+issue rather than a compression-specific failure. The test compares a sampled
+base answer (temperature=0.6, top_p=0.95) against a greedily decoded answer
+after injecting CONTROL_SUFFIX_TEXT.
+
+The threshold was not changed. The test remains recorded as failed.
+The protocol-v2 fixed-trace screen uses a separate format-only suffix and its
+own greedy f=1 anchor.

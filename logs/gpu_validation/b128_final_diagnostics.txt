@@ -1,0 +1,26 @@
+Protocol v2 b128 final diagnostic
+n_shared: 10
+n_eligible: 3
+n_actual_compression_active: 10
+mean_f1_rkv_retention_ratio: 0.745578465346766
+mean_delta_pss: -0.047619047619047616
+screen_valid: False
+screen_invalid_reasons: ['n_eligible (3) below min_eligible_examples (5)', 'mean_f1_rkv_retention_ratio (0.745578465346766) above max_mean_f1_retention_ratio (0.7)']
+hypothesis_status: not_tested
+
+{'idx': 30, 'eligible': False, 'failure_reasons': ['rkv_evicted_during_answer_probe'], 'retention': 0.6102719033232629, 'actual_compression': True, 'delta_pss': None}
+{'idx': 63, 'eligible': False, 'failure_reasons': ['full_f1_anchor_incorrect', 'rkv_f1_anchor_incorrect'], 'retention': 0.5878594249201278, 'actual_compression': True, 'delta_pss': None}
+{'idx': 148, 'eligible': True, 'failure_reasons': [], 'retention': 0.9959016393442623, 'actual_compression': True, 'delta_pss': 0.0}
+{'idx': 176, 'eligible': False, 'failure_reasons': ['rkv_evicted_during_answer_probe'], 'retention': 0.9960474308300395, 'actual_compression': True, 'delta_pss': None}
+{'idx': 243, 'eligible': True, 'failure_reasons': [], 'retention': 0.6239067055393586, 'actual_compression': True, 'delta_pss': -0.14285714285714285}
+{'idx': 262, 'eligible': False, 'failure_reasons': ['rkv_evicted_during_answer_probe'], 'retention': 0.9954545454545455, 'actual_compression': True, 'delta_pss': None}
+{'idx': 271, 'eligible': False, 'failure_reasons': ['rkv_evicted_during_answer_probe'], 'retention': 0.5150375939849624, 'actual_compression': True, 'delta_pss': None}
+{'idx': 281, 'eligible': False, 'failure_reasons': ['full_f1_anchor_incorrect', 'rkv_f1_anchor_incorrect'], 'retention': 0.5865384615384616, 'actual_compression': True, 'delta_pss': None}
+{'idx': 290, 'eligible': True, 'failure_reasons': [], 'retention': 0.548951048951049, 'actual_compression': True, 'delta_pss': 0.0}
+{'idx': 307, 'eligible': False, 'failure_reasons': ['full_f1_anchor_incorrect', 'rkv_f1_anchor_incorrect', 'rkv_evicted_during_answer_probe', 'canonical_trace_base_incorrect'], 'retention': 0.99581589958159, 'actual_compression': True, 'delta_pss': None}
+
+Failure-reason counts:
+rkv_evicted_during_answer_probe: 5
+full_f1_anchor_incorrect: 3
+rkv_f1_anchor_incorrect: 3
+canonical_trace_base_incorrect: 1
