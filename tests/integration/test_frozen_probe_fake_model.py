@@ -328,24 +328,22 @@ def test_native_mode_behavior_is_unaffected_by_frozen_at_cut_existing():
     assert result_default.probe_cache_mode == "native"
 
 
-def test_invalid_probe_cache_mode_is_never_silently_treated_as_native():
-    """probe_cache_mode is a plain str parameter (not a Literal) on
-    branch_and_probe's own signature, but only "native" ever triggers the
-    frozen-cache override path (`if probe_cache_mode == "frozen_at_cut"`) --
-    an unrecognized value must behave exactly like "native" (fail open to
-    the SAFE default, never silently apply partial frozen behavior) rather
-    than raising or silently freezing. This documents that contract
-    explicitly rather than leaving it implicit."""
+def test_invalid_probe_cache_mode_raises_value_error():
+    """2026-07-19 review: an earlier version of this test asserted the
+    OPPOSITE of this (that an unrecognized probe_cache_mode silently
+    behaved like "native") -- that was backwards. A typo'd mode string
+    intended to request "frozen_at_cut" protection must never silently fall
+    back to the unprotected "native" path; it must raise loudly instead, at
+    the very top of branch_and_probe, before any model/cache state is
+    touched."""
     model = FakeRKVModel(budget=BUDGET, divide_length=DIVIDE_LENGTH)
     cache = _FakeCache(NUM_LAYERS)
     snap = _make_snapshot(START_LEN)
 
-    result = branch_and_probe(
-        model, cache, snap,
-        close_marker_token_ids=[1], control_suffix_token_ids=[2, 3],
-        max_new_tokens=MAX_NEW_TOKENS, eos_token_id=EOS_TOKEN_ID, device="cpu",
-        probe_cache_mode="some_typo_value",
-    )
-    # No exception, and no frozen-cache assertion applied (that assertion
-    # only runs when probe_cache_mode == "frozen_at_cut" exactly).
-    assert result.probe_cache_mode == "some_typo_value"
+    with pytest.raises(ValueError, match="probe_cache_mode must be 'native' or 'frozen_at_cut'"):
+        branch_and_probe(
+            model, cache, snap,
+            close_marker_token_ids=[1], control_suffix_token_ids=[2, 3],
+            max_new_tokens=MAX_NEW_TOKENS, eos_token_id=EOS_TOKEN_ID, device="cpu",
+            probe_cache_mode="some_typo_value",
+        )

@@ -460,7 +460,21 @@ def branch_and_probe(
     identical `probe_output_token_ids` (§6.1 hard gate) — guaranteed by
     `restore_snapshot`'s clone-on-restore plus this function doing no
     resampling anywhere (teacher-forced feed, then greedy argmax decode).
+
+    `probe_cache_mode` must be exactly `"native"` or `"frozen_at_cut"` —
+    anything else raises `ValueError` immediately (2026-07-19 review: an
+    earlier version silently treated any unrecognized value as `"native"`,
+    which is exactly backwards for a safety feature whose entire point is
+    to prevent silent contamination — a typo'd mode string intended to
+    request `frozen_at_cut` must never quietly fall back to the unprotected
+    path instead).
     """
+    if probe_cache_mode not in ("native", "frozen_at_cut"):
+        raise ValueError(
+            f"probe_cache_mode must be 'native' or 'frozen_at_cut', got {probe_cache_mode!r} — "
+            "an unrecognized value must never silently behave like 'native', since that would defeat "
+            "the whole point of requesting frozen_at_cut protection in the first place."
+        )
     restore_snapshot(model, cache, snapshot)
     absolute_position = snapshot.absolute_position
     num_layers = len(model.model.layers)

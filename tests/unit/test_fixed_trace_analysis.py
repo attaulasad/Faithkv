@@ -930,11 +930,13 @@ def test_run_fixed_trace_analysis_passes_with_complete_selection(tmp_path, monke
     assert decision["n_shared"] == 1
 
 
-def test_run_fixed_trace_analysis_scopes_n_shared_to_selection(tmp_path, monkeypatch):
+def test_run_fixed_trace_analysis_rejects_superset_probe_files_under_selection(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    # Two complete problems on disk; selection only names one -- n_shared in
-    # the resulting decision must be 1, not 2 (2026-07-18 review: analysis
-    # must scope to exactly the selection, not just require it as a floor).
+    # Two complete problems on disk; selection only names one. 2026-07-19
+    # review: this must now ABORT (probe files contain a base_record_id
+    # outside the selection) rather than silently scoping down to n_shared=1
+    # -- a superset mismatch (e.g. the wrong, larger probe file passed in)
+    # must never be quietly discarded.
     base_a = _valid_base_run_record(record_id="base-a", dataset={"dataset_name": "gsm8k", "source_row_index": 0, "question_hash": "b" * 64, "normalized_gold": "42"})
     base_b = _valid_base_run_record(record_id="base-b", dataset={"dataset_name": "gsm8k", "source_row_index": 1, "question_hash": "c" * 64, "normalized_gold": "42"})
     full_recs = _all_fraction_records("base-a", "full") + _all_fraction_records("base-b", "full")
@@ -943,13 +945,33 @@ def test_run_fixed_trace_analysis_scopes_n_shared_to_selection(tmp_path, monkeyp
     _write(tmp_path / "full_on_full_fixed_trace_probes.jsonl", full_recs)
     _write(tmp_path / "rkv_b128_on_full_fixed_trace_probes.jsonl", rkv_recs)
 
+    with pytest.raises(ValueError, match="NOT in the selection"):
+        run_fixed_trace_analysis(
+            output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
+            stage_name="test_v3_selection_scoped", settings=_SETTINGS,
+            selected_base_record_ids={"base-a"},
+        )
+
+
+def test_run_fixed_trace_analysis_accepts_selection_matching_probe_files_exactly(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    # Same as above, but the probe files contain ONLY the selected example --
+    # this is the clean, correctly-scoped case and must succeed with
+    # n_shared == n_selected == 1.
+    base_a = _valid_base_run_record(record_id="base-a", dataset={"dataset_name": "gsm8k", "source_row_index": 0, "question_hash": "b" * 64, "normalized_gold": "42"})
+    full_recs = _all_fraction_records("base-a", "full")
+    rkv_recs = _all_fraction_records("base-a", "rkv_b128")
+    _write(tmp_path / "full.jsonl", [base_a])
+    _write(tmp_path / "full_on_full_fixed_trace_probes.jsonl", full_recs)
+    _write(tmp_path / "rkv_b128_on_full_fixed_trace_probes.jsonl", rkv_recs)
+
     rc = run_fixed_trace_analysis(
         output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
-        stage_name="test_v3_selection_scoped", settings=_SETTINGS,
+        stage_name="test_v3_selection_scoped_clean", settings=_SETTINGS,
         selected_base_record_ids={"base-a"},
     )
     assert rc == 0
-    decision = read_json(Path("results/decisions/test_v3_selection_scoped_fixed_trace.json"))
+    decision = read_json(Path("results/decisions/test_v3_selection_scoped_clean_fixed_trace.json"))
     assert decision["n_shared"] == 1
 
 

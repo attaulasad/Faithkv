@@ -73,7 +73,24 @@ def git_commit() -> str:
 
 
 def git_is_dirty() -> bool:
-    status = _git(["status", "--porcelain"])
+    """True iff any TRACKED file differs from `HEAD` (staged or unstaged).
+    Deliberately ignores untracked files (`--untracked-files=no`) — 2026-07-19
+    review found that every real command in this repository's own workflow
+    writes a new, intentionally-committed-but-not-yet-committed artifact
+    (`results/run_manifests/*.json`, `results/selections/*.json`,
+    `results/decisions/*.json` — all deliberately NOT in `.gitignore`, per
+    `README.md`'s documented layout) after the very first invocation of a
+    GPU session. Counting those as "dirty" made `git_dirty` report `True` on
+    every record after the first command, regardless of whether the actual
+    CODE matched a committed state — the opposite of what this field exists
+    to detect (§13: reproducibility from a known commit). A real change
+    worth flagging is always a MODIFICATION TO A TRACKED FILE (source,
+    config, or a previously-committed `requirements-lock.txt` — `git status
+    --porcelain` still reports those with an `M`/` M` prefix, which
+    `--untracked-files=no` does not suppress), never a brand-new output file
+    the tooling itself just wrote as part of doing its job.
+    """
+    status = _git(["status", "--porcelain", "--untracked-files=no"])
     return status != "" and status != "unknown"
 
 

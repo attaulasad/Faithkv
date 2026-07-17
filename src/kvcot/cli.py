@@ -822,6 +822,59 @@ def _load_fixed_trace_selection(selection_path: str, args, stage, lock, base_pat
         )
     if selection.get("stage_name") != stage.stage_name:
         mismatches.append(f"stage_name: selection has {selection.get('stage_name')!r}, current stage is {stage.stage_name!r}")
+
+    # 2026-07-19 review: a selection whose top-level (config/base/budget/
+    # divide_length/stage_name) identity matches can STILL be internally
+    # inconsistent or stale relative to the CURRENT stage config's own
+    # pre-registered cap -- none of the checks above would catch that.
+    expected_max_selected = stage.fixed_trace.max_selected_examples if stage.fixed_trace is not None else None
+    if expected_max_selected is not None and selection.get("max_selected") != expected_max_selected:
+        mismatches.append(
+            f"max_selected: selection has {selection.get('max_selected')!r}, current stage config's "
+            f"pre-registered fixed_trace.max_selected_examples is {expected_max_selected!r} -- refusing "
+            "to replay/analyze a selection whose cap does not match today's pre-registered value "
+            "(regenerate the selection, or update the config to match, rather than silently trusting "
+            "a selection written under a different --max-selected override)."
+        )
+
+    selected_ids = selection.get("selected_base_record_ids", [])
+    selected_rows = selection.get("selected_source_row_indices", [])
+    n_selected = selection.get("n_selected")
+    candidates_by_id = {c["base_record_id"]: c for c in selection.get("candidates", [])}
+
+    if len(selected_ids) != len(set(selected_ids)):
+        mismatches.append(f"selected_base_record_ids contains duplicates: {selected_ids}")
+    if len(selected_rows) != len(set(selected_rows)):
+        mismatches.append(f"selected_source_row_indices contains duplicates: {selected_rows}")
+    if n_selected != len(selected_ids):
+        mismatches.append(
+            f"n_selected ({n_selected!r}) does not equal len(selected_base_record_ids) ({len(selected_ids)})"
+        )
+    if len(selected_ids) != len(selected_rows):
+        mismatches.append(
+            f"selected_base_record_ids has {len(selected_ids)} entries but "
+            f"selected_source_row_indices has {len(selected_rows)} -- these must be the same length "
+            "(positionally paired, both built from the same ranked-and-capped selection)"
+        )
+    else:
+        for base_id, row_idx in zip(selected_ids, selected_rows):
+            candidate = candidates_by_id.get(base_id)
+            if candidate is None:
+                mismatches.append(f"selected base_record_id {base_id!r} does not appear in candidates at all")
+                continue
+            if candidate.get("source_row_index") != row_idx:
+                mismatches.append(
+                    f"selected_base_record_ids/selected_source_row_indices disagree with candidates for "
+                    f"{base_id!r}: selection claims source_row_index={row_idx!r}, but the candidate's own "
+                    f"recorded source_row_index is {candidate.get('source_row_index')!r}"
+                )
+            if candidate.get("predicted_eligible") is not True:
+                mismatches.append(
+                    f"selected base_record_id {base_id!r} has predicted_eligible="
+                    f"{candidate.get('predicted_eligible')!r} in its own candidate entry -- every "
+                    "selected example must be predicted_eligible=true"
+                )
+
     if mismatches:
         raise SelectionFileMismatchError(
             f"{selection_path} does not match the current config/base file/lock -- refusing to use a "
@@ -1526,7 +1579,7 @@ def cmd_check_fixed_trace_accuracy(args: argparse.Namespace) -> int:
 
     gate = build_strict_accuracy_gate(
         full_records, rkv_records, expected_n=expected_n, settings=stage.fixed_trace,
-        expected_identity=expected_identity,
+        expected_identity=expected_identity, expected_rkv_condition=replay_condition,
     )
     out_path = Path("results/decisions") / f"{stage.stage_name}_accuracy_gate.json"
     write_json(out_path, gate)
@@ -1731,6 +1784,27 @@ def _write_fixed_trace_selection(stage, lock, records: list[dict], base_path: Pa
     ft = stage.fixed_trace
     max_selected_arg = getattr(args, "max_selected", None)
     effective_max_selected = max_selected_arg if max_selected_arg is not None else ft.max_selected_examples
+    if (
+        max_selected_arg is not None
+        and ft.max_selected_examples is not None
+        and max_selected_arg != ft.max_selected_examples
+    ):
+        # 2026-07-19 review: a CLI --max-selected that silently overrides the
+        # stage config's pre-registered fixed_trace.max_selected_examples
+        # defeats the entire point of pre-registering it. Not refused
+        # outright (a quick manual/debugging override still has legitimate
+        # uses), but the resulting file's own "max_selected" will then
+        # disagree with the CURRENT config -- _load_fixed_trace_selection
+        # refuses to replay/analyze against it until the config is updated
+        # to match or a matching selection is regenerated.
+        print(
+            f"inspect-fixed-trace --write-selection: WARNING -- --max-selected {max_selected_arg} "
+            f"overrides this stage's pre-registered fixed_trace.max_selected_examples "
+            f"({ft.max_selected_examples}). The written selection file will record max_selected="
+            f"{max_selected_arg}, which will NOT match the current config -- replay-fixed-trace/"
+            "analyze-fixed-trace will refuse this selection file until the config's "
+            "max_selected_examples is updated to match, or a matching selection is regenerated."
+        )
     scored_fractions = set(lock.probes.fractions_scored)
     candidates = []
     n_rejected_invalid = 0

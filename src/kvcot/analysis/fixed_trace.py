@@ -779,6 +779,7 @@ def build_strict_accuracy_gate(
     expected_n: int,
     settings: "FixedTraceSettings",
     expected_identity: tuple | None = None,
+    expected_rkv_condition: str | None = None,
 ) -> dict:
     """Protocol v3 (2026-07-18 review): `build_accuracy_screen` above pairs
     only the INTERSECTION of `(source_row_index, global_seed)` keys present
@@ -794,6 +795,16 @@ def build_strict_accuracy_gate(
     own config/lock. Never raises — returns `gate_passed: False` and the
     specific `reasons` instead, so a CLI caller can always write a decision
     JSON documenting exactly why, rather than a raw traceback.
+
+    `expected_rkv_condition` (2026-07-19 review — a real gap in the first
+    pass): every RKV record's own `condition` field was only checked for
+    INTERNAL consistency (all RKV records agree with each other), never
+    against the condition this gate was actually asked to check. A file
+    that accidentally contains `condition="full"` records (e.g. the wrong
+    file passed as `--replay-condition`) could still pass every other check
+    — same counts, same keys, same identity — and only this check catches
+    it. `None` (no caller currently omits it, but kept optional for direct
+    unit testing) skips this specific check.
     """
     reasons: list[str] = []
 
@@ -849,6 +860,12 @@ def build_strict_accuracy_gate(
     rkv_conditions = {r.get("condition") for r in rkv_records}
     if len(rkv_conditions) > 1:
         reasons.append(f"rkv records have inconsistent condition values: {sorted(rkv_conditions)}")
+    elif expected_rkv_condition is not None and rkv_conditions != {expected_rkv_condition}:
+        reasons.append(
+            f"rkv records' own condition field is {sorted(rkv_conditions)}, but this gate was asked to "
+            f"check {expected_rkv_condition!r} — refusing to treat a file recorded under a different "
+            "condition (e.g. the wrong file passed as --replay-condition) as the requested R-KV data"
+        )
 
     accuracy_screen = build_accuracy_screen(full_records, rkv_records, settings)
     if not accuracy_screen["pilot_accuracy_plausible"]:
@@ -1249,16 +1266,41 @@ def _verify_selection_completeness(
     rkv_probes: FixedTraceRecords,
     fractions: tuple[float, ...] = PROBE_FRACTIONS_ALL,
 ) -> None:
-    """Protocol v3 (2026-07-18 review): when analysis is restricted to a
-    `--selection-file`, every selected example must be fully replayed under
-    BOTH policies before analysis runs at all — a partially-completed replay
-    (e.g. 5 of 20 selected examples actually written) could otherwise still
-    clear `min_eligible_examples` and produce a decision JSON, silently
-    treating "not yet run" the same as ordinary attrition (an ineligible
-    pair). Missing or incomplete records must ABORT analysis instead.
+    """Protocol v3 (2026-07-18 review, hardened 2026-07-19): when analysis
+    is restricted to a `--selection-file`, every selected example must be
+    fully replayed under BOTH policies before analysis runs at all — a
+    partially-completed replay (e.g. 5 of 20 selected examples actually
+    written) could otherwise still clear `min_eligible_examples` and
+    produce a decision JSON, silently treating "not yet run" the same as
+    ordinary attrition (an ineligible pair). Missing or incomplete records
+    must ABORT analysis instead.
+
+    2026-07-19 review found this check was one-directional: it only looked
+    for MISSING fractions, never EXTRA ones (a stray 10th fraction value on
+    a selected example's group would pass silently), and it never checked
+    whether the probe files contained MORE base_record_ids than the
+    selection accounts for — `run_fixed_trace_analysis` would just filter
+    those extras away before pairing, silently discarding a superset
+    mismatch (e.g. the wrong, larger probe file passed in) rather than
+    treating it as the error it is. Both are now exact-equality checks:
+    each selected example's fraction set must equal `fractions` EXACTLY
+    (`set(group) == set(fractions)`), and the full set of base_record_ids
+    present in each probe file must equal `selected_base_record_ids`
+    EXACTLY (`n_selected` examples, no more, no fewer).
     """
     base_ids = {b["record_id"] for b in base_records}
     problems: list[str] = []
+    expected_fraction_set = set(fractions)
+
+    for label, records in (("FullKV", full_probes), ("R-KV", rkv_probes)):
+        extra_ids = set(records.probes_by_base) - selected_base_record_ids
+        if extra_ids:
+            problems.append(
+                f"{label} fixed-trace probes contain {len(extra_ids)} base_record_id(s) NOT in the "
+                f"selection (e.g. {sorted(extra_ids)[:5]}{'...' if len(extra_ids) > 5 else ''}) -- a "
+                "selection-scoped analysis must never silently discard a superset mismatch"
+            )
+
     for base_id in sorted(selected_base_record_ids):
         if base_id not in base_ids:
             problems.append(f"{base_id}: not present in the canonical base file at all")
@@ -1268,15 +1310,22 @@ def _verify_selection_completeness(
             if group is None:
                 problems.append(f"{base_id}: missing from {label} fixed-trace probes entirely")
                 continue
-            missing_fractions = [f for f in fractions if f not in group]
-            if missing_fractions:
-                problems.append(f"{base_id}: {label} missing fraction(s) {missing_fractions}")
+            actual_fraction_set = set(group)
+            if actual_fraction_set != expected_fraction_set:
+                missing = sorted(expected_fraction_set - actual_fraction_set)
+                extra = sorted(actual_fraction_set - expected_fraction_set)
+                detail = []
+                if missing:
+                    detail.append(f"missing {missing}")
+                if extra:
+                    detail.append(f"unexpected extra {extra}")
+                problems.append(f"{base_id}: {label} fraction set does not exactly match ({', '.join(detail)})")
     if problems:
         raise ValueError(
-            f"selection completeness check failed: {len(problems)} of {len(selected_base_record_ids)} "
-            "selected example(s) are missing or incomplete -- every selected example must have all "
-            f"{len(fractions)} fractions recorded under BOTH replay policies before analysis can run "
-            "(this must abort analysis, not become ordinary per-pair attrition):\n"
+            f"selection completeness check failed: {len(problems)} problem(s) found -- every selected "
+            f"example must have EXACTLY the {len(fractions)} expected fractions recorded under BOTH "
+            "replay policies, and no probe file may contain any base_record_id outside the selection "
+            "(this must abort analysis, not become ordinary per-pair attrition or silent filtering):\n"
             + "\n".join(f"  - {p}" for p in problems)
         )
 

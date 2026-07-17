@@ -227,6 +227,29 @@ def test_write_selection_is_deterministic_across_repeated_calls(tmp_path, monkey
     assert first["candidates"] == second["candidates"]
 
 
+def test_write_selection_warns_when_cli_max_selected_overrides_config(tmp_path, monkeypatch, capsys):
+    # 2026-07-19 review: silently letting --max-selected override the
+    # pre-registered fixed_trace.max_selected_examples defeats
+    # pre-registration -- must at least warn loudly (the resulting file is
+    # then rejected at replay time by _load_fixed_trace_selection unless
+    # the config is updated to match).
+    rows = [_base_row(prompt_len=50, think_len=250, idx=i) for i in range(5)]
+    _write_base_file(tmp_path / "full.jsonl", rows)
+    stage = _stage(tmp_path, budget=128, max_selected_examples=20)
+    lock = load_lock_config("configs/lock.yaml")
+    monkeypatch.setattr("kvcot.cli.load_stage_config", lambda path: (stage, lock))
+    monkeypatch.chdir(tmp_path)
+
+    args = _args(_LOCK_PATH, tmp_path)
+    args.max_selected = 2  # overrides the config's pre-registered 20
+    cmd_inspect_fixed_trace(args)
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "max_selected_examples" in out
+    selection = read_json(tmp_path / "results" / "selections" / "test_v3_selection.json")
+    assert selection["max_selected"] == 2
+
+
 def test_write_selection_requires_fixed_trace_settings(tmp_path, monkeypatch):
     rows = [_base_row(prompt_len=50, think_len=250, idx=0)]
     _write_base_file(tmp_path / "full.jsonl", rows)

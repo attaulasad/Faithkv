@@ -493,7 +493,30 @@ def test_verify_selection_completeness_raises_when_a_fraction_is_missing(tmp_pat
     # Drop one fraction from the R-KV side's group to simulate an
     # incomplete (interrupted) replay.
     del rkv_probes.probes_by_base[base["record_id"]][0.5]
-    with pytest.raises(ValueError, match=r"R-KV missing fraction"):
+    with pytest.raises(ValueError, match=r"R-KV fraction set does not exactly match \(missing"):
+        _verify_selection_completeness({base["record_id"]}, base_records, full_probes, rkv_probes)
+
+
+def test_verify_selection_completeness_raises_on_unexpected_extra_fraction(tmp_path):
+    # 2026-07-19 review: a stray extra (10th) fraction on a selected
+    # example must be caught too -- the check must be exact-set equality,
+    # not just "nothing missing".
+    base, base_records, full_probes, rkv_probes = _make_run(tmp_path, retention=0.5, rkv_actual_compression=True)
+    rkv_probes.probes_by_base[base["record_id"]][0.95] = dict(
+        rkv_probes.probes_by_base[base["record_id"]][1.0]
+    )  # a bogus, non-canonical fraction value
+    with pytest.raises(ValueError, match=r"R-KV fraction set does not exactly match \(.*unexpected extra"):
+        _verify_selection_completeness({base["record_id"]}, base_records, full_probes, rkv_probes)
+
+
+def test_verify_selection_completeness_raises_on_superset_probe_file(tmp_path):
+    # 2026-07-19 review: a probe file containing MORE base_record_ids than
+    # the selection accounts for must be a hard failure, never silently
+    # filtered away before pairing.
+    base, base_records, full_probes, rkv_probes = _make_run(tmp_path, retention=0.5, rkv_actual_compression=True)
+    extra_base_id = "base-full-ds-999-seed42"
+    rkv_probes.probes_by_base[extra_base_id] = dict(rkv_probes.probes_by_base[base["record_id"]])
+    with pytest.raises(ValueError, match="NOT in the selection"):
         _verify_selection_completeness({base["record_id"]}, base_records, full_probes, rkv_probes)
 
 
@@ -631,6 +654,42 @@ def test_strict_accuracy_gate_fails_on_wrong_condition_field():
     gate = build_strict_accuracy_gate(full_records, rkv_records, expected_n=1, settings=FixedTraceSettings())
     assert gate["gate_passed"] is False
     assert any("condition field is 'full'" in r for r in gate["reasons"])
+
+
+def test_strict_accuracy_gate_accepts_wrong_rkv_condition_without_expected_rkv_condition():
+    # Exact repro from the 2026-07-19 review: the "rkv" file actually
+    # contains condition="full" records (e.g. the wrong file was passed as
+    # --replay-condition), but counts/keys/identities all match, and the
+    # internal-consistency-only check (no expected_rkv_condition given)
+    # cannot catch it -- documents the gap this test's sibling below closes.
+    full_records = [_natural_schema_record(i, 42, "full") for i in range(5)]
+    mislabeled_rkv = [_natural_schema_record(i, 42, "full") for i in range(5)]  # should be rkv_b128
+    gate = build_strict_accuracy_gate(full_records, mislabeled_rkv, expected_n=5, settings=FixedTraceSettings())
+    assert gate["gate_passed"] is True  # the gap: passes despite being the wrong file
+
+
+def test_strict_accuracy_gate_rejects_wrong_rkv_condition_when_expected_given():
+    # The fix: passing expected_rkv_condition (as kvcot.cli.
+    # cmd_check_fixed_trace_accuracy now always does, wired from
+    # --replay-condition) catches exactly the scenario above.
+    full_records = [_natural_schema_record(i, 42, "full") for i in range(5)]
+    mislabeled_rkv = [_natural_schema_record(i, 42, "full") for i in range(5)]
+    gate = build_strict_accuracy_gate(
+        full_records, mislabeled_rkv, expected_n=5, settings=FixedTraceSettings(),
+        expected_rkv_condition="rkv_b128",
+    )
+    assert gate["gate_passed"] is False
+    assert any("this gate was asked to check" in r for r in gate["reasons"])
+
+
+def test_strict_accuracy_gate_accepts_correct_rkv_condition_when_expected_given():
+    full_records = [_natural_schema_record(i, 42, "full") for i in range(5)]
+    rkv_records = [_natural_schema_record(i, 42, "rkv_b128") for i in range(5)]
+    gate = build_strict_accuracy_gate(
+        full_records, rkv_records, expected_n=5, settings=FixedTraceSettings(),
+        expected_rkv_condition="rkv_b128",
+    )
+    assert gate["gate_passed"] is True
 
 
 def test_strict_accuracy_gate_fails_on_accuracy_drop_even_with_complete_data():

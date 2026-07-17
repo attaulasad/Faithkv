@@ -23,8 +23,25 @@ echo "== installing torch (CUDA build) =="
 # actual CUDA driver if this ever needs to run on a different image.
 pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 
-echo "== installing the rest of requirements.txt (includes transformers==4.55.4, flash-attn) =="
-pip install -r requirements.txt
+echo "== installing the rest of requirements.txt EXCEPT flash-attn (see below for why it's separate) =="
+grep -v '^flash-attn' requirements.txt > /tmp/kvcot-requirements-no-flash-attn.txt
+pip install -r /tmp/kvcot-requirements-no-flash-attn.txt
+
+echo "== installing flash-attn separately, --no-build-isolation =="
+# flash-attn's setup.py does `import torch` at build-requirements-gathering
+# time to detect the CUDA/torch ABI to compile against. By default `pip
+# install -r requirements.txt` builds each package's wheel in a FRESH,
+# ISOLATED build environment (PEP 517) that does NOT include the already-
+# installed torch from this venv -- even though torch was installed above,
+# in an EARLIER, separate pip invocation. That isolated build env has no
+# torch at all, so flash-attn's build step fails with `ModuleNotFoundError:
+# No module named 'torch'` (this exact failure is preserved verbatim in
+# logs/setup.log from the run that hit it). `--no-build-isolation` makes
+# pip build the wheel using THIS environment's already-installed torch
+# instead of a fresh isolated one -- the same fix that made the later
+# manual install succeed (logs/flash_attn_install.log).
+FLASH_ATTN_SPEC=$(grep '^flash-attn' requirements.txt)
+pip install --no-build-isolation "$FLASH_ATTN_SPEC"
 
 echo "== installing this package =="
 pip install -e .

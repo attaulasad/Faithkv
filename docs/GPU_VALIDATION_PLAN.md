@@ -17,6 +17,29 @@ Pass criterion: script exits 0, prints "setup complete", and
 `requirements-lock.txt` is no longer the placeholder (real `pip freeze`
 output).
 
+**Commit the regenerated `requirements-lock.txt` immediately, before
+running anything else** (2026-07-19 review): it is a tracked file, and
+`setup_vast.sh` overwrites it with this host's real `pip freeze` output —
+until that change is committed, `kvcot.runtime.git_is_dirty()` correctly
+reports every subsequent record's `git_dirty: true`, which the one-example
+gate checklists below require to be `false`. This is a real, tracked-file
+change (not the untracked-output-artifact false positive `git_is_dirty`
+was hardened against in the same review — see its docstring), so it must
+actually be committed, not ignored:
+
+```bash
+git add requirements-lock.txt
+git commit -m "Record GPU host dependency lock"
+```
+
+(`results/run_manifests/`, `results/selections/`, and `results/decisions/`
+are also intentionally NOT gitignored — every `kvcot` command writes into
+one of them — but `git_is_dirty()` ignores untracked files specifically so
+those expected, not-yet-committed outputs don't spuriously dirty every
+record produced afterward. Committing them at convenient checkpoints is
+still good practice for provenance, just not required for `git_dirty` to
+read `false`.)
+
 ## 1. Environment verification
 
 ```bash

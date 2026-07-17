@@ -5,6 +5,101 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-19 — Fixed-trace protocol v3, third pass: setup-script fix, selection/accuracy-gate hardening, safe-default reversal (secondary, additive; no frozen §1/§4/§8/§9 value changed)
+
+A third review of `66f477e` independently re-verified the cache-schedule
+simulator against all 90 archived protocol-v2 GPU measurements (zero
+mismatches) and confirmed the core v3 design sound, but found one real
+infra bug and five remaining code gaps, plus a genuine documentation/
+provenance contradiction in the workflow. Fixed here, still before any GPU
+spend:
+
+- **`scripts/setup_vast.sh` would repeat a previously-hit setup failure.**
+  `logs/setup.log` (committed) preserves the exact prior failure verbatim:
+  `pip install -r requirements.txt` tried to build `flash-attn`'s wheel in
+  a fresh, PEP-517-isolated build environment that does not see the
+  already-installed `torch` from the venv (`ModuleNotFoundError: No module
+  named 'torch'`), even though torch was installed in an earlier, separate
+  `pip install torch==2.6.0 ...` step. `logs/flash_attn_install.log` shows
+  the manual fix that worked: installing flash-attn separately with
+  `--no-build-isolation`. The script now does exactly that — installs
+  everything else from `requirements.txt` except `flash-attn`, then
+  installs `flash-attn` on its own with `--no-build-isolation`.
+- **Selection-file loading trusted `selected_base_record_ids` without
+  cross-checking it against `selected_source_row_indices` or `candidates`
+  at all.** A selection file with `selected_source_row_indices` and
+  `selected_base_record_ids` disagreeing with each other, or with a
+  selected id's own candidate entry, or with a selected id marked
+  `predicted_eligible: false`, or containing duplicate entries, or an
+  `n_selected` not matching the actual list length, was silently accepted.
+  `kvcot.cli._load_fixed_trace_selection` now cross-validates the full
+  tuple — every selected `(base_record_id, source_row_index)` pair must
+  agree with its own candidate entry, which must itself be
+  `predicted_eligible: true`; no duplicates; `n_selected` must match.
+  Additionally, `--max-selected` silently overriding the stage config's
+  pre-registered `fixed_trace.max_selected_examples` is now a loud warning
+  at write time, and the loader now REJECTS a selection file whose
+  `max_selected` disagrees with the CURRENT config's pre-registered value —
+  closing the loophole without removing the CLI override's legitimate
+  debugging use.
+- **`build_strict_accuracy_gate` never checked that the R-KV file's own
+  `condition` field actually equalled the requested `--replay-condition`**
+  — only that all R-KV records agreed with EACH OTHER. A file that
+  accidentally contained `condition="full"` records passed as the "R-KV"
+  side (e.g. the wrong file given) could still pass every other check
+  (counts, keys, identity) and report `gate_passed: True`. Fixed: new
+  `expected_rkv_condition` parameter, wired from `--replay-condition` in
+  `kvcot check-fixed-trace-accuracy`, rejects this exact case.
+- **`_verify_selection_completeness` only checked for MISSING fractions,
+  never extra ones, and silently filtered out any probe-file
+  `base_record_id` outside the selection instead of treating that superset
+  as an error.** Both are now exact-equality checks: each selected
+  example's fraction set must equal the 9 frozen fractions EXACTLY (a
+  stray 10th fraction value now fails loudly), and the full set of
+  `base_record_id`s present in each probe file must equal the selection's
+  set EXACTLY — a probe file containing extra, unselected examples (e.g.
+  the wrong, larger file passed in) now aborts analysis instead of being
+  quietly scoped down.
+- **An unrecognized `probe_cache_mode` silently behaved like `"native"`.**
+  This is exactly backwards for a safety feature whose entire point is
+  preventing silent contamination — a typo intended to request
+  `frozen_at_cut` protection must never quietly fall back to the
+  unprotected path. `branch_and_probe` now validates `probe_cache_mode`
+  at the very top of the function and raises `ValueError` for anything
+  other than `"native"`/`"frozen_at_cut"`. The prior pass's own
+  `test_invalid_probe_cache_mode_is_never_silently_treated_as_native` test
+  asserted the wrong (unsafe) behavior explicitly — reversed to
+  `test_invalid_probe_cache_mode_raises_value_error`.
+- **`git_dirty` reported `true` on essentially every record after the first
+  command in a session, independent of whether the code matched a
+  committed state.** `results/run_manifests/`, `results/selections/`, and
+  `results/decisions/` are all deliberately NOT gitignored (they're meant
+  to be committed, per `README.md`'s layout) — but that means the moment
+  any `kvcot` command writes its first output file, `git status --porcelain`
+  reports it as untracked, and the old `git_is_dirty()` counted untracked
+  files as dirty. `kvcot.runtime.git_is_dirty()` now uses
+  `--untracked-files=no`, so only actual modifications to TRACKED files
+  (source, config, or a regenerated `requirements-lock.txt`) count.
+  Verified against a real throwaway git repo (`tests/unit/
+  test_runtime_git.py`), not a mocked subprocess. `docs/GPU_VALIDATION_PLAN.
+  md` now also explicitly instructs committing the freshly-regenerated
+  `requirements-lock.txt` right after `setup_vast.sh` (a genuine tracked-
+  file change, unlike the untracked-artifact false positive above) —
+  before running anything else.
+- **Still true, unchanged from the review's own conclusion**: the two real-
+  model GPU tests exist and are structurally sound but have not been run on
+  this commit (no GPU here); they use synthetic traces and deliberately
+  shrunk budget/divide_length constants to force the schedule/eviction
+  scenarios deterministically within a short fixture (same convention as
+  every pre-existing GPU test in this repository); they do not construct a
+  real `FixedTraceProbeRecord` or assert `protocol_version="v3"` at the
+  record level — that requires the full CLI path (real tokenizer, real
+  model, real R-KV policy) and remains correctly scoped to the mandatory
+  one-example gate against the actual production budget=128/divide_length
+  =128 config, which is already documented as a required, non-skippable
+  step in `docs/GPU_VALIDATION_PLAN.md` and cannot be replaced by any CPU-
+  side test. 331 CPU tests pass (up from 313).
+
 ## 2026-07-18 — Fixed-trace protocol v3, second pass: selection-to-replay wiring, strict accuracy gate, screen-validity fix (secondary, additive; no frozen §1/§4/§8/§9 value changed)
 
 A second review of the 2026-07-17 protocol-v3 commit (`45bf2d8`) found the
