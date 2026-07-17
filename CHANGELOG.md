@@ -5,6 +5,148 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-17 — Fixed-trace protocol v3: frozen-cache causal probe, meaningful-compression gating, exact cache-schedule simulator (secondary, additive; no frozen §1/§4/§8/§9 value changed)
+
+**Protocol v2's real GPU screen (`configs/early_gap_v2_b128.yaml`, committed
+result `results/decisions/early_gap_v2_b128_fixed_trace.json`) produced
+`n_eligible=3` against a `min_eligible_examples=5` floor and
+`mean_f1_rkv_retention_ratio=0.7456` against a `max_mean_f1_retention_ratio
+=0.7` ceiling — `screen_valid: false`, `hypothesis_status: "not_tested"`, as
+designed.** This is a valid negative screening outcome, not a bug in the
+correctness machinery (patched-noop parity, no-state-leak, and replay
+identity GPU gates all passed; every one of the 180 fixed-trace probes
+produced a valid boxed answer; cross-file/schema identity checks held). Two
+mechanisms specifically explain why it came back invalid, diagnosed from the
+raw per-example records already in the committed decision JSON:
+
+1. **`n_actual_compression_active=10/10` overstated real compression.**
+   `rkv_actual_compression_at_f1` (added in v2) only requires the physical
+   cache to be smaller than the FullKV-equivalent slot count by ANY amount —
+   `source_row_index=148` counts as "compression active" at
+   `rkv_f1_retention_ratio=0.9959`, i.e. one token evicted out of ~240. Six
+   of the ten shared examples sit at retention ≥0.94; the schedule mechanics
+   audited in `docs/UPSTREAM_AUDIT.md` H4 (periodic `divide_length=128`
+   compaction checks, real eviction gated on `kv_cache_len >= budget`) mean a
+   trace can cross the schedule boundary long before it has accumulated
+   enough tokens for the eviction itself to matter. An "any eviction"
+   boolean cannot distinguish this from a trace that lost most of its cache.
+2. **The v2 probe protocol lets R-KV compact again while writing its own
+   answer.** Five of the ten shared examples (`source_row_index` 30, 176,
+   262, 271, 307) failed eligibility via `rkv_evicted_during_answer_probe` —
+   a real compaction event fired during the teacher-forced closing-marker/
+   suffix/greedy-answer tokens fed by `branch_and_probe`, after the snapshot
+   the probe was supposed to measure. This is a protocol confound, not
+   evidence about the hypothesis: it measures a cache state that moved again
+   after the reasoning cut, not the cut itself.
+
+Both are addressed here, **before any further GPU spend**, without touching
+the frozen v2 output (`configs/early_gap_v2_b128.yaml`,
+`results/decisions/early_gap_v2_b128_fixed_trace.json`, and the raw v2
+probes are never modified, resumed into, or reinterpreted under v3 —
+protocol v2 is an archived, invalid-but-real result, not a draft).
+
+- **`kvcot.analysis.rkv_schedule`** (new, torch-free): an exact CPU
+  simulator of the upstream schedule/trigger mechanics audited in
+  `docs/UPSTREAM_AUDIT.md` H4 and §3.1/3.3 (`self.length` cumulative
+  counter incremented once per top-level forward call; the compression flag
+  for call N+1 is `self.length % divide_length == 0` computed at the end of
+  call N; the very first forward call in a fresh process always attempts
+  eviction regardless of schedule, since `compression` initializes to
+  `None`; an attempted eviction is a no-op whenever the current physical
+  cache length is still below `budget`). Used to *predict*, from a FullKV
+  base record alone (prompt length + generated-token count), the physical
+  R-KV cache length and retention ratio at every probe fraction before
+  spending any GPU time — this is what makes deterministic, outcome-blind
+  trace selection (below) possible on this CPU-only machine.
+- **`kvcot.generation.replay.branch_and_probe`** gained
+  `probe_cache_mode: Literal["native", "frozen_at_cut"] = "native"`
+  (default preserves exact v2/existing behavior and all existing tests
+  unchanged). `"frozen_at_cut"` forces `compression=False` on every R-KV
+  layer before every teacher-forced/generated token fed during the probe
+  (close marker, control suffix, and each greedily generated answer token) —
+  addresses failure mode 2 above by construction, not by post-hoc filtering:
+  the cache snapshot the probe branched from cannot be disturbed by the
+  model's own answer-writing. A fresh per-layer cache-length assertion
+  (`final_length == snapshot_length + tokens_fed`, checked every layer) now
+  raises loudly if this is ever violated, rather than silently producing an
+  ineligible pair after the GPU time to produce it is already spent.
+- **`kvcot.config.FixedTraceSettings`** gained (all with defaults that leave
+  `configs/early_gap_v2_b128.yaml` byte-behavior-identical):
+  `meaningful_retention_ceiling` (default 0.7), `require_meaningful_compression`
+  (default `False`), `min_meaningfully_compressed_scored_fractions` (default
+  0), `probe_cache_mode` (default `"native"`), `max_pilot_accuracy_drop`
+  (default 0.10).
+- **`kvcot.analysis.fixed_trace`**: new `rkv_meaningful_compression_at_f1`
+  eligibility field — `rkv_f1_retention_ratio <= meaningful_retention_ceiling`
+  — additive alongside (never replacing) the existing
+  `rkv_actual_compression_at_f1` "any eviction" diagnostic; only enforced as
+  an eligibility gate when `require_meaningful_compression=True` (v2 configs
+  never set this, so v2's frozen eligibility semantics and its archived
+  decision JSON are unaffected). New CPSS (Compression-Active
+  Prefix-Sufficiency Sensitivity) metric — `compute_cpss`/`compute_delta_cpss`
+  — restricted to the subset of the 7 scored fractions where
+  `rkv_retention_at_fraction <= meaningful_retention_ceiling` (requires at
+  least `min_compressed_scored_fractions_for_cpss`, default 2, else `None`) —
+  a DIFFERENT metric from PSS/Delta_PSS, additive, never pooled with it. New
+  per-fraction `retention_summary_by_fraction` (count/mean/median/min/max/
+  meaningful-compression-rate) and `compression_rate_by_fraction` in the
+  decision JSON — this is what would have shown the sawtooth retention
+  pattern (0.994 at f=0.125 down to 0.746 at f=1) without hand-decoding raw
+  records. New `all_shared_full_curve`/`all_shared_rkv_curve` keys carry
+  forward the EXACT existing `full_curve`/`rkv_curve` semantics (still
+  present, unchanged, for v2 backward compatibility) under clearer names;
+  new `*_eligible_only` curve variants are additive.
+- **New natural-accuracy screen** (`build_accuracy_screen` in
+  `kvcot.analysis.fixed_trace`, wired automatically into `kvcot
+  analyze-fixed-trace`/`run_fixed_trace_analysis` — no separate CLI command,
+  one artifact per stage rather than two): pairs natural (non-fixed-trace)
+  `full.jsonl`/`rkv_b{budget}.jsonl` base accuracy on the SAME manifest rows
+  — v2 never generated a natural R-KV b128 run, so it could not establish
+  `pilot_accuracy_plausible` (deliberately not named `accuracy_neutral` —
+  §8.5 of `CLAUDE.md`/the build brief already states the primary paired
+  200-problem accuracy check, `kvcot.analysis.stats.paired_accuracy_diff`,
+  is the only test allowed to claim distributional accuracy preservation;
+  this is a small-n stop/continue gate only). Only attempted for stages that
+  set `require_meaningful_compression: true` (the v2/v3 discriminator) —
+  `screen_valid` in the v3 fixed-trace decision is `False` whenever this
+  screen is missing (natural R-KV base file not found) or
+  `accuracy_difference_rkv_minus_full < -max_pilot_accuracy_drop`.
+- **`kvcot inspect-fixed-trace --write-selection`** (new flag): deterministic
+  trace selection using ONLY the FullKV base file's own correctness/cap/
+  think-parse validity plus `kvcot.analysis.rkv_schedule`'s predicted
+  retention — never any fixed-trace probe answer, PSS, or CPSS value (a
+  selection that could see outcomes would not be a pre-registered screen).
+  Writes `results/selections/{stage_name}.json` with the config hash, base
+  file SHA-256, per-candidate predicted retention at every fraction, and
+  selected/rejected row indices with reasons.
+- **`configs/early_gap_v3_b128.yaml`** (new stage, never a resumption of
+  `early_gap_v2_b128.yaml`'s `output_dir`): `limit: 50` (natural generation
+  only — selection then narrows to a smaller replayed set),
+  `probe_cache_mode: frozen_at_cut`, `require_meaningful_compression: true`,
+  `min_meaningfully_compressed_scored_fractions: 2`.
+- **Schema bump 1.3.0 -> 1.4.0** (`kvcot.schemas`): `FixedTraceProbeRecord`
+  gained `protocol_version` (`Literal["v2", "v3"]`, default `"v2"` so
+  existing v2 records/fixtures continue to validate unchanged),
+  `probe_cache_mode`, `meaningful_compression_at_cut`,
+  `compressed_scored_fraction`. `SCHEMA_VERSION` bump means a stale
+  1.3.0-shaped record fails validation outright under the new
+  `Literal["1.4.0"]` — exactly the same discipline the 1.2.0->1.3.0 and
+  1.1.0->1.2.0 bumps established; a v2 output directory must never be
+  resumed under this schema.
+- **Still open**: this is all CPU-buildable/testable infrastructure — no
+  GPU exists on this machine (unchanged from every prior entry). The exact
+  schedule simulator's predictions have not been cross-checked against real
+  GPU-measured retention (the raw v2 fixed-trace probe JSONL is gitignored
+  per `README.md`'s stated layout and was not preserved outside the GPU
+  host), only against the audited mechanics and hand-derived unit cases —
+  `tests/integration/test_rkv_schedule_prediction_gpu.py` (new, GPU-only)
+  is the mandatory one-example gate before trusting it against real
+  generations. Natural R-KV b128 generation on the 50-example manifest has
+  not been run — the accuracy screen above cannot report a real number
+  until it is. `docs/GPU_VALIDATION_PLAN.md` §(new) documents the required
+  run order; do not skip the one-example frozen-probe/schedule-prediction
+  gate before committing to the full 20-example replay.
+
 ## 2026-07-16 — Fixed-trace protocol v2, fourth pass: policy-role validation, resume identity gap (secondary, additive; no frozen §1/§4/§8/§9 value changed)
 
 A fourth external review of the third-pass cross-file identity commit found

@@ -386,6 +386,31 @@ class ProbeResult:
     # 8, kvcot.cli.cmd_replay_fixed_trace).
     final_absolute_position: int = 0
     final_cache_lengths_per_layer: list[int] = field(default_factory=list)
+    # "native" (protocol v2 behavior) or "frozen_at_cut" (protocol v3,
+    # CHANGELOG.md 2026-07-17) — echoes the probe_cache_mode this
+    # ProbeResult was produced under, so callers can record it onto
+    # kvcot.schemas.FixedTraceProbeRecord.probe_cache_mode without threading
+    # a second copy of the argument through separately.
+    probe_cache_mode: str = "native"
+
+
+def _force_compression_off(model) -> None:
+    """protocol v3 `probe_cache_mode="frozen_at_cut"` (CHANGELOG.md
+    2026-07-17): force every R-KV layer's `compression` flag to `False`
+    before a forward call, so the attention forward's `elif self.config.
+    compression is True:` eviction branch (modeling.py:310-325) never runs
+    during this probe. Must be called before EVERY `feed()` call, not just
+    once before the loop starts — upstream recomputes and overwrites the
+    flag from its own schedule at the END of every top-level forward call
+    regardless of what was set beforehand (docs/UPSTREAM_AUDIT.md H4), so a
+    single reset before the first call would only hold for that one call.
+    A no-op for FullKV replay (no `compression` attribute on a stock
+    `Qwen2Config` at all — nothing to freeze, since stock attention never
+    evicts in the first place)."""
+    for layer in model.model.layers:
+        config = layer.self_attn.config
+        if hasattr(config, "compression"):
+            config.compression = False
 
 
 def branch_and_probe(
@@ -398,6 +423,7 @@ def branch_and_probe(
     eos_token_id: int,
     device: str,
     stop_predicate: Callable[[list[int]], bool] | None = None,
+    probe_cache_mode: str = "native",
 ) -> ProbeResult:
     """§6 steps 8-9: from a deep-cloned snapshot, teacher-force the
     closing-think token sequence and then the single control suffix
@@ -416,6 +442,20 @@ def branch_and_probe(
     solution attempt in the same generation. The frozen primary replay-probe
     path (kvcot.cli.cmd_replay_probe) never passes this argument.
 
+    `probe_cache_mode` (protocol v3, CHANGELOG.md 2026-07-17): `"native"`
+    (default — exact protocol v2 / frozen primary replay-probe behavior,
+    unchanged) lets R-KV's own schedule keep compacting while this probe
+    feeds tokens, which is how protocol v2 discovered `rkv_evicted_during_
+    answer_probe` contamination after the fact. `"frozen_at_cut"` calls
+    `_force_compression_off` before every fed token instead, so the
+    snapshot's cache cannot be disturbed by the probe's own answer-writing —
+    prevented by construction, not detected after the fact — and then hard-
+    asserts (every layer) that the final cache length equals the snapshot's
+    starting length plus however many tokens were actually fed, and that no
+    new compaction event was recorded on any R-KV layer's `kv_cluster`
+    (`evicted_token_num` unchanged). Raises `RuntimeError` if either
+    assertion fails, rather than silently returning a contaminated result.
+
     Restoring the same `snapshot` and calling this twice must yield
     identical `probe_output_token_ids` (§6.1 hard gate) — guaranteed by
     `restore_snapshot`'s clone-on-restore plus this function doing no
@@ -423,9 +463,18 @@ def branch_and_probe(
     """
     restore_snapshot(model, cache, snapshot)
     absolute_position = snapshot.absolute_position
+    num_layers = len(model.model.layers)
+
+    start_cache_lengths = [int(cache.key_cache[i].shape[-2]) for i in range(num_layers)]
+    start_evicted_counts = [
+        kv_cluster.evicted_token_num if (kv_cluster := _has_kv_cluster(model, i)) is not None else None
+        for i in range(num_layers)
+    ]
 
     def feed(token_id: int) -> torch.Tensor:
         nonlocal absolute_position
+        if probe_cache_mode == "frozen_at_cut":
+            _force_compression_off(model)
         logits = decode_step(model, cache, token_id, absolute_position, device)
         absolute_position += 1
         return logits
@@ -456,8 +505,26 @@ def branch_and_probe(
             break
         logits = feed(token_id)
 
-    num_layers = len(model.model.layers)
     final_cache_lengths = [int(cache.key_cache[i].shape[-2]) for i in range(num_layers)]
+
+    if probe_cache_mode == "frozen_at_cut":
+        tokens_fed = absolute_position - snapshot.absolute_position
+        for i in range(num_layers):
+            expected = start_cache_lengths[i] + tokens_fed
+            if final_cache_lengths[i] != expected:
+                raise RuntimeError(
+                    f"frozen_at_cut probe changed cache length unexpectedly at layer {i}: expected "
+                    f"{expected} (start {start_cache_lengths[i]} + {tokens_fed} fed tokens), got "
+                    f"{final_cache_lengths[i]} — compression was not fully suppressed during this probe."
+                )
+            kv_cluster = _has_kv_cluster(model, i)
+            if kv_cluster is not None and start_evicted_counts[i] is not None:
+                if kv_cluster.evicted_token_num != start_evicted_counts[i]:
+                    raise RuntimeError(
+                        f"frozen_at_cut probe recorded a NEW compaction event at layer {i} "
+                        f"(evicted_token_num {start_evicted_counts[i]} -> {kv_cluster.evicted_token_num}) "
+                        "— compression was not fully suppressed during this probe."
+                    )
 
     return ProbeResult(
         control_suffix_token_ids=control_suffix_token_ids,
@@ -465,4 +532,5 @@ def branch_and_probe(
         stop_reason=stop_reason,
         final_absolute_position=absolute_position,
         final_cache_lengths_per_layer=final_cache_lengths,
+        probe_cache_mode=probe_cache_mode,
     )

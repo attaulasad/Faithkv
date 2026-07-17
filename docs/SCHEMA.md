@@ -103,7 +103,7 @@ manifest.
 
 ## Versioning
 
-`schema_version` is `Literal["1.3.0"]` on every record — a Pydantic literal,
+`schema_version` is `Literal["1.4.0"]` on every record — a Pydantic literal,
 not just a string default, so an old-schema record (e.g. a stray `"1.1.0"`
 row from before the fixed-trace protocol v2 fields existed) fails validation
 outright rather than being silently accepted and reinterpreted under the new
@@ -113,9 +113,15 @@ fixed-trace fields — boxed-answer prefix, realized-compression tracking,
 answer-time eviction detection) -> `"1.3.0"` (2026-07-16: `FixedTraceProbeRecord`
 gained `model_revision`/`tokenizer_revision`, so its identity is directly
 comparable to `BaseRunRecord`'s for cross-file identity checks —
-`kvcot.analysis.fixed_trace._assert_consistent_identity`). A breaking schema
-change bumps this and is documented in `CHANGELOG.md` — `kvcot validate-run`
-checks it. **Do not resume an old output directory produced under a prior
-schema version** — start a fresh `output_dir` instead (protocol v1's
-`results/raw/early_gap_b*` directories from before 2026-07-16 are not valid
-inputs to protocol v2 commands).
+`kvcot.analysis.fixed_trace._assert_consistent_identity`) -> `"1.4.0"`
+(2026-07-17: protocol v3 — `FixedTraceProbeRecord` gained `protocol_version`
+(`"v2"`/`"v3"`, default `"v2"`), `probe_cache_mode` (`"native"`/
+`"frozen_at_cut"`, default `"native"`), `meaningful_compression_at_cut`, and
+`compressed_scored_fraction`, all defaulting to protocol v2's actual
+recorded behavior so every historic v2 fixture/record still validates
+unchanged). A breaking schema change bumps this and is documented in
+`CHANGELOG.md` — `kvcot validate-run` checks it. **Do not resume an old
+output directory produced under a prior schema version** — start a fresh
+`output_dir` instead (protocol v1's `results/raw/early_gap_b*` directories
+from before 2026-07-16, and protocol v2's `results/raw/protocol_v2/
+early_gap_b128` directory, are not valid inputs to protocol v3 commands).

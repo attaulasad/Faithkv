@@ -17,6 +17,7 @@ from kvcot.cli import (
     _resolve_condition,
     _stage1b_candidate_budgets,
     _verify_resumable_record_ids,
+    _write_run_manifest,
 )
 from kvcot.config import StageConfig
 from kvcot.schemas import (
@@ -195,3 +196,44 @@ def test_load_manifest_filtered_no_limit_anywhere_returns_all_rows(tmp_path):
     args = SimpleNamespace(problem_index=None, limit=None)
     rows = _load_manifest_filtered(stage, args)
     assert len(rows) == 50
+
+
+# --- _write_run_manifest: immutable per-invocation provenance (protocol v3, CHANGELOG.md 2026-07-17) ---
+
+def test_write_run_manifest_writes_under_results_run_manifests(tmp_path, monkeypatch):
+    # Prior versions wrote to a fixed filename inside stage.output_dir,
+    # which is itself under the gitignored results/raw/ tree -- README.md
+    # promises results/run_manifests/ ("one JSON per invocation, committed")
+    # as the actual location.
+    monkeypatch.chdir(tmp_path)
+    _write_run_manifest("test_stage", "generate_full", {"n_completed": 3})
+    files = list((tmp_path / "results" / "run_manifests").glob("test_stage_generate_full_*.json"))
+    assert len(files) == 1
+
+
+def test_write_run_manifest_never_overwrites_a_prior_invocation(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _write_run_manifest("test_stage", "generate_full", {"n_completed": 1})
+    _write_run_manifest("test_stage", "generate_full", {"n_completed": 2})
+    files = sorted((tmp_path / "results" / "run_manifests").glob("test_stage_generate_full_*.json"))
+    assert len(files) == 2  # two distinct, immutable files -- neither overwritten by the other
+
+    from kvcot.utils.io import read_json
+
+    contents = [read_json(f)["n_completed"] for f in files]
+    assert sorted(contents) == [1, 2]
+
+
+def test_write_run_manifest_accepts_a_pydantic_model_via_model_dump(tmp_path, monkeypatch):
+    from kvcot.runtime import capture_version_info
+    from kvcot.schemas import RunManifest
+
+    monkeypatch.chdir(tmp_path)
+    manifest = RunManifest(
+        command="generate", config_path="configs/x.yaml", config_sha256="a" * 64,
+        git_commit="deadbeef", git_dirty=False, versions=capture_version_info(),
+        start_time_utc="2026-07-17T00:00:00Z",
+    )
+    _write_run_manifest("test_stage", "generate_full", manifest)
+    files = list((tmp_path / "results" / "run_manifests").glob("test_stage_generate_full_*.json"))
+    assert len(files) == 1

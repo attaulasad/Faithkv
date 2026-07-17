@@ -17,10 +17,31 @@ intervention. It does not measure, and this repository never claims to
 measure, whether the chain-of-thought is "real," faithful to internal
 cognition, or decorative. See `docs/EXPERIMENT.md` §1.
 
-**Status: implementation complete; GPU validation pending.** This
-repository was built on a machine with no GPU and no model weights
-downloaded. Every GPU-dependent test is implemented in full and marked
-`@pytest.mark.gpu`; none has been run. See `docs/GPU_VALIDATION_PLAN.md`.
+**Status: GPU correctness gates passed; protocol-v2 fixed-trace screen ran
+and came back invalid; protocol v3 implemented, not yet GPU-run.** This
+repository is built/maintained on a machine with no GPU — all development
+here is CPU-only (`pytest -m "not gpu" tests/`, `--dry-run`). GPU-dependent
+work happens on a rented host and results are synced back
+(`scripts/sync_results.sh`): `test_patched_noop_parity_gpu.py`,
+`test_no_state_leak_gpu.py`, and all seven `test_replay_gpu.py` cases have
+real passing runs on record (`logs/gpu_validation/*.log`). The protocol-v2
+fixed-trace screen (`configs/early_gap_v2_b128.yaml`) also ran for real —
+`results/decisions/early_gap_v2_b128_fixed_trace.json`,
+`n_shared=10 n_eligible=3 mean_f1_rkv_retention_ratio=0.7456
+screen_valid=false hypothesis_status=not_tested` — a valid negative
+screening outcome, not a crash or a bug in the correctness machinery. See
+`CHANGELOG.md`'s 2026-07-17 entry for the two diagnosed causes and the
+protocol-v3 fixes (`configs/early_gap_v3_b128.yaml`), which have not yet
+been run on a GPU. No Stage 0-2 run (the frozen primary EAS/Delta_EAS
+pipeline) has happened yet. See `docs/GPU_VALIDATION_PLAN.md`.
+
+`logs/git_commit.txt`/`logs/git_status.txt` reflect an OLDER commit
+(`bb1917a...`) than this repository's current history — they were captured
+during the GPU run that produced the protocol-v2 result above and were
+never refreshed afterward. Treat them as a historical record of what the
+GPU host had checked out for that specific run, not as current provenance;
+regenerate them (`git rev-parse HEAD`, `git status --short`) on every future
+GPU invocation rather than trusting stale copies.
 
 ## Layout
 
@@ -42,7 +63,7 @@ results/        raw/ is gitignored; run_manifests/, decisions/, tables/, figures
 ```bash
 python -m venv .venv && source .venv/bin/activate   # or .venv\Scripts\activate on Windows
 pip install -e ".[cpu-tools,dev]"    # no torch — analysis, tests, manifest freezing, tokenizer only
-pytest -m "not gpu" tests/           # 107 passed on the build machine
+pytest -m "not gpu" tests/           # see CHANGELOG.md's latest entry for the current passing count
 ```
 
 **On a GPU host (e.g. a rented Vast.ai instance) — required for anything that generates or replays:**
@@ -125,6 +146,31 @@ archived under `results/decisions/archive/protocol_v1_2026-07-16/`, not
 deleted. Also fixed: eligibility now checks answer-time cache eviction for
 the f=1 anchor itself, not only the 7 scored fractions (a synthetic
 f=1-only-eviction case previously slipped through as eligible).
+
+**Protocol v2's real GPU screen came back invalid, protocol v3 fixes why
+(2026-07-17):** `results/decisions/early_gap_v2_b128_fixed_trace.json`
+(n=10, seed=42) came back `screen_valid: false` —
+`n_eligible=3` (< 5 required) and `mean_f1_rkv_retention_ratio=0.7456`
+(> the 0.7 ceiling). Two diagnosed, fixable causes (full detail in
+`CHANGELOG.md`): (1) the "any nonzero eviction" compression check let a
+0.9959-retention example count as "compression active"; (2) 5/10 examples
+failed via `rkv_evicted_during_answer_probe` — R-KV kept compacting while
+the probe wrote its own answer. `configs/early_gap_v3_b128.yaml` adds a
+`meaningful_retention_ceiling`-gated eligibility check
+(`require_meaningful_compression`), a new Compression-Active
+Prefix-Sufficiency Sensitivity metric (CPSS/Delta_CPSS, restricted to
+fractions where R-KV actually compressed meaningfully), a
+`probe_cache_mode: frozen_at_cut` that prevents answer-time compaction by
+construction (hard runtime assertion, `kvcot.generation.replay.
+branch_and_probe`), a CPU-only exact cache-schedule simulator
+(`kvcot.analysis.rkv_schedule`) for deterministic, outcome-blind trace
+selection (`kvcot inspect-fixed-trace --write-selection`) before any GPU
+replay, and a natural-accuracy pilot screen
+(`build_accuracy_screen`/`pilot_accuracy_plausible`) since v2 never
+generated a natural R-KV b128 run to check against. Not yet exercised on a
+GPU — the one-example frozen-probe/schedule-prediction gate
+(`docs/GPU_VALIDATION_PLAN.md`) is required before any full replay under
+this config.
 
 **Resume behavior:** re-running the same command with `--resume` skips any
 `record_id` already present in the output JSONL file

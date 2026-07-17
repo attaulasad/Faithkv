@@ -234,3 +234,48 @@ eligibility gap, now closed (`no_rkv_eviction_during_answer_probes`).
 and (config, model, upstream-commit) identity before analyzing anything, so
 a stale protocol-v1 directory can no longer be silently read as if it were
 current.
+
+**Protocol v2's real result, and protocol v3 (2026-07-17, see CHANGELOG.md).**
+Protocol v2's GPU screen ran for real (`configs/early_gap_v2_b128.yaml`,
+n=10, seed=42) and came back `screen_valid: false`
+(`results/decisions/early_gap_v2_b128_fixed_trace.json`): `n_eligible=3`
+against a floor of 5, and `mean_f1_rkv_retention_ratio=0.7456` against a
+0.7 ceiling. This is a valid negative screening outcome — every correctness
+gate passed, all 180 probes produced valid boxed answers — not evidence
+against the hypothesis, since the screen itself never cleared its own
+validity bar. Two diagnosed causes, both mechanical, neither a rejection of
+the hypothesis:
+
+1. `actual_compression_at_cut` ("any nonzero eviction") let a
+   0.9959-retention example count as "compression active" — R-KV's
+   periodic schedule (`divide_length=128`, §3.1 of `docs/UPSTREAM_AUDIT.md`
+   H4) can cross a compaction checkpoint long before the cache has grown
+   enough for the eviction to matter.
+2. 5 of 10 shared examples failed via `rkv_evicted_during_answer_probe` — a
+   real compaction fired while the probe taught-forced its closing
+   marker/suffix or generated its own answer, after the snapshot the probe
+   was measuring.
+
+Protocol v3 (`configs/early_gap_v3_b128.yaml`) fixes both, without touching
+protocol v2's frozen output: `probe_cache_mode: frozen_at_cut`
+(`kvcot.generation.replay.branch_and_probe`) forces R-KV compression off
+for the whole probe and hard-asserts the cache did not move (fixes #2 by
+construction, not detection); `require_meaningful_compression: true` with
+`meaningful_retention_ceiling: 0.7` requires a substantial measured
+retention drop at f=1 AND at least `min_meaningfully_compressed_scored_
+fractions` of the 7 scored fractions individually clearing that ceiling
+(fixes #1). A new Compression-Active Prefix-Sufficiency Sensitivity metric
+(CPSS/Delta_CPSS, `kvcot.analysis.fixed_trace.compute_cpss`) restricts PSS's
+mean to only the fractions where R-KV actually compressed meaningfully — a
+**different, additive** metric from PSS/Delta_PSS, never pooled with it,
+same subtraction-order/sign-convention discipline. A CPU-only exact cache-
+schedule simulator (`kvcot.analysis.rkv_schedule`, grounded directly in
+`docs/UPSTREAM_AUDIT.md` H4's audited mechanics) predicts realized retention
+from a FullKV base record alone, enabling deterministic, outcome-blind trace
+selection (`kvcot inspect-fixed-trace --write-selection`) before any GPU
+replay — selection never sees a fixed-trace probe answer, PSS, or CPSS
+value. Finally, a natural-accuracy pilot screen (`build_accuracy_screen`,
+`pilot_accuracy_plausible` — deliberately not `accuracy_neutral`, which
+remains reserved for §9's frozen `paired_accuracy_diff`) checks that R-KV's
+own natural accuracy on the same manifest has not collapsed relative to
+FullKV's, something protocol v2 never generated the data to check at all.

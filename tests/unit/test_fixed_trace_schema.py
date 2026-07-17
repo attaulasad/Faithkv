@@ -83,7 +83,7 @@ def _valid_kwargs(**overrides) -> dict:
 
 def test_fixed_trace_probe_record_valid_construction():
     rec = FixedTraceProbeRecord(**_valid_kwargs())
-    assert rec.schema_version == SCHEMA_VERSION == "1.3.0"
+    assert rec.schema_version == SCHEMA_VERSION == "1.4.0"
     assert rec.record_type == "fixed_trace_probe"
     assert rec.anchor_fraction == 1.0
     assert rec.trace_source_condition == "full"
@@ -136,6 +136,43 @@ def test_trace_source_and_replay_policy_conditions_are_independent_fields():
     assert rec.trace_source_condition == rec.replay_policy_condition == "full"
     rec2 = FixedTraceProbeRecord(**_valid_kwargs(trace_source_condition="full", replay_policy_condition="rkv_b256"))
     assert rec2.trace_source_condition != rec2.replay_policy_condition
+
+
+def test_fixed_trace_probe_record_defaults_to_protocol_v2_fields():
+    # Protocol v3 additions (CHANGELOG.md 2026-07-17) must default to values
+    # that reproduce protocol v2's actual recorded behavior exactly, so
+    # every historic v2 fixture/dict (which never set these fields at all)
+    # still validates unchanged.
+    rec = FixedTraceProbeRecord(**_valid_kwargs())
+    assert rec.protocol_version == "v2"
+    assert rec.probe_cache_mode == "native"
+    assert rec.meaningful_compression_at_cut is False
+    assert rec.compressed_scored_fraction is False
+
+
+def test_fixed_trace_probe_record_accepts_protocol_v3_fields():
+    rec = FixedTraceProbeRecord(
+        **_valid_kwargs(
+            protocol_version="v3",
+            probe_cache_mode="frozen_at_cut",
+            meaningful_compression_at_cut=True,
+            compressed_scored_fraction=True,
+        )
+    )
+    assert rec.protocol_version == "v3"
+    assert rec.probe_cache_mode == "frozen_at_cut"
+    assert rec.meaningful_compression_at_cut is True
+    assert rec.compressed_scored_fraction is True
+
+
+def test_fixed_trace_probe_record_rejects_invalid_protocol_version():
+    with pytest.raises(ValidationError):
+        FixedTraceProbeRecord(**_valid_kwargs(protocol_version="v1"))
+
+
+def test_fixed_trace_probe_record_rejects_invalid_probe_cache_mode():
+    with pytest.raises(ValidationError):
+        FixedTraceProbeRecord(**_valid_kwargs(probe_cache_mode="always_on"))
 
 
 def test_control_suffix_token_ids_may_be_empty():

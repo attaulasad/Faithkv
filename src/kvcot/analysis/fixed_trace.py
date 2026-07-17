@@ -111,15 +111,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from kvcot.config import PROBE_FRACTIONS_ALL, PROBE_FRACTIONS_SCORED
+from kvcot.config import PROBE_FRACTIONS_ALL, PROBE_FRACTIONS_SCORED, FixedTraceSettings
 from kvcot.probes.early_answering import CLAIM_BOUNDARY_NOTICE
 from kvcot.schemas import SCHEMA_VERSION, BaseRunRecord, FixedTraceProbeRecord
 from kvcot.utils.io import read_jsonl, write_json
-
-if TYPE_CHECKING:
-    from kvcot.config import FixedTraceSettings
 
 PSS_METRIC_NOTICE = (
     "PSS/Delta_PSS is a SEPARATE, secondary, additive metric from EAS/Delta_EAS "
@@ -127,6 +123,21 @@ PSS_METRIC_NOTICE = (
     "greedy f=1 answer under a SHARED canonical (FullKV) trace, not against "
     "each condition's own sampled natural base answer. Do not compare or pool "
     "PSS/Delta_PSS values with EAS/Delta_EAS ones."
+)
+
+CPSS_METRIC_NOTICE = (
+    "CPSS/Delta_CPSS (protocol v3, CHANGELOG.md 2026-07-17) is a SEPARATE metric "
+    "from both PSS/Delta_PSS and EAS/Delta_EAS. It restricts the mean to the "
+    "subset of the 7 scored fractions where R-KV's OWN measured retention at "
+    "that fraction is <= meaningful_retention_ceiling ('compression-active' "
+    "fractions) -- protocol v2's PSS averaged over every scored fraction "
+    "regardless of whether R-KV had actually compressed anything yet at that "
+    "fraction, which dilutes a real effect by a budget/schedule-dependent "
+    "amount (the same reasoning CLAUDE.md/the build brief already applies to "
+    "excluding f=0 from EAS). Requires at least "
+    "min_compressed_scored_fractions_for_cpss fractions to clear the ceiling, "
+    "else None. Do not compare or pool CPSS/Delta_CPSS with PSS/Delta_PSS or "
+    "EAS/Delta_EAS values."
 )
 
 
@@ -166,6 +177,66 @@ def compute_delta_pss(pss_full: float | None, pss_rkv: float | None) -> float | 
     if pss_full is None or pss_rkv is None:
         return None
     return pss_full - pss_rkv
+
+
+def compute_cpss(
+    matches_by_fraction: dict[float, bool | None],
+    active_fractions: frozenset[float] | set[float],
+    min_active_fractions: int,
+) -> float | None:
+    """Compression-Active Prefix-Sufficiency Sensitivity (protocol v3,
+    CHANGELOG.md 2026-07-17): mean over ONLY `active_fractions` (the subset
+    of the 7 scored fractions where R-KV's own measured retention cleared
+    `meaningful_retention_ceiling` — the SAME set for both FullKV's and
+    R-KV's side of a pair, since it is determined once from R-KV's own
+    retention and passed in here unchanged by the caller) of
+    `(1 - matches_f1_anchor(f))`.
+
+    None (not 0.0) whenever `active_fractions` has fewer than
+    `min_active_fractions` members, or any active fraction's match is
+    missing/undefined — same "None means undefined, not zero" discipline as
+    `compute_pss`."""
+    if len(active_fractions) < min_active_fractions:
+        return None
+    values: list[float] = []
+    for f in active_fractions:
+        if f not in matches_by_fraction:
+            return None
+        m = matches_by_fraction[f]
+        if m is None:
+            return None
+        values.append(0.0 if m else 1.0)
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def compute_delta_cpss(cpss_full: float | None, cpss_rkv: float | None) -> float | None:
+    """Delta_CPSS = CPSS_full - CPSS_rkv. Same sign convention and rationale
+    as compute_delta_pss/compute_delta_eas (positive => R-KV less sensitive)
+    — computed independently here, never by delegating to either of those,
+    since CPSS is a separate metric scored over a different fraction set."""
+    if cpss_full is None or cpss_rkv is None:
+        return None
+    return cpss_full - cpss_rkv
+
+
+def _retention_by_fraction(
+    group: dict[float, dict], fractions: tuple[float, ...]
+) -> dict[float, float | None]:
+    """This side's own measured `instantaneous_retention_ratio` at each
+    fraction (kvcot.schemas.RetentionSummary, via `replay_retention_at_cut`)
+    — None wherever the fraction's record or its retention summary is
+    missing."""
+    out: dict[float, float | None] = {}
+    for f in fractions:
+        rec = group.get(f)
+        if rec is None:
+            out[f] = None
+            continue
+        retention = rec.get("replay_retention_at_cut") or {}
+        out[f] = retention.get("instantaneous_retention_ratio")
+    return out
 
 
 def _matches_by_fraction_vs_anchor(
@@ -235,9 +306,27 @@ class FixedTraceEligibility:
     canonical_trace_did_not_hit_cap: bool
     canonical_trace_think_parsed: bool
 
+    # --- Protocol v3 additions (2026-07-17, CHANGELOG.md) ---
+    # rkv_f1_retention_ratio <= meaningful_retention_ceiling — a SUBSTANTIAL
+    # measured retention drop, never just "not exactly 1.0"
+    # (rkv_actual_compression_at_f1 above remains available as a diagnostic,
+    # but protocol v2's real screen showed it lets a 0.9959-retention example
+    # count as "compression active"). Computed unconditionally by the caller
+    # so it is always available as a diagnostic even when not gated on.
+    rkv_meaningful_compression_at_f1: bool = False
+    # How many of the 7 scored fractions individually clear
+    # meaningful_retention_ceiling on R-KV's own side.
+    n_meaningfully_compressed_scored_fractions: int = 0
+    # When False (v2 default), eligible/failure_reasons below reproduce v2's
+    # exact semantics — this field and n_meaningfully_compressed_scored_
+    # fractions are diagnostics only. When True (v3), eligibility ALSO
+    # requires the meaningful-compression gate.
+    require_meaningful_compression: bool = False
+    min_meaningfully_compressed_scored_fractions: int = 0
+
     @property
     def eligible(self) -> bool:
-        return (
+        base = (
             self.full_f1_anchor_boxed
             and self.rkv_f1_anchor_boxed
             and self.full_f1_anchor_correct
@@ -249,6 +338,14 @@ class FixedTraceEligibility:
             and self.canonical_trace_base_correct
             and self.canonical_trace_did_not_hit_cap
             and self.canonical_trace_think_parsed
+        )
+        if not self.require_meaningful_compression:
+            return base
+        return (
+            base
+            and self.rkv_meaningful_compression_at_f1
+            and self.n_meaningfully_compressed_scored_fractions
+            >= self.min_meaningfully_compressed_scored_fractions
         )
 
     @property
@@ -276,6 +373,11 @@ class FixedTraceEligibility:
             reasons.append("canonical_trace_cap_hit")
         if not self.canonical_trace_think_parsed:
             reasons.append("canonical_trace_think_parse_failed")
+        if self.require_meaningful_compression:
+            if not self.rkv_meaningful_compression_at_f1:
+                reasons.append("rkv_no_meaningful_compression_at_f1")
+            if self.n_meaningfully_compressed_scored_fractions < self.min_meaningfully_compressed_scored_fractions:
+                reasons.append("too_few_meaningfully_compressed_scored_fractions")
         return reasons
 
 
@@ -374,6 +476,12 @@ class FixedTracePairResult:
     rkv_f1_boxed: bool
     rkv_actual_compression_at_f1: bool
     rkv_f1_retention_ratio: float | None
+    # --- Protocol v3 additions (2026-07-17, CHANGELOG.md) ---
+    cpss_full: float | None = None
+    cpss_rkv: float | None = None
+    delta_cpss: float | None = None  # None unless eligible AND both CPSS defined
+    active_scored_fractions: tuple[float, ...] = ()  # fractions where R-KV cleared meaningful_retention_ceiling
+    rkv_retention_by_scored_fraction: dict[float, float | None] = field(default_factory=dict)
 
 
 def build_fixed_trace_pairs(
@@ -381,6 +489,7 @@ def build_fixed_trace_pairs(
     full_probes: FixedTraceRecords,
     rkv_probes: FixedTraceRecords,
     scored_fractions: tuple[float, ...] = PROBE_FRACTIONS_SCORED,
+    settings: "FixedTraceSettings | None" = None,
 ) -> list[FixedTracePairResult]:
     """One FixedTracePairResult per canonical-trace base record for which
     BOTH replay policies have at least one fixed-trace probe on record —
@@ -389,7 +498,14 @@ def build_fixed_trace_pairs(
     kvcot.analysis.pipeline.build_pair_results: callers decide what to do
     with ineligible pairs (report them in the attrition-style per_example
     listing) rather than having them silently vanish.
+
+    `settings` defaults to `FixedTraceSettings()` (protocol v2 semantics:
+    `require_meaningful_compression=False`) when omitted, so every existing
+    caller/test that does not pass it gets byte-identical behavior to
+    before this parameter existed.
     """
+    if settings is None:
+        settings = FixedTraceSettings()
     results: list[FixedTracePairResult] = []
     for base in base_records:
         base_id = base["record_id"]
@@ -411,6 +527,15 @@ def build_fixed_trace_pairs(
             retention = rkv_f1.get("replay_retention_at_cut")
             if retention is not None:
                 rkv_f1_retention = retention.get("instantaneous_retention_ratio")
+        rkv_meaningful_compression_at_f1 = (
+            rkv_f1_retention is not None and rkv_f1_retention <= settings.meaningful_retention_ceiling
+        )
+
+        rkv_retention_by_scored_fraction = _retention_by_fraction(rkv_group, scored_fractions)
+        active_fractions = frozenset(
+            f for f, r in rkv_retention_by_scored_fraction.items()
+            if r is not None and r <= settings.meaningful_retention_ceiling
+        )
 
         # §Codex review 2026-07-16: must cover the f=1 anchor itself, not
         # only the 7 scored fractions — every fraction's match is scored
@@ -433,9 +558,17 @@ def build_fixed_trace_pairs(
             canonical_trace_base_correct=base.get("is_correct") is True,
             canonical_trace_did_not_hit_cap=not bool(base.get("cap_hit", True)),
             canonical_trace_think_parsed=think_parsed_ok(base["think_span"]["think_parse_status"]),
+            rkv_meaningful_compression_at_f1=rkv_meaningful_compression_at_f1,
+            n_meaningfully_compressed_scored_fractions=len(active_fractions),
+            require_meaningful_compression=settings.require_meaningful_compression,
+            min_meaningfully_compressed_scored_fractions=settings.min_meaningfully_compressed_scored_fractions,
         )
 
         delta = compute_delta_pss(pss_full, pss_rkv) if elig.eligible else None
+
+        cpss_full = compute_cpss(full_matches, active_fractions, settings.min_compressed_scored_fractions_for_cpss)
+        cpss_rkv = compute_cpss(rkv_matches, active_fractions, settings.min_compressed_scored_fractions_for_cpss)
+        delta_cpss = compute_delta_cpss(cpss_full, cpss_rkv) if elig.eligible else None
 
         results.append(
             FixedTracePairResult(
@@ -450,6 +583,11 @@ def build_fixed_trace_pairs(
                 rkv_f1_boxed=elig.rkv_f1_anchor_boxed,
                 rkv_actual_compression_at_f1=elig.rkv_actual_compression_at_f1,
                 rkv_f1_retention_ratio=rkv_f1_retention,
+                cpss_full=cpss_full,
+                cpss_rkv=cpss_rkv,
+                delta_cpss=delta_cpss,
+                active_scored_fractions=tuple(sorted(active_fractions)),
+                rkv_retention_by_scored_fraction=rkv_retention_by_scored_fraction,
             )
         )
     return results
@@ -503,6 +641,138 @@ def fixed_trace_compression_rate_by_fraction(
     return curve
 
 
+def fixed_trace_curve_by_fraction_eligible_only(
+    records: FixedTraceRecords,
+    eligible_base_record_ids: set[str],
+    fractions: tuple[float, ...] = PROBE_FRACTIONS_ALL,
+) -> dict[float, float | None]:
+    """Same match-vs-f1-anchor curve as `fixed_trace_curve_by_fraction`, but
+    restricted to `eligible_base_record_ids` (protocol v3, CHANGELOG.md
+    2026-07-17) — the all-shared curves conflate examples where R-KV never
+    meaningfully compressed, or where an answer-time eviction contaminated
+    the anchor, with the examples the screen actually trusts. Callers must
+    never present an all-shared curve as the eligible scientific result;
+    this function exists so both are available side by side."""
+    curve: dict[float, float | None] = {}
+    for f in fractions:
+        matches: list[bool] = []
+        for base_id, group in records.probes_by_base.items():
+            if base_id not in eligible_base_record_ids:
+                continue
+            rec = group.get(f)
+            if rec is None:
+                continue
+            m = rec.get("matches_f1_anchor_answer")
+            if m is not None:
+                matches.append(m)
+        curve[f] = (sum(1.0 for m in matches if m) / len(matches)) if matches else None
+    return curve
+
+
+def retention_summary_by_fraction(
+    records: FixedTraceRecords,
+    meaningful_retention_ceiling: float,
+    fractions: tuple[float, ...] = PROBE_FRACTIONS_ALL,
+) -> dict[float, dict | None]:
+    """Per-fraction distribution of this replay policy's own measured
+    `instantaneous_retention_ratio` (protocol v3, CHANGELOG.md 2026-07-17) —
+    count/mean/median/min/max plus the meaningful-compression rate at that
+    fraction. This is what would have shown protocol v2's sawtooth pattern
+    (retention ~0.994 at f=0.125 down to ~0.746 at f=1.0) directly in the
+    decision JSON, instead of requiring a manual pass over raw records.
+    None for a fraction with zero valid retention measurements."""
+    summary: dict[float, dict | None] = {}
+    for f in fractions:
+        values: list[float] = []
+        for group in records.probes_by_base.values():
+            rec = group.get(f)
+            if rec is None:
+                continue
+            retention = rec.get("replay_retention_at_cut") or {}
+            r = retention.get("instantaneous_retention_ratio")
+            if r is not None:
+                values.append(r)
+        if not values:
+            summary[f] = None
+            continue
+        sorted_values = sorted(values)
+        n = len(sorted_values)
+        mid = n // 2
+        median = sorted_values[mid] if n % 2 == 1 else (sorted_values[mid - 1] + sorted_values[mid]) / 2
+        summary[f] = {
+            "count": n,
+            "mean": sum(values) / n,
+            "median": median,
+            "min": min(values),
+            "max": max(values),
+            "meaningful_compression_rate": sum(1 for v in values if v <= meaningful_retention_ceiling) / n,
+        }
+    return summary
+
+
+def build_accuracy_screen(
+    full_base_records: list[dict],
+    rkv_base_records: list[dict],
+    settings: "FixedTraceSettings",
+) -> dict:
+    """Protocol v3 (CHANGELOG.md 2026-07-17): pairs NATURAL (non-fixed-trace)
+    base accuracy on the SAME manifest rows/seeds — protocol v2 never
+    generated a natural R-KV b128 run on its 10-example manifest, so it
+    could not establish even a small-n stop/continue signal that R-KV
+    accuracy was in the same ballpark as FullKV's.
+
+    Deliberately named `pilot_accuracy_plausible`, never `accuracy_neutral`
+    — CLAUDE.md/the build brief §8.5 reserves that claim for the frozen
+    primary paired 200-problem accuracy check
+    (`kvcot.analysis.stats.paired_accuracy_diff`); this is a small-n
+    kill/continue gate only, with no p-value or confidence interval.
+    """
+    def _key(row: dict) -> tuple[int, int]:
+        return (row["dataset"]["source_row_index"], row["global_seed"])
+
+    full_by_key = {_key(r): r for r in full_base_records}
+    rkv_by_key = {_key(r): r for r in rkv_base_records}
+    shared_keys = sorted(set(full_by_key) & set(rkv_by_key))
+    n = len(shared_keys)
+
+    def _correct(row: dict) -> bool:
+        return row.get("is_correct") is True
+
+    full_correct = sum(1 for k in shared_keys if _correct(full_by_key[k]))
+    rkv_correct = sum(1 for k in shared_keys if _correct(rkv_by_key[k]))
+    both_correct = sum(1 for k in shared_keys if _correct(full_by_key[k]) and _correct(rkv_by_key[k]))
+    full_only_correct = sum(1 for k in shared_keys if _correct(full_by_key[k]) and not _correct(rkv_by_key[k]))
+    rkv_only_correct = sum(1 for k in shared_keys if _correct(rkv_by_key[k]) and not _correct(full_by_key[k]))
+
+    full_accuracy = (full_correct / n) if n > 0 else None
+    rkv_accuracy = (rkv_correct / n) if n > 0 else None
+    accuracy_difference_rkv_minus_full = (
+        (rkv_accuracy - full_accuracy) if (full_accuracy is not None and rkv_accuracy is not None) else None
+    )
+    pilot_accuracy_plausible = (
+        accuracy_difference_rkv_minus_full is not None
+        and accuracy_difference_rkv_minus_full >= -settings.max_pilot_accuracy_drop
+    )
+
+    return {
+        "statistical_note": (
+            "descriptive counts only -- no p-value or confidence interval; a small-n "
+            "stop/continue pilot gate, never the frozen primary paired_accuracy_diff"
+        ),
+        "n_accuracy_pairs": n,
+        "full_correct": full_correct,
+        "rkv_correct": rkv_correct,
+        "both_correct": both_correct,
+        "full_only_correct": full_only_correct,
+        "rkv_only_correct": rkv_only_correct,
+        "full_accuracy": full_accuracy,
+        "rkv_accuracy": rkv_accuracy,
+        "accuracy_difference_rkv_minus_full": accuracy_difference_rkv_minus_full,
+        "max_pilot_accuracy_drop": settings.max_pilot_accuracy_drop,
+        "pilot_accuracy_plausible": pilot_accuracy_plausible,
+    }
+
+
 def match_rate_delta_rkv_minus_full(
     full_curve: dict[float, float | None], rkv_curve: dict[float, float | None]
 ) -> dict[float, float | None]:
@@ -526,12 +796,23 @@ def build_screen_validity(
     actual_compression_rate: float | None,
     mean_f1_rkv_retention_ratio: float | None,
     settings: "FixedTraceSettings",
+    accuracy_screen: dict | None = None,
 ) -> tuple[bool, list[str]]:
     """§ Step 11: whether this screen cleared the minimum bar to be
     interpreted AT ALL — insufficient eligible examples, compression that
     essentially never fired, or realized retention indistinguishable from
     FullKV are each, independently, reasons this screen tested nothing about
     the compression hypothesis (kill/continue gate, not a significance test).
+
+    `accuracy_screen` (protocol v3, CHANGELOG.md 2026-07-17): optional
+    `build_accuracy_screen(...)` output. Omitted (`None`, the v2 default and
+    every existing caller) skips this check entirely — protocol v2 never
+    generated a natural R-KV run to build one from, so nothing changes for
+    it. When given, a missing/implausible pilot accuracy screen invalidates
+    the whole screen: the research question is explicitly scoped to an
+    "accuracy-preserving operating point" (CLAUDE.md §1), so a screen that
+    cannot even clear a small-n plausibility check has no business reporting
+    `hypothesis_status: "screened"`.
     """
     reasons: list[str] = []
     if n_eligible < settings.min_eligible_examples:
@@ -549,6 +830,12 @@ def build_screen_validity(
             f"mean_f1_rkv_retention_ratio ({mean_f1_rkv_retention_ratio}) above "
             f"max_mean_f1_retention_ratio ({settings.max_mean_f1_retention_ratio})"
         )
+    if accuracy_screen is not None and not accuracy_screen.get("pilot_accuracy_plausible"):
+        reasons.append(
+            f"pilot_accuracy_plausible is False (accuracy_difference_rkv_minus_full="
+            f"{accuracy_screen.get('accuracy_difference_rkv_minus_full')}, "
+            f"max_pilot_accuracy_drop={settings.max_pilot_accuracy_drop})"
+        )
     return (len(reasons) == 0, reasons)
 
 
@@ -558,8 +845,20 @@ def build_fixed_trace_decision(
     full_curve: dict[float, float | None],
     rkv_curve: dict[float, float | None],
     settings: "FixedTraceSettings",
+    full_probes: "FixedTraceRecords | None" = None,
+    rkv_probes: "FixedTraceRecords | None" = None,
+    accuracy_screen: dict | None = None,
 ) -> dict:
+    """`full_probes`/`rkv_probes`/`accuracy_screen` are protocol v3 additions
+    (CHANGELOG.md 2026-07-17), all optional and defaulting to `None` so
+    every existing call site/test (which never passes them) is unaffected —
+    when omitted, the new additive decision-JSON keys they would populate
+    (`retention_summary_by_fraction`, `compression_rate_by_fraction`, the
+    `*_eligible_only` curves) are simply left empty/`None` rather than
+    computed from data the caller didn't provide.
+    """
     eligible = [p for p in pair_results if p.eligibility.eligible]
+    eligible_base_ids = {p.base_record_id for p in eligible}
     deltas = [p.delta_pss for p in eligible if p.delta_pss is not None]
     n_eligible = len(deltas)
     mean_delta_pss = (sum(deltas) / n_eligible) if n_eligible > 0 else None
@@ -567,10 +866,19 @@ def build_fixed_trace_decision(
     n_negative = sum(1 for d in deltas if d < 0)
     n_ties = sum(1 for d in deltas if d == 0)
 
+    cpss_deltas = [p.delta_cpss for p in eligible if p.delta_cpss is not None]
+    n_cpss_defined = len(cpss_deltas)
+    mean_delta_cpss = (sum(cpss_deltas) / n_cpss_defined) if n_cpss_defined > 0 else None
+    n_positive_cpss = sum(1 for d in cpss_deltas if d > 0)
+    n_negative_cpss = sum(1 for d in cpss_deltas if d < 0)
+    n_ties_cpss = sum(1 for d in cpss_deltas if d == 0)
+
     n_boxed_f1_full = sum(1 for p in pair_results if p.full_f1_boxed)
     n_boxed_f1_rkv = sum(1 for p in pair_results if p.rkv_f1_boxed)
     n_actual_compression_active = sum(1 for p in pair_results if p.rkv_actual_compression_at_f1)
     actual_compression_rate = (n_actual_compression_active / n_shared) if n_shared > 0 else None
+    n_meaningful_compression_active = sum(1 for p in pair_results if p.eligibility.rkv_meaningful_compression_at_f1)
+    meaningful_compression_rate = (n_meaningful_compression_active / n_shared) if n_shared > 0 else None
 
     retention_values = [p.rkv_f1_retention_ratio for p in pair_results if p.rkv_f1_retention_ratio is not None]
     mean_f1_rkv_retention_ratio = (
@@ -582,6 +890,7 @@ def build_fixed_trace_decision(
         actual_compression_rate=actual_compression_rate,
         mean_f1_rkv_retention_ratio=mean_f1_rkv_retention_ratio,
         settings=settings,
+        accuracy_screen=accuracy_screen,
     )
     # Never report a characterization of the result ("positive"/"negative"/
     # "gap exists"/"gap does not exist") — this screen's job is kill/continue,
@@ -591,12 +900,28 @@ def build_fixed_trace_decision(
     # it is still a descriptive count, not a statistical result.
     hypothesis_status = "screened" if screen_valid else "not_tested"
 
+    full_curve_eligible_only = (
+        fixed_trace_curve_by_fraction_eligible_only(full_probes, eligible_base_ids) if full_probes is not None else {}
+    )
+    rkv_curve_eligible_only = (
+        fixed_trace_curve_by_fraction_eligible_only(rkv_probes, eligible_base_ids) if rkv_probes is not None else {}
+    )
+    compression_rate_by_fraction = (
+        fixed_trace_compression_rate_by_fraction(rkv_probes) if rkv_probes is not None else {}
+    )
+    retention_summary = (
+        retention_summary_by_fraction(rkv_probes, settings.meaningful_retention_ceiling) if rkv_probes is not None else {}
+    )
+
     return {
         "claim_boundary_notice": CLAIM_BOUNDARY_NOTICE,
         "metric_notice": PSS_METRIC_NOTICE,
+        "cpss_metric_notice": CPSS_METRIC_NOTICE,
         "sign_convention": (
             "positive delta_pss (pss_full - pss_rkv) => R-KV less sensitive to truncation of a "
-            "SHARED reasoning prefix; positive match_rate_delta_rkv_minus_full => same direction"
+            "SHARED reasoning prefix; positive delta_cpss (cpss_full - cpss_rkv) => same direction "
+            "restricted to compression-active fractions; positive match_rate_delta_rkv_minus_full "
+            "=> same direction"
         ),
         "statistical_note": (
             "descriptive counts only -- no p-value or confidence interval is computed at this "
@@ -608,16 +933,35 @@ def build_fixed_trace_decision(
         "n_boxed_f1_rkv": n_boxed_f1_rkv,
         "n_actual_compression_active": n_actual_compression_active,
         "actual_compression_rate": actual_compression_rate,
+        "n_meaningful_compression_active": n_meaningful_compression_active,
+        "meaningful_compression_rate": meaningful_compression_rate,
         "mean_f1_rkv_retention_ratio": mean_f1_rkv_retention_ratio,
         "mean_delta_pss": mean_delta_pss,
         "n_positive": n_positive,
         "n_negative": n_negative,
         "n_ties": n_ties,
+        "n_cpss_defined": n_cpss_defined,
+        "mean_delta_cpss": mean_delta_cpss,
+        "n_positive_cpss": n_positive_cpss,
+        "n_negative_cpss": n_negative_cpss,
+        "n_ties_cpss": n_ties_cpss,
+        "accuracy_screen": accuracy_screen,
         "screen_valid": screen_valid,
         "screen_invalid_reasons": screen_invalid_reasons,
         "hypothesis_status": hypothesis_status,
+        # Unchanged since protocol v2 -- all-shared curves (never filtered to
+        # eligible examples). Kept under these exact keys for backward
+        # compatibility with the archived v2 decision JSON's consumers.
         "full_curve": {str(k): v for k, v in full_curve.items()},
         "rkv_curve": {str(k): v for k, v in rkv_curve.items()},
+        # Same data, explicit "all_shared" names (protocol v3) so a reader
+        # cannot mistake these for the eligible-only curves below.
+        "all_shared_full_curve": {str(k): v for k, v in full_curve.items()},
+        "all_shared_rkv_curve": {str(k): v for k, v in rkv_curve.items()},
+        "full_curve_eligible_only": {str(k): v for k, v in full_curve_eligible_only.items()},
+        "rkv_curve_eligible_only": {str(k): v for k, v in rkv_curve_eligible_only.items()},
+        "compression_rate_by_fraction": {str(k): v for k, v in compression_rate_by_fraction.items()},
+        "retention_summary_by_fraction": {str(k): v for k, v in retention_summary.items()},
         "match_rate_delta_rkv_minus_full": {
             str(k): v for k, v in match_rate_delta_rkv_minus_full(full_curve, rkv_curve).items()
         },
@@ -631,7 +975,12 @@ def build_fixed_trace_decision(
                 "pss_full": p.pss_full,
                 "pss_rkv": p.pss_rkv,
                 "delta_pss": p.delta_pss,
+                "cpss_full": p.cpss_full,
+                "cpss_rkv": p.cpss_rkv,
+                "delta_cpss": p.delta_cpss,
+                "active_scored_fractions": list(p.active_scored_fractions),
                 "rkv_actual_compression_at_f1": p.rkv_actual_compression_at_f1,
+                "rkv_meaningful_compression_at_f1": p.eligibility.rkv_meaningful_compression_at_f1,
                 "rkv_f1_retention_ratio": p.rkv_f1_retention_ratio,
             }
             for p in pair_results
@@ -817,11 +1166,39 @@ def run_fixed_trace_analysis(
     )
     _assert_shared_trace_source(full_probes, rkv_probes, trace_condition)
 
-    pairs = build_fixed_trace_pairs(base_records, full_probes, rkv_probes)
+    pairs = build_fixed_trace_pairs(base_records, full_probes, rkv_probes, settings=settings)
     full_curve = fixed_trace_curve_by_fraction(full_probes)
     rkv_curve = fixed_trace_curve_by_fraction(rkv_probes)
 
-    decision = build_fixed_trace_decision(len(pairs), pairs, full_curve, rkv_curve, settings)
+    # Protocol v3 (CHANGELOG.md 2026-07-17): a natural (non-fixed-trace)
+    # R-KV base run on the SAME manifest is required to even attempt a
+    # pilot accuracy screen -- only look for one when this stage actually
+    # requires the meaningful-compression gate (the v2/v3 discriminator);
+    # v2 stages never had a natural R-KV run to read here, and must keep
+    # producing byte-identical decision JSON (accuracy_screen stays None).
+    accuracy_screen: dict | None = None
+    if settings.require_meaningful_compression:
+        rkv_natural_path = output_dir / f"{replay_condition}.jsonl"
+        if rkv_natural_path.exists():
+            rkv_natural_records = list(read_jsonl(rkv_natural_path))
+            accuracy_screen = build_accuracy_screen(base_records, rkv_natural_records, settings)
+        else:
+            accuracy_screen = {
+                "statistical_note": (
+                    f"natural R-KV base file {rkv_natural_path} not found -- accuracy screen "
+                    "could not be built"
+                ),
+                "n_accuracy_pairs": 0,
+                "full_accuracy": None,
+                "rkv_accuracy": None,
+                "accuracy_difference_rkv_minus_full": None,
+                "pilot_accuracy_plausible": False,
+            }
+
+    decision = build_fixed_trace_decision(
+        len(pairs), pairs, full_curve, rkv_curve, settings,
+        full_probes=full_probes, rkv_probes=rkv_probes, accuracy_screen=accuracy_screen,
+    )
     out_path = Path("results/decisions") / f"{stage_name}_fixed_trace.json"
     write_json(out_path, decision)
     print(

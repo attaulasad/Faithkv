@@ -134,6 +134,48 @@ class FixedTraceSettings(BaseModel):
     min_actual_compression_rate: float = Field(default=0.7, ge=0.0, le=1.0)
     max_mean_f1_retention_ratio: float = Field(default=0.7, gt=0.0, le=1.0)
 
+    # --- Protocol v3 additions (2026-07-17, CHANGELOG.md) ---
+    # Every field below defaults to the value that reproduces protocol v2's
+    # ACTUAL behavior exactly (native probe_cache_mode, no meaningful-
+    # compression gate) — configs/early_gap_v2_b128.yaml and every existing
+    # test constructing FixedTraceSettings without these keyword arguments
+    # are byte-behavior-unchanged. A stage config opts into v3 behavior
+    # explicitly (configs/early_gap_v3_b128.yaml).
+    #
+    # A retention ratio at or below this counts as MEANINGFUL compression —
+    # never just "not exactly 1.0" (protocol v2's actual failure mode: an
+    # example at 0.9959 retention counted as "compression active" under the
+    # old any-eviction check, kvcot.analysis.fixed_trace.FixedTraceEligibility.
+    # rkv_actual_compression_at_f1, which remains available as a diagnostic
+    # but is never the only gate once require_meaningful_compression=True).
+    meaningful_retention_ceiling: float = Field(default=0.7, gt=0.0, le=1.0)
+    # When False (v2 default), eligibility is exactly the v2 semantics — any
+    # nonzero eviction at f=1 plus no answer-time eviction. When True (v3),
+    # eligibility ADDITIONALLY requires rkv_meaningful_compression_at_f1 and
+    # at least min_meaningfully_compressed_scored_fractions of the 7 scored
+    # fractions to individually clear meaningful_retention_ceiling.
+    require_meaningful_compression: bool = False
+    min_meaningfully_compressed_scored_fractions: int = Field(default=0, ge=0)
+    # kvcot.generation.replay.branch_and_probe's probe_cache_mode — "native"
+    # (v2) lets R-KV's own schedule keep compacting while the probe writes
+    # its answer (protocol v2's second failure mode, CHANGELOG.md
+    # 2026-07-17: 5 of 10 shared v2 examples failed eligibility via
+    # rkv_evicted_during_answer_probe). "frozen_at_cut" (v3) forces
+    # compression off for the duration of the probe, by construction.
+    probe_cache_mode: Literal["native", "frozen_at_cut"] = "native"
+    # Minimum number of the 7 scored fractions that must individually clear
+    # meaningful_retention_ceiling before compute_cpss/compute_delta_cpss
+    # (kvcot.analysis.fixed_trace) return a defined value for a pair, rather
+    # than None — CPSS is meaningless averaged over fractions where R-KV
+    # barely differs from FullKV.
+    min_compressed_scored_fractions_for_cpss: int = Field(default=2, ge=1)
+    # Natural (non-fixed-trace) paired base-accuracy screen gate
+    # (kvcot.analysis.fixed_trace.build_accuracy_screen) — a small-n
+    # stop/continue check, deliberately NOT the frozen primary
+    # paired_accuracy_diff (§8.5 of CLAUDE.md/the build brief remains the
+    # only test allowed to claim distributional accuracy preservation).
+    max_pilot_accuracy_drop: float = Field(default=0.10, ge=0.0, le=1.0)
+
 
 class StageConfig(BaseModel):
     stage_name: str

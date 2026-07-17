@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from kvcot.config import config_identity, load_stage_config
@@ -24,11 +25,44 @@ from kvcot.runtime import (
     upstream_submodule_commit,
 )
 from kvcot.schemas import RunManifest, utc_now_iso
-from kvcot.utils.hashing import sha256_bytes, sha256_int_ids, sha256_json
+from kvcot.utils.hashing import sha256_bytes, sha256_file, sha256_int_ids, sha256_json
 from kvcot.utils.io import read_existing_record_ids, write_json
 from kvcot.utils.logging import get_logger
 
 logger = get_logger("kvcot.cli")
+
+
+def _write_run_manifest(stage_name: str, label: str, manifest) -> None:
+    """Protocol v3 fix (CHANGELOG.md 2026-07-17): every prior version of this
+    function wrote to a FIXED filename inside `stage.output_dir` — which is
+    itself under `results/raw/...`, gitignored per `README.md`'s own
+    documented layout ("raw/ is gitignored; run_manifests/, decisions/,
+    tables/, figures/ are committed"). Two independent defects followed from
+    that: (1) `results/run_manifests/` (the location README actually
+    promises "one JSON per invocation, committed") never received anything
+    but its `.gitkeep`, and (2) even setting the location aside, a fixed
+    filename meant a `--resume`d or re-run invocation silently overwrote the
+    previous invocation's manifest — e.g. a one-example GPU gate's manifest
+    getting clobbered by the subsequent full-run invocation, losing the
+    provenance record of the gate ever having run at all.
+
+    Fixed by writing to the documented `results/run_manifests/` directory
+    with a filename that embeds the exact invocation timestamp, so every
+    invocation gets its own immutable file and none are ever overwritten.
+
+    The timestamp alone is not sufficient for uniqueness: `datetime.now()`'s
+    resolution can be coarser than the time between two calls in the same
+    process (observed on Windows — two manifests written back-to-back can
+    land on the identical microsecond tick), which would silently overwrite
+    one manifest with the other, exactly the bug this function exists to
+    fix. A short random suffix guarantees uniqueness regardless of clock
+    resolution.
+    """
+    import secrets
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    out_path = Path("results/run_manifests") / f"{stage_name}_{label}_{timestamp}_{secrets.token_hex(4)}.json"
+    write_json(out_path, manifest.model_dump(mode="json") if hasattr(manifest, "model_dump") else manifest)
 
 
 def _add_common_run_args(p: argparse.ArgumentParser) -> None:
@@ -487,7 +521,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
         wall_time_seconds=time.monotonic() - run_start,
         peak_vram_bytes=(torch.cuda.max_memory_allocated() if torch.cuda.is_available() else None),
     )
-    write_json(Path(stage.output_dir) / f"{condition}_generate_manifest.json", manifest.model_dump(mode="json"))
+    _write_run_manifest(stage.stage_name, f"generate_{condition}", manifest)
 
     return 0
 
@@ -707,7 +741,7 @@ def cmd_replay_probe(args: argparse.Namespace) -> int:
         wall_time_seconds=time.monotonic() - run_start,
         peak_vram_bytes=(torch.cuda.max_memory_allocated() if torch.cuda.is_available() else None),
     )
-    write_json(Path(stage.output_dir) / f"{condition}_replay_probe_manifest.json", manifest.model_dump(mode="json"))
+    _write_run_manifest(stage.stage_name, f"replay_probe_{condition}", manifest)
 
     return 0
 
@@ -884,6 +918,7 @@ def cmd_replay_fixed_trace(args: argparse.Namespace) -> int:
                 model, DynamicCache(), snap, close_ids, fixed_suffix_ids,
                 probe_max_new_tokens, tokenizer.eos_token_id, device,
                 stop_predicate=boxed_answer_complete,
+                probe_cache_mode=stage.fixed_trace.probe_cache_mode,
             )
             # §7: extraction must run over the RECONSTRUCTED text (teacher-
             # forced boxed-answer prefix + generated tokens), never the
@@ -911,6 +946,13 @@ def cmd_replay_fixed_trace(args: argparse.Namespace) -> int:
             actual_compression_at_cut = any(
                 cache_length < fullkv_equivalent_slots for cache_length in snapshot_cache_lengths
             )
+            # Protocol v3 (CHANGELOG.md 2026-07-17): a SUBSTANTIAL measured
+            # retention drop, never just "not exactly 1.0" — see
+            # kvcot.analysis.fixed_trace.FixedTraceEligibility.
+            # rkv_meaningful_compression_at_f1's docstring for why
+            # actual_compression_at_cut alone overstated real compression in
+            # protocol v2 (a 0.9959-retention example counted as "active").
+            meaningful_compression_at_cut = retention_ratio <= stage.fixed_trace.meaningful_retention_ceiling
             replay_retention_at_cut = RetentionSummary(
                 fullkv_equivalent_slots=fullkv_equivalent_slots,
                 physical_cache_slots_per_layer=snapshot_cache_lengths,
@@ -945,6 +987,7 @@ def cmd_replay_fixed_trace(args: argparse.Namespace) -> int:
                 "probe_stop_reason": result.stop_reason,
                 "replay_retention_at_cut": replay_retention_at_cut,
                 "actual_compression_at_cut": actual_compression_at_cut,
+                "meaningful_compression_at_cut": meaningful_compression_at_cut,
                 "probe_cache_length_final_per_layer": result.final_cache_lengths_per_layer,
                 "probe_actual_eviction_during_answer": probe_actual_eviction_during_answer,
             }
@@ -998,6 +1041,12 @@ def cmd_replay_fixed_trace(args: argparse.Namespace) -> int:
                 probe_cap_hit=(item["probe_stop_reason"] == "max_new_tokens"),
                 replay_retention_at_cut=item["replay_retention_at_cut"],
                 actual_compression_at_cut=item["actual_compression_at_cut"],
+                protocol_version=("v3" if stage.fixed_trace.probe_cache_mode == "frozen_at_cut" else "v2"),
+                probe_cache_mode=stage.fixed_trace.probe_cache_mode,
+                meaningful_compression_at_cut=item["meaningful_compression_at_cut"],
+                compressed_scored_fraction=(
+                    fraction in lock.probes.fractions_scored and item["meaningful_compression_at_cut"]
+                ),
                 probe_cache_length_final_per_layer=item["probe_cache_length_final_per_layer"],
                 probe_actual_eviction_during_answer=item["probe_actual_eviction_during_answer"],
                 normalized_f1_anchor_answer=f1_answer,
@@ -1032,10 +1081,7 @@ def cmd_replay_fixed_trace(args: argparse.Namespace) -> int:
         wall_time_seconds=time.monotonic() - run_start,
         peak_vram_bytes=(torch.cuda.max_memory_allocated() if torch.cuda.is_available() else None),
     )
-    write_json(
-        Path(stage.output_dir) / f"{replay_condition}_on_{trace_condition}_replay_fixed_trace_manifest.json",
-        manifest.model_dump(mode="json"),
-    )
+    _write_run_manifest(stage.stage_name, f"replay_fixed_trace_{replay_condition}_on_{trace_condition}", manifest)
     return 0
 
 
@@ -1473,7 +1519,115 @@ def cmd_inspect_fixed_trace(args: argparse.Namespace) -> int:
                 "a smaller budget or a longer-trace manifest, do not weaken the threshold."
             )
             return 1
+
+    if getattr(args, "write_selection", False):
+        if stage.fixed_trace is None:
+            raise SystemExit(f"{stage.stage_name}: --write-selection requires stage fixed_trace settings")
+        if budget is None:
+            raise SystemExit(f"{stage.stage_name}: --write-selection requires stage.rkv_budgets[0]")
+        _write_fixed_trace_selection(
+            stage=stage, lock=lock, records=records, base_path=base_path,
+            budget=budget, args=args,
+        )
     return 0
+
+
+def _write_fixed_trace_selection(stage, lock, records: list[dict], base_path: Path, budget: int, args) -> None:
+    """Protocol v3 (CHANGELOG.md 2026-07-17): deterministic, outcome-blind
+    trace selection using ONLY this FullKV base file's own correctness/cap/
+    think-parse validity plus `kvcot.analysis.rkv_schedule`'s PREDICTED
+    retention — never any fixed-trace probe answer, PSS, or CPSS value (a
+    selection built from outcomes would not be a pre-registered screen; it
+    would let the data that determines which examples get analyzed also
+    influence what the analysis finds). Candidates are sorted by
+    `source_row_index` and truncated at `--max-selected` (if given) — sort
+    key and truncation are both independent of anything this function
+    computes about a candidate's own predicted retention, so an unlimited
+    run and a truncated run would rank identically.
+    """
+    from kvcot.analysis.rkv_schedule import meaningfully_compressed_fractions, predict_retention_by_fraction
+    from kvcot.probes.early_answering import ThinkSpanResult, absolute_cut_position
+
+    ft = stage.fixed_trace
+    max_selected = getattr(args, "max_selected", None)
+    scored_fractions = set(lock.probes.fractions_scored)
+    candidates = []
+    n_rejected_invalid = 0
+    for r in records:
+        span_info = r["think_span"]
+        if r.get("is_correct") is not True or r.get("cap_hit"):
+            n_rejected_invalid += 1
+            continue
+        if span_info["think_parse_status"] not in _THINK_PARSE_OK_STATUSES:
+            n_rejected_invalid += 1
+            continue
+        span = ThinkSpanResult(
+            think_start_index=span_info["think_start_index"],
+            think_end_index=span_info["think_end_index"],
+            think_parse_status=span_info["think_parse_status"],
+            generation_prompt_preopened_think=span_info["generation_prompt_preopened_think"],
+        )
+        prompt_length = len(r["prompt_token_ids"])
+        cut_positions = {f: prompt_length + absolute_cut_position(span, f) for f in lock.probes.fractions_all}
+        predicted_retention = predict_retention_by_fraction(
+            prompt_length=prompt_length, target_absolute_positions=cut_positions,
+            budget=budget, divide_length=lock.rkv.divide_length,
+        )
+        active = meaningfully_compressed_fractions(predicted_retention, ft.meaningful_retention_ceiling)
+        active_scored = active & scored_fractions
+        f1_retention = predicted_retention.get(1.0)
+        predicted_eligible = (
+            f1_retention is not None
+            and f1_retention <= ft.meaningful_retention_ceiling
+            and len(active_scored) >= ft.min_meaningfully_compressed_scored_fractions
+        )
+        candidates.append(
+            {
+                "source_row_index": r["dataset"]["source_row_index"],
+                "global_seed": r["global_seed"],
+                "base_record_id": r["record_id"],
+                "predicted_retention_by_fraction": {str(k): v for k, v in predicted_retention.items()},
+                "predicted_active_scored_fraction_count": len(active_scored),
+                "predicted_eligible": predicted_eligible,
+            }
+        )
+
+    # Sort/truncate using ONLY source_row_index -- never predicted_eligible
+    # or any retention value, so truncation cannot bias which predicted-
+    # eligible candidates happen to be kept.
+    candidates.sort(key=lambda c: c["source_row_index"])
+    if max_selected is not None:
+        candidates = candidates[:max_selected]
+
+    selected = [c for c in candidates if c["predicted_eligible"]]
+    for c in candidates:
+        c["selected"] = c["predicted_eligible"]
+
+    selection = {
+        "stage_name": stage.stage_name,
+        "config_path": args.config,
+        "config_sha256": config_identity(args.config),
+        "base_path": str(base_path),
+        "base_file_sha256": sha256_file(base_path),
+        "budget": budget,
+        "divide_length": lock.rkv.divide_length,
+        "meaningful_retention_ceiling": ft.meaningful_retention_ceiling,
+        "min_meaningfully_compressed_scored_fractions": ft.min_meaningfully_compressed_scored_fractions,
+        "max_selected": max_selected,
+        "n_candidates_considered": len(records),
+        "n_rejected_invalid_base": n_rejected_invalid,
+        "n_ranked": len(candidates),
+        "n_selected": len(selected),
+        "selected_source_row_indices": [c["source_row_index"] for c in selected],
+        "selected_base_record_ids": [c["base_record_id"] for c in selected],
+        "candidates": candidates,
+    }
+    out_path = Path("results/selections") / f"{stage.stage_name}.json"
+    write_json(out_path, selection)
+    print(
+        f"wrote {out_path}: n_ranked={len(candidates)} n_selected={len(selected)} "
+        f"(of {len(records)} base records, {n_rejected_invalid} rejected on correctness/cap/think-parse)"
+    )
 
 
 # ------------------------------------------------------------------ calibrate-budget
@@ -1655,6 +1809,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", required=True)
     p.add_argument("--trace-condition", default="full")
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument(
+        "--write-selection", action="store_true",
+        help="protocol v3: write results/selections/{stage_name}.json using kvcot.analysis.rkv_schedule's "
+        "predicted retention (deterministic, outcome-blind -- never a fixed-trace probe answer/PSS/CPSS)",
+    )
+    p.add_argument(
+        "--max-selected", type=int, default=None,
+        help="truncate ranked candidates (sorted by source_row_index) to at most this many before "
+        "reporting predicted_eligible; omit for no truncation",
+    )
     p.set_defaults(func=cmd_inspect_fixed_trace)
 
     p = sub.add_parser("calibrate-budget")

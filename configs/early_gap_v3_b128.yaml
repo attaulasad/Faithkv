@@ -1,0 +1,83 @@
+# Fixed-trace prefix-sufficiency screen, protocol v3, candidate budget=128 —
+# secondary, additive diagnostic (kvcot.analysis.fixed_trace), NOT a Stage
+# 0-2 config and NOT part of the frozen stage funnel (docs/EXPERIMENT.md
+# §4). Uses `kvcot replay-fixed-trace`/`analyze-fixed-trace`, never
+# `replay-probe`.
+#
+# Why protocol v3, not another run of early_gap_v2_b128.yaml (CHANGELOG.md
+# 2026-07-17): the real v2 GPU screen (n_shared=10, seed=42) came back
+# screen_valid=false — n_eligible=3 (< min_eligible_examples=5) and
+# mean_f1_rkv_retention_ratio=0.7456 (> max_mean_f1_retention_ratio=0.7).
+# Diagnosis of the raw per-example records (committed:
+# results/decisions/early_gap_v2_b128_fixed_trace.json) found two fixable
+# causes, neither a rejection of the hypothesis:
+#   1. "actual_compression_at_cut" (any nonzero eviction) let a
+#      0.9959-retention example count as "compression active" -- not a
+#      substantial compression event. Fixed here via
+#      require_meaningful_compression + meaningful_retention_ceiling.
+#   2. 5 of 10 examples failed via rkv_evicted_during_answer_probe -- R-KV
+#      kept compacting while the probe wrote its own answer, contaminating
+#      the very thing being measured. Fixed here via
+#      probe_cache_mode: frozen_at_cut (kvcot.generation.replay.
+#      branch_and_probe), which forces compression off for the duration of
+#      the probe and hard-asserts the cache did not move.
+#
+# This is a NEW stage identity (stage_name, output_dir) -- never a
+# resumption of early_gap_v2_b128.yaml's output_dir. Schema 1.4.0 rejects
+# 1.3.0-shaped records outright if that were ever attempted.
+#
+# Required run order (docs/GPU_VALIDATION_PLAN.md, protocol v3 section):
+#   1. `kvcot generate --condition full --limit 50` (natural FullKV traces).
+#   2. `kvcot inspect-fixed-trace --write-selection` (CPU-only; predicts
+#      retention via kvcot.analysis.rkv_schedule and writes
+#      results/selections/early_gap_v3_b128.json BEFORE any R-KV replay —
+#      stop if fewer than min_eligible_examples candidates predict eligible).
+#   3. `kvcot generate --condition rkv_b128 --limit 50` (natural R-KV traces,
+#      SAME 50 problems -- required for the accuracy screen below).
+#   4. `kvcot analyze-fixed-trace` reads the natural rkv_b128.jsonl
+#      automatically (require_meaningful_compression=true triggers it) and
+#      reports pilot_accuracy_plausible -- stop if false.
+#   5. `kvcot replay-fixed-trace --trace-condition full --replay-condition full`
+#      and `--replay-condition rkv_b128`, restricted to the selected
+#      examples (via --problem-index per selected source_row_index, or a
+#      future --selection-file flag), starting with ONE example as the
+#      frozen-probe/schedule-prediction GPU gate before the rest.
+stage_name: early_gap_v3_b128
+lock_config_path: configs/lock.yaml
+dataset_manifest: data/manifests/gsm8k_calibration_50.jsonl
+conditions: [full, rkv_b128]
+rkv_budgets: [128]
+output_dir: results/raw/protocol_v3/early_gap_b128
+limit: 50
+seeds_override: [42]
+
+fixed_trace:
+  probe_max_new_tokens: 64
+  require_boxed_extraction: true
+  min_eligible_examples: 5
+  min_actual_compression_rate: 0.7
+  max_mean_f1_retention_ratio: 0.7
+  # --- protocol v3 additions (CHANGELOG.md 2026-07-17) ---
+  meaningful_retention_ceiling: 0.7
+  require_meaningful_compression: true
+  min_meaningfully_compressed_scored_fractions: 2
+  probe_cache_mode: frozen_at_cut
+  min_compressed_scored_fractions_for_cpss: 2
+  max_pilot_accuracy_drop: 0.10
+
+notes: >
+  Up to fifty natural FullKV traces generated; kvcot.analysis.rkv_schedule
+  then predicts realized retention per example (CPU-only, before any R-KV
+  replay) to select the subset actually worth spending GPU time on.
+  require_meaningful_compression=true means eligibility additionally
+  requires a SUBSTANTIAL measured retention drop (<= 0.7), not just a
+  nonzero one, and requires at least 2 of the 7 scored fractions to
+  individually clear that ceiling. probe_cache_mode=frozen_at_cut prevents
+  R-KV from compacting again while a probe writes its own answer, by
+  construction (hard runtime assertion, not post-hoc filtering). A natural
+  rkv_b128 generation on the SAME 50 problems is required before
+  analyze-fixed-trace can report a real pilot_accuracy_plausible value --
+  do not skip it. If budget=128 still cannot clear both eligibility and
+  accuracy gates on this manifest, do not weaken any threshold — move to a
+  longer-trace manifest (MATH-500) once MATH answer-equivalence is
+  implemented, per the same discipline as protocol v2's own notes.

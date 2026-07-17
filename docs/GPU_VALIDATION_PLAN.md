@@ -229,6 +229,78 @@ If any of these fail, stop and fix the specific cause rather than running
 the full n=10 screen — the full screen only adds sample size to a result
 that is already known-invalid at n=1.
 
+### Protocol v2's real result, and why protocol v3 exists (2026-07-17)
+
+The one-example gate above passed and the full n=10 screen under
+`configs/early_gap_v2_b128.yaml` ran for real:
+`results/decisions/early_gap_v2_b128_fixed_trace.json` —
+`n_shared=10 n_eligible=3 mean_f1_rkv_retention_ratio=0.7456
+screen_valid=false hypothesis_status=not_tested`. This is a valid negative
+screening outcome (both conditions' base accuracy 9/10, zero cap hits, all
+180 fixed-trace probes produced a valid boxed answer, every correctness
+gate above passed) — not evidence against the hypothesis, since the screen
+itself did not clear its own validity bar. Two diagnosed, fixable causes
+(full detail in `CHANGELOG.md`'s 2026-07-17 entry):
+
+1. `actual_compression_at_cut` (any nonzero eviction) let a
+   0.9959-retention example count as "compression active" — R-KV's
+   periodic `divide_length=128` schedule can cross a compaction checkpoint
+   long before the cache has accumulated enough tokens for the eviction to
+   matter (`docs/UPSTREAM_AUDIT.md` H4).
+2. 5 of 10 shared examples failed via `rkv_evicted_during_answer_probe` — a
+   real compaction event fired while the probe was teacher-forcing the
+   closing marker/suffix/greedily generating its own answer, after the
+   snapshot the probe was supposed to measure.
+
+### Protocol v3 (use this, not v2, for any new run)
+
+`configs/early_gap_v3_b128.yaml` — new `stage_name`/`output_dir`, never a
+resumption of protocol v2's `results/raw/protocol_v2/early_gap_b128`.
+Fixes both causes above: `probe_cache_mode: frozen_at_cut`
+(`kvcot.generation.replay.branch_and_probe`) forces R-KV compression off
+for the duration of every probe and hard-asserts the cache did not move;
+`require_meaningful_compression: true` with `meaningful_retention_ceiling:
+0.7` requires a SUBSTANTIAL measured retention drop, never just a nonzero
+one. Required order:
+
+```bash
+kvcot generate --config configs/early_gap_v3_b128.yaml --condition full          # 50 natural FullKV traces
+kvcot inspect-fixed-trace --config configs/early_gap_v3_b128.yaml --trace-condition full --write-selection
+# ^ CPU-only. Predicts realized retention per example via
+#   kvcot.analysis.rkv_schedule BEFORE any R-KV replay and writes
+#   results/selections/early_gap_v3_b128.json. Stop here if
+#   n_selected < fixed_trace.min_eligible_examples.
+kvcot generate --config configs/early_gap_v3_b128.yaml --condition rkv_b128      # SAME 50 problems, natural R-KV
+kvcot analyze-fixed-trace --config configs/early_gap_v3_b128.yaml --replay-condition rkv_b128
+# ^ automatically reads the natural rkv_b128.jsonl above (require_meaningful_compression
+#   triggers this) and reports pilot_accuracy_plausible in the decision JSON's
+#   "accuracy_screen" key. Stop here if it is false.
+```
+
+Then run the frozen-probe/schedule-prediction one-example gate (below)
+before replaying the rest of the selected examples with
+`replay-fixed-trace --trace-condition full --replay-condition full` and
+`--replay-condition rkv_b128`.
+
+**One-example frozen-probe/schedule-prediction gate — mandatory, before any
+full v3 replay.** This is IN ADDITION to (does not replace) the one-example
+gate two sections above (extraction/correctness/no-cap/clean-tree still
+apply identically). Additionally confirm, for that one example:
+
+- `probe_cache_mode` on every written `FixedTraceProbeRecord` is
+  `"frozen_at_cut"`, and `protocol_version` is `"v3"`.
+- No `RuntimeError` was raised by `branch_and_probe` (it would have aborted
+  the run outright — a silent pass here means the frozen-cache assertion
+  held for real, not just in unit tests).
+- `kvcot.analysis.rkv_schedule.simulate_rkv_cache_lengths`'s prediction for
+  this example (from `results/selections/early_gap_v3_b128.json`) matches
+  the example's own written `replay_retention_at_cut.instantaneous_
+  retention_ratio` at every fraction to within rounding. A disagreement of
+  even one token means the CPU simulator does not actually reproduce real
+  R-KV behavior on this build/version combination — stop and re-derive the
+  simulator against the currently-pinned upstream commit before trusting it
+  for selection on any further example.
+
 ### GPU test process isolation (§ Step 13/14, 2026-07-16)
 
 `tests/integration/test_replay_gpu.py` and `test_probe_stability_gpu.py` now

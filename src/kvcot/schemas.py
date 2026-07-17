@@ -11,7 +11,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-SCHEMA_VERSION = "1.3.0"
+SCHEMA_VERSION = "1.4.0"
 
 Condition = str  # "full" | "patched_noop" | f"rkv_b{budget}" — validated by callers against configs, not hardcoded here
 ThinkParseStatus = Literal[
@@ -107,7 +107,7 @@ class ThinkSpanInfo(BaseModel):
 
 
 class BaseRunRecord(BaseModel):
-    schema_version: Literal["1.3.0"] = SCHEMA_VERSION
+    schema_version: Literal["1.4.0"] = SCHEMA_VERSION
     record_id: str
     parent_record_id: str | None = None
     record_type: Literal["base_generation"] = "base_generation"
@@ -159,7 +159,7 @@ class BaseRunRecord(BaseModel):
 
 
 class ProbeRunRecord(BaseModel):
-    schema_version: Literal["1.3.0"] = SCHEMA_VERSION
+    schema_version: Literal["1.4.0"] = SCHEMA_VERSION
     record_id: str
     parent_record_id: str  # the base_record_id this probe branched from
     record_type: Literal["probe"] = "probe"
@@ -208,7 +208,7 @@ class FixedTraceProbeRecord(BaseModel):
     why that distinction is the entire point of this record type.
     """
 
-    schema_version: Literal["1.3.0"] = SCHEMA_VERSION
+    schema_version: Literal["1.4.0"] = SCHEMA_VERSION
     record_id: str
     parent_record_id: str  # the base_record_id this probe branched from
     record_type: Literal["fixed_trace_probe"] = "fixed_trace_probe"
@@ -287,6 +287,40 @@ class FixedTraceProbeRecord(BaseModel):
     replay_retention_at_cut: RetentionSummary
     actual_compression_at_cut: bool
 
+    # Protocol v3 (2026-07-17, CHANGELOG.md) additions. Default values match
+    # protocol v2's actual behavior exactly, so historic v2 fixtures/dicts
+    # that omit these fields still validate as before -- these are additive,
+    # not a v2 behavior change.
+    #
+    # "v2" (event-count-then-any-eviction eligibility, native probe_cache_mode)
+    # vs "v3" (meaningful-compression eligibility available, frozen_at_cut
+    # probe_cache_mode used in practice) -- lets analysis code and future
+    # readers tell which protocol produced a given record without having to
+    # cross-reference config_sha256 against a stage-config archive.
+    protocol_version: Literal["v2", "v3"] = "v2"
+    # Whether R-KV compression was forcibly disabled while this probe fed its
+    # close-marker/control-suffix/generated-answer tokens (kvcot.generation.
+    # replay.branch_and_probe's probe_cache_mode). "native" (v2 behavior) lets
+    # the model's own schedule keep compacting during answer generation --
+    # exactly the failure mode probe_actual_eviction_during_answer exists to
+    # DETECT after the fact. "frozen_at_cut" (v3) prevents it from happening
+    # at all, by construction -- probe_actual_eviction_during_answer should
+    # always be False under frozen_at_cut (enforced by a hard runtime
+    # assertion in branch_and_probe itself, not just recorded here).
+    probe_cache_mode: Literal["native", "frozen_at_cut"] = "native"
+    # rkv_f1_retention_ratio (== replay_retention_at_cut.instantaneous_retention_ratio
+    # for the f=1 record) <= FixedTraceSettings.meaningful_retention_ceiling --
+    # the "any eviction" ambiguity that let a 0.9959-retention example count as
+    # "compression active" in v2 (kvcot.analysis.fixed_trace.FixedTraceEligibility.
+    # rkv_actual_compression_at_f1) does not apply here: this field requires a
+    # SUBSTANTIAL, thresholded retention drop, never just a nonzero one.
+    meaningful_compression_at_cut: bool = False
+    # Whether THIS record's own fraction is one of the 7 scored fractions AND
+    # meaningfully compressed -- used to build the CPSS active-fraction set
+    # (kvcot.analysis.fixed_trace.compute_cpss) without recomputing the
+    # PROBE_FRACTIONS_SCORED membership check at every call site.
+    compressed_scored_fraction: bool = False
+
     # Cache state AFTER this probe's own greedy answer decoding (not just at
     # the snapshot it branched from) — needed to detect a further eviction
     # that happened WHILE writing the answer, which the reasoning-cut
@@ -315,7 +349,7 @@ class FixedTraceProbeRecord(BaseModel):
 
 
 class RunManifest(BaseModel):
-    schema_version: Literal["1.3.0"] = SCHEMA_VERSION
+    schema_version: Literal["1.4.0"] = SCHEMA_VERSION
     command: str
     config_path: str
     config_sha256: str
