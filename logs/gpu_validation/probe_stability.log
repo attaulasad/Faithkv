@@ -1,0 +1,68 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.1.1, pluggy-1.6.0 -- /workspace/faithkv/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /workspace/faithkv
+configfile: pytest.ini
+plugins: cov-7.1.0
+collecting ... collected 2 items
+
+tests/integration/test_probe_stability_gpu.py::test_f1_probe_stability_meets_threshold[full] FAILED [ 50%]
+tests/integration/test_probe_stability_gpu.py::test_f1_probe_stability_meets_threshold[rkv_b256] FAILED [100%]
+
+=================================== FAILURES ===================================
+________________ test_f1_probe_stability_meets_threshold[full] _________________
+
+condition = 'full'
+
+    @pytest.mark.gpu
+    @pytest.mark.parametrize("condition", ["full", f"rkv_b{RKV_BUDGET}"])
+    def test_f1_probe_stability_meets_threshold(condition):
+        result = _run_in_subprocess(condition)
+        assert result["n_valid"] > 0, "no valid (non-cap-hit, both-extractable) examples to evaluate stability on"
+        rate = result["n_stable"] / result["n_valid"]
+        print(f"condition={condition}: f=1 stability rate = {rate:.3f} ({result['n_stable']}/{result['n_valid']})")
+>       assert rate >= STABILITY_THRESHOLD, (
+            f"condition={condition} f=1 stability rate {rate:.3f} is below the {STABILITY_THRESHOLD} "
+            "threshold (§10 Stage 0). Per the build brief: do not tune this statistic — inspect the "
+            "control suffix (kvcot.probes.templates.CONTROL_SUFFIX_TEXT) and the probe decoding config "
+            "first, then report and ask before changing anything."
+        )
+E       AssertionError: condition=full f=1 stability rate 0.700 is below the 0.9 threshold (§10 Stage 0). Per the build brief: do not tune this statistic — inspect the control suffix (kvcot.probes.templates.CONTROL_SUFFIX_TEXT) and the probe decoding config first, then report and ask before changing anything.
+E       assert 0.7 >= 0.9
+
+tests/integration/test_probe_stability_gpu.py:160: AssertionError
+----------------------------- Captured stdout call -----------------------------
+condition=full: f=1 stability rate = 0.700 (7/10)
+----------------------------- Captured stderr call -----------------------------
+`cache.key_cache[idx]` is deprecated and will be removed in v4.56.0. Use `cache.layers[idx].keys` instead.
+`cache.value_cache[idx]` is deprecated and will be removed in v4.56.0. Use `cache.layers[idx].values` instead.
+______________ test_f1_probe_stability_meets_threshold[rkv_b256] _______________
+
+condition = 'rkv_b256'
+
+    @pytest.mark.gpu
+    @pytest.mark.parametrize("condition", ["full", f"rkv_b{RKV_BUDGET}"])
+    def test_f1_probe_stability_meets_threshold(condition):
+        result = _run_in_subprocess(condition)
+        assert result["n_valid"] > 0, "no valid (non-cap-hit, both-extractable) examples to evaluate stability on"
+        rate = result["n_stable"] / result["n_valid"]
+        print(f"condition={condition}: f=1 stability rate = {rate:.3f} ({result['n_stable']}/{result['n_valid']})")
+>       assert rate >= STABILITY_THRESHOLD, (
+            f"condition={condition} f=1 stability rate {rate:.3f} is below the {STABILITY_THRESHOLD} "
+            "threshold (§10 Stage 0). Per the build brief: do not tune this statistic — inspect the "
+            "control suffix (kvcot.probes.templates.CONTROL_SUFFIX_TEXT) and the probe decoding config "
+            "first, then report and ask before changing anything."
+        )
+E       AssertionError: condition=rkv_b256 f=1 stability rate 0.700 is below the 0.9 threshold (§10 Stage 0). Per the build brief: do not tune this statistic — inspect the control suffix (kvcot.probes.templates.CONTROL_SUFFIX_TEXT) and the probe decoding config first, then report and ask before changing anything.
+E       assert 0.7 >= 0.9
+
+tests/integration/test_probe_stability_gpu.py:160: AssertionError
+----------------------------- Captured stdout call -----------------------------
+condition=rkv_b256: f=1 stability rate = 0.700 (7/10)
+----------------------------- Captured stderr call -----------------------------
+`cache.key_cache[idx]` is deprecated and will be removed in v4.56.0. Use `cache.layers[idx].keys` instead.
+`cache.value_cache[idx]` is deprecated and will be removed in v4.56.0. Use `cache.layers[idx].values` instead.
+=========================== short test summary info ============================
+FAILED tests/integration/test_probe_stability_gpu.py::test_f1_probe_stability_meets_threshold[full]
+FAILED tests/integration/test_probe_stability_gpu.py::test_f1_probe_stability_meets_threshold[rkv_b256]
+======================== 2 failed in 673.50s (0:11:13) =========================
