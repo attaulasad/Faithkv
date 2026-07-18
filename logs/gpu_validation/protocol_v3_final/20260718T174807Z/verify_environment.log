@@ -1,0 +1,16 @@
+== kvcot environment verification ==
+python: Python 3.12.12
+python: 3.12.12 (ok)
+torch: 2.6.0+cu124 (ok)
+torch cuda build: 12.4 (ok)
+cuda device: NVIDIA GeForce RTX 3090 (ok)
+bf16: supported (ok)
+torch CXX11 ABI: False (ok)
+transformers: 4.55.4 (ok)
+flash_attn: 2.7.4.post1 (ok)
+flash-attn BF16 causal=True kernel: executed, shape and finiteness ok
+== checking pinned submodule ==
+submodule pinned correctly: 45eaa7d69d20b7388321f077020a610d9afb65bd
+== checking requirements-lock.txt against installed versions ==
+requirements-lock.txt matches installed state-critical packages (direct-URL pins included)
+== environment verification passed ==

@@ -1,0 +1,84 @@
+Sat Jul 18 18:19:15 UTC 2026
+
+Branch: results/protocol-v3-complete-20260718T174807Z
+Audited base: dc99a0dc70a8e898c21a76cd2c8d37be1c557488
+Experiment HEAD: 9a8940934de623839faf6886397a53ed51a3462b
+R-KV: 45eaa7d69d20b7388321f077020a610d9afb65bd
+
+Sat Jul 18 18:19:15 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.159.03             Driver Version: 580.159.03     CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3090        On  |   00000000:01:00.0 Off |                  N/A |
+|  0%   53C    P8             28W /  300W |       1MiB /  24576MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2024 NVIDIA Corporation
+Built on Thu_Mar_28_02:18:24_PDT_2024
+Cuda compilation tools, release 12.4, V12.4.131
+Build cuda_12.4.r12.4/compiler.34097967_0
+
+Python 3.12.12
+Name: torch
+Version: 2.6.0+cu124
+Summary: Tensors and Dynamic neural networks in Python with strong GPU acceleration
+Home-page: https://pytorch.org/
+Author: PyTorch Team
+Author-email: packages@pytorch.org
+License: BSD-3-Clause
+Location: /workspace/Faithkv-v3-20260718T174807Z/.venv/lib/python3.12/site-packages
+Requires: filelock, fsspec, jinja2, networkx, nvidia-cublas-cu12, nvidia-cuda-cupti-cu12, nvidia-cuda-nvrtc-cu12, nvidia-cuda-runtime-cu12, nvidia-cudnn-cu12, nvidia-cufft-cu12, nvidia-curand-cu12, nvidia-cusolver-cu12, nvidia-cusparse-cu12, nvidia-cusparselt-cu12, nvidia-nccl-cu12, nvidia-nvjitlink-cu12, nvidia-nvtx-cu12, setuptools, sympy, triton, typing-extensions
+Required-by: accelerate, flash_attn
+---
+Name: transformers
+Version: 4.55.4
+Summary: State-of-the-art Machine Learning for JAX, PyTorch and TensorFlow
+Home-page: https://github.com/huggingface/transformers
+Author: The Hugging Face team (past and future) with the help of all our contributors (https://github.com/huggingface/transformers/graphs/contributors)
+Author-email: transformers@huggingface.co
+License: Apache 2.0 License
+Location: /workspace/Faithkv-v3-20260718T174807Z/.venv/lib/python3.12/site-packages
+Requires: filelock, huggingface-hub, numpy, packaging, pyyaml, regex, requests, safetensors, tokenizers, tqdm
+Required-by: rkv
+---
+Name: flash_attn
+Version: 2.7.4.post1
+Summary: Flash Attention: Fast and Memory-Efficient Exact Attention
+Home-page: https://github.com/Dao-AILab/flash-attention
+Author: Tri Dao
+Author-email: tri@tridao.me
+License: 
+Location: /workspace/Faithkv-v3-20260718T174807Z/.venv/lib/python3.12/site-packages
+Requires: einops, torch
+Required-by: 
+
+    50 results/raw/protocol_v3/early_gap_b128/full.jsonl
+     9 results/raw/protocol_v3/early_gap_b128/full_on_full_fixed_trace_probes.jsonl
+    50 results/raw/protocol_v3/early_gap_b128/rkv_b128.jsonl
+     9 results/raw/protocol_v3/early_gap_b128/rkv_b128_on_full_fixed_trace_probes.jsonl
+   118 total
+
+bc88ad8aa5a9009b46d20b73e805434bc125fd490fcdd461a0ed20489d49f792  results/raw/protocol_v3/early_gap_b128/full.jsonl
+8200e4e394ca688aa8ccc83fd7886be9575c5f2f23ab8564486e0a707e75284c  results/raw/protocol_v3/early_gap_b128/full_on_full_fixed_trace_probes.jsonl
+a9ecf2a2a7d132c0139e6c439f057530773d2abdc0419e5e68115e8c87999927  results/raw/protocol_v3/early_gap_b128/rkv_b128.jsonl
+34f5fa30e7ceee3292691821c7966bee6177d4bc4ec73e487bb0eb2c2117817d  results/raw/protocol_v3/early_gap_b128/rkv_b128_on_full_fixed_trace_probes.jsonl
+
+ ? third_party/R-KV
+?? results/decisions/early_gap_v3_b128_accuracy_gate.json
+?? results/gate_artifacts/early_gap_v3_b128_rkv_b128.jsonl.gz
+?? results/gate_artifacts/early_gap_v3_b128_rkv_b128.sha256
+?? results/run_manifests/early_gap_v3_b128_generate_rkv_b128_20260718T181746944937Z_a993bcca.json

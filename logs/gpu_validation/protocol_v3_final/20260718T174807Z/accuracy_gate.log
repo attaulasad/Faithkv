@@ -1,0 +1,2 @@
+wrote results/decisions/early_gap_v3_b128_accuracy_gate.json: gate_passed=False n_full=50 n_rkv=50 expected_n=50
+  - pilot_accuracy_plausible is False (accuracy_difference_rkv_minus_full=-0.4, max_pilot_accuracy_drop=0.1)

@@ -1,0 +1,33 @@
+{
+  "accuracy_screen": {
+    "accuracy_difference_rkv_minus_full": -0.4,
+    "both_correct": 12,
+    "full_accuracy": 0.66,
+    "full_correct": 33,
+    "full_only_correct": 21,
+    "max_pilot_accuracy_drop": 0.1,
+    "n_accuracy_pairs": 50,
+    "pilot_accuracy_plausible": false,
+    "rkv_accuracy": 0.26,
+    "rkv_correct": 13,
+    "rkv_only_correct": 1,
+    "statistical_note": "descriptive counts only -- no p-value or confidence interval; a small-n stop/continue pilot gate, never the frozen primary paired_accuracy_diff"
+  },
+  "analysis_provenance": {
+    "git_commit": "9a8940934de623839faf6886397a53ed51a3462b",
+    "git_dirty": false
+  },
+  "config_sha256": "b456d018a54dffc075b677eb6d010c801340db83fe328994c949d49d0efc34d4",
+  "expected_n": 50,
+  "gate_passed": false,
+  "input_sha256": {
+    "full_base": "bc88ad8aa5a9009b46d20b73e805434bc125fd490fcdd461a0ed20489d49f792",
+    "natural_rkv": "a9ecf2a2a7d132c0139e6c439f057530773d2abdc0419e5e68115e8c87999927"
+  },
+  "lock_sha256": "45b5a7470c077d9cf1ecbcbfac8ee44cca4152e60d48d7eeabe6e8cce687d337",
+  "n_full": 50,
+  "n_rkv": 50,
+  "reasons": [
+    "pilot_accuracy_plausible is False (accuracy_difference_rkv_minus_full=-0.4, max_pilot_accuracy_drop=0.1)"
+  ]
+}

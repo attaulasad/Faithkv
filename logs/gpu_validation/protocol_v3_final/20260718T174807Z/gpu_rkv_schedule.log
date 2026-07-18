@@ -1,0 +1,11 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.12, pytest-9.1.1, pluggy-1.6.0 -- /workspace/Faithkv-v3-20260718T174807Z/.venv/bin/python3.12
+cachedir: .pytest_cache
+rootdir: /workspace/Faithkv-v3-20260718T174807Z
+configfile: pytest.ini
+plugins: cov-7.1.0
+collecting ... collected 1 item
+
+tests/integration/test_rkv_schedule_prediction_gpu.py::test_simulator_matches_real_measured_cache_length_at_every_fraction PASSED [100%]
+
+============================== 1 passed in 41.82s ==============================
