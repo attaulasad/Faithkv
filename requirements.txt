@@ -21,9 +21,11 @@ PyYAML>=6.0,<7
 # docs/UPSTREAM_AUDIT.md H6 and §3.6.
 transformers==4.55.4
 torch==2.6.0
-# FlashAttention-2 wheel is CUDA/torch/Python-ABI specific; exact wheel URL is
-# resolved on the GPU host by scripts/setup_vast.sh, not pinned here.
-flash-attn>=2.6,<3
+# Exact GPU-validation wheel. The previous open range selected a binary that
+# imported with an undefined c10::Error symbol under Python 3.12 / Torch
+# 2.6.0+cu124. This wheel was verified on the actual RTX 3090 validation host.
+# Do not broaden this range during protocol-v3 validation.
+flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl#sha256=7e0b07913d56782d0f3f2ee76bd39587557742628983f6ab9ec2527c99437476
 
 datasets>=2.19,<4
 huggingface_hub>=0.24
