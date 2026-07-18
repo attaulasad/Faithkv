@@ -18,7 +18,8 @@ measure, whether the chain-of-thought is "real," faithful to internal
 cognition, or decorative. See `docs/EXPERIMENT.md` §1.
 
 **Status: GPU correctness gates passed; protocol-v2 fixed-trace screen ran
-and came back invalid; protocol v3 implemented, not yet GPU-run.** This
+and came back invalid; the protocol-v3 natural accuracy gate ran and
+FAILED — the GSM8K b128 operating point is retired (see below).** This
 repository is built/maintained on a machine with no GPU — all development
 here is CPU-only (`pytest -m "not gpu" tests/`, `--dry-run`). GPU-dependent
 work happens on a rented host and results are synced back
@@ -31,9 +32,24 @@ fixed-trace screen (`configs/early_gap_v2_b128.yaml`) also ran for real —
 screen_valid=false hypothesis_status=not_tested` — a valid negative
 screening outcome, not a crash or a bug in the correctness machinery. See
 `CHANGELOG.md`'s 2026-07-17 entry for the two diagnosed causes and the
-protocol-v3 fixes (`configs/early_gap_v3_b128.yaml`); a protocol-v3
-one-example GPU gate has run (`results/gate_artifacts/`,
-`results/run_manifests/`), but the full v3 selected-set screen has not.
+protocol-v3 fixes (`configs/early_gap_v3_b128.yaml`). **The protocol-v3
+natural accuracy gate has since run on the full 50-pair GSM8K calibration
+manifest and FAILED:** FullKV answered 33/50 (66%) correctly, natural R-KV
+b128 13/50 (26%) — a 40pp accuracy drop against the 0.10 pilot ceiling
+(`results/decisions/early_gap_v3_b128_accuracy_gate.json`:
+`gate_passed: false`, both-correct 12, FullKV-only-correct 21,
+R-KV-only-correct 1; graded inputs
+`results/gate_artifacts/early_gap_v3_b128_full.jsonl.gz` and
+`..._rkv_b128.jsonl.gz`, each with a committed `.sha256`). The
+fixed-trace analysis path (`run_fixed_trace_analysis`) correctly exited 1
+without emitting any PSS/CPSS output, so NO protocol-v3 PSS/CPSS decision
+exists and `hypothesis_status` remains `not_tested`. The GSM8K +
+`DeepSeek-R1-Distill-Qwen-1.5B` + b128 operating point is **retired** as
+structurally unviable: FullKV traces on this manifest run 276–847
+generated tokens (median ~440), leaving no fixed budget that is
+simultaneously accuracy-plausible and meaningfully compressing. The earlier
+one-example frozen fixed-trace gate result (row 30's probe answered 109) is
+superseded by this failed natural gate and must not be cited as evidence.
 No Stage 0-2 run (the frozen primary EAS/Delta_EAS pipeline) has happened
 yet — in particular, the §10 f=1 stability control is UNRESOLVED: its
 prior GPU run used 10 of the pre-registered 20 smoke rows under broken

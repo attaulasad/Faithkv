@@ -380,6 +380,41 @@ kvcot analyze-fixed-trace --config configs/early_gap_v3_b128.yaml --replay-condi
 #   (CLAUDE.md par.8.5) can do that.
 ```
 
+**2026-07-19 — this stage (GSM8K b128) stopped at step 3, which FAILED; do
+not run steps 4–6.** The required order above reached step 3 and no
+further. `kvcot check-fixed-trace-accuracy` graded natural FullKV at 33/50
+(66%) against natural R-KV b128 at 13/50 (26%) — a 40pp drop past the 0.10
+pilot ceiling — and exited 1, writing
+`results/decisions/early_gap_v3_b128_accuracy_gate.json` (`gate_passed:
+false`; graded inputs
+`results/gate_artifacts/early_gap_v3_b128_full.jsonl.gz` and
+`..._rkv_b128.jsonl.gz`, each with a committed `.sha256`). **Steps 4–6 (the
+one-example frozen-probe/schedule-prediction gate, the remaining fixed-trace
+replays, and `analyze-fixed-trace`) were therefore NOT run and MUST NOT be
+run for this stage:** the order stops at a failed step-3 gate by design, no
+protocol-v3 PSS/CPSS decision exists, and `hypothesis_status` stays
+`not_tested`. The GSM8K + `DeepSeek-R1-Distill-Qwen-1.5B` + b128 operating
+point is retired as structurally unviable (`docs/EXPERIMENT.md` §11,
+2026-07-19; `CHANGELOG.md`); the one-example checklist immediately below and
+steps 4–6 above are retained only as documentation of a run order that will
+not be executed here.
+
+**The §6 f=1 probe-stability control is a separate, still-open Stage-0
+prerequisite.** `test_probe_stability_gpu.py` (the f=1 stability criterion,
+`docs/EXPERIMENT.md` §10) belongs to the ordered Stage-0 smoke sequence, not
+to this fixed-trace continuation. It remains UNRESOLVED under the corrected
+validity definition (see §6 above, "NOT passed (2026-07-18)") and is moot
+for this retired stage: retiring b128 neither resolves it nor is blocked by
+it, and any future non-GSM8K / non-b128 stage would still have to clear it
+on its own terms before drawing a Stage-0 conclusion.
+
+**Stale provenance logs left as-is.** `logs/git_commit.txt` and
+`logs/git_status.txt` remain the protocol-v2-era snapshot described in
+`README.md` (an older `bb1917a...` checkout) and are intentionally NOT
+refreshed by this documentation-only update — regenerate them
+(`git rev-parse HEAD`, `git status --short`) on the next real GPU
+invocation rather than trusting the stale copies.
+
 **One-example frozen-probe/schedule-prediction gate — mandatory, before
 step 5 above.** This is IN ADDITION to (does not replace) the one-example
 gate two sections above (extraction/correctness/no-cap/clean-tree still

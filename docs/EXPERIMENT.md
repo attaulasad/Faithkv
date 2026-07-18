@@ -297,3 +297,58 @@ PLAUSIBILITY check ("`pilot_accuracy_plausible`") — it never supports an
 "accuracy neutral" or "accuracy preserving" claim; §9's frozen
 `paired_accuracy_diff` on the 200-problem main split remains the only test
 allowed to speak to distributional accuracy preservation.
+
+### Protocol v3 outcome (2026-07-19): natural accuracy gate failed, operating point retired
+
+The protocol-v3 natural R-KV accuracy gate ran on the full 50-pair GSM8K
+calibration manifest (`gsm8k_calibration_50`, seed 42) and **failed**.
+Graded over all 50 natural records of each condition
+(`results/gate_artifacts/early_gap_v3_b128_full.jsonl.gz` and
+`..._rkv_b128.jsonl.gz`, each with a committed `.sha256`), FullKV answered
+33/50 (66%) correctly and natural R-KV b128 13/50 (26%): a 40-percentage-
+point drop against the 0.10 pilot ceiling. Pair breakdown: 12 both-correct,
+21 FullKV-only-correct, 1 R-KV-only-correct
+(`results/decisions/early_gap_v3_b128_accuracy_gate.json`, `gate_passed:
+false`, analyzer commit `9a89409`). Because the strict gate failed, the
+fixed-trace analysis path (`run_fixed_trace_analysis`) correctly returned
+exit 1 without computing PSS or CPSS — no protocol-v3 PSS/CPSS decision was
+written and `hypothesis_status` remains `not_tested`. Per §9, this pilot
+gate never spoke to distributional accuracy preservation; its only job was
+to keep the pilot off an absurd operating point, which it did.
+
+**Compression was real, not degenerate.** The R-KV run compacted 2–7 times
+per example (mean 3.9; FullKV 0), and final measured retention
+(`instantaneous_retention_ratio`) averaged 0.36 (median 0.35), with 48/50
+examples below 0.5 and 50/50 below 0.7. The accuracy collapse was therefore
+not an artifact of compression never firing — it fired substantially on
+every example.
+
+**Divergence never preceded compaction.** Comparing FullKV and natural R-KV
+generated-token IDs for each of the 50 pairs in absolute sequence positions
+(prompt length + generated index), 0/50 pairs diverged before their first
+compaction event; all 50 diverged at or after it. The observed behavioral
+differences are thus consistent with being downstream of cache compaction,
+not of some earlier decode difference.
+
+**Post-hoc, diagnostic observations (not a mechanism claim).** 9 of the 50
+pairs (source rows 30, 176, 262, 271, 491, 543, 616, 1115, 1143) generated
+byte-identical tokens all the way through `</think>` under both policies,
+yet 3 of those 9 still flipped correct→wrong once decoding continued past
+the closing marker: row 30 (109 → `71.\overline{1}`, i.e. 71.1 repeating),
+row 271 (20 → 12), and row 1115 (5 → 6). These are hypothesis-generating
+observations only — they were collected at a catastrophically degraded
+operating point (26% R-KV accuracy) and are recorded as a diagnostic
+signpost, NOT as evidence about the §1 research question and NOT as a claim
+about any internal mechanism. The §1/§11 claim boundary is unchanged.
+
+**Retirement and next steps.** The GSM8K + `DeepSeek-R1-Distill-Qwen-1.5B` +
+b128 operating point is retired as structurally unviable: FullKV traces on
+this manifest run 276–847 generated tokens (min/median/max 276 / ~440 /
+847), so no fixed budget on this data is simultaneously accuracy-plausible
+and meaningfully compressing. No further GSM8K b128 or b160 runs are
+planned. The next experimental work is (1) a CPU-only failure atlas over the
+existing 50 pairs (using only the committed gate artifacts above — no new
+GPU generation), then (2) a MATH-500 longer-trace feasibility design with
+SEPARATE calibration and held-out manifests. The earlier one-example
+frozen fixed-trace gate result (row 30's probe answered 109) is superseded
+by this failed natural gate and must not be cited as evidence.
