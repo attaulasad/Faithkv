@@ -1,0 +1,8 @@
+replay-fixed-trace plan: stage=early_gap_v3_b128
+  trace_condition=full  replay_condition=rkv_b128
+  selection_file=results/selections/early_gap_v3_b128.json  n_selected=10
+  planned examples: 1
+  fixed-trace fractions per example: 9
+  planned probe records: 9
+  reads canonical trace: results/raw/protocol_v3/early_gap_b128/full.jsonl
+  output: results/raw/protocol_v3/early_gap_b128/rkv_b128_on_full_fixed_trace_probes.jsonl

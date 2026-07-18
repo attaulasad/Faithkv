@@ -1,0 +1,66 @@
+===== 1. PATCHED NO-OP PARITY: 1 TEST =====
+============================= test session starts ==============================
+platform linux -- Python 3.12.12, pytest-9.1.1, pluggy-1.6.0 -- /workspace/Faithkv-v4-20260718T040358Z/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /workspace/Faithkv-v4-20260718T040358Z
+configfile: pytest.ini
+plugins: cov-7.1.0
+collecting ... collected 1 item
+
+tests/integration/test_patched_noop_parity_gpu.py::test_stock_vs_patched_noop_parity PASSED [100%]
+
+============================== 1 passed in 19.46s ==============================
+===== 2. CROSS-EXAMPLE STATE ISOLATION: 1 TEST =====
+============================= test session starts ==============================
+platform linux -- Python 3.12.12, pytest-9.1.1, pluggy-1.6.0 -- /workspace/Faithkv-v4-20260718T040358Z/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /workspace/Faithkv-v4-20260718T040358Z
+configfile: pytest.ini
+plugins: cov-7.1.0
+collecting ... collected 1 item
+
+tests/integration/test_no_state_leak_gpu.py::test_example_results_independent_of_run_order PASSED [100%]
+
+============================== 1 passed in 56.86s ==============================
+===== 3. V3 SCHEDULE SIMULATOR: 1 TEST =====
+============================= test session starts ==============================
+platform linux -- Python 3.12.12, pytest-9.1.1, pluggy-1.6.0 -- /workspace/Faithkv-v4-20260718T040358Z/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /workspace/Faithkv-v4-20260718T040358Z
+configfile: pytest.ini
+plugins: cov-7.1.0
+collecting ... collected 1 item
+
+tests/integration/test_rkv_schedule_prediction_gpu.py::test_simulator_matches_real_measured_cache_length_at_every_fraction PASSED [100%]
+
+========================= 1 passed in 65.83s (0:01:05) =========================
+===== 4. V3 FROZEN CACHE: 1 TEST =====
+============================= test session starts ==============================
+platform linux -- Python 3.12.12, pytest-9.1.1, pluggy-1.6.0 -- /workspace/Faithkv-v4-20260718T040358Z/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /workspace/Faithkv-v4-20260718T040358Z
+configfile: pytest.ini
+plugins: cov-7.1.0
+collecting ... collected 1 item
+
+tests/integration/test_frozen_probe_gpu.py::test_frozen_at_cut_prevents_eviction_that_native_mode_allows PASSED [100%]
+
+============================== 1 passed in 53.33s ==============================
+===== 5. REPLAY IDENTITY: 7 TESTS =====
+============================= test session starts ==============================
+platform linux -- Python 3.12.12, pytest-9.1.1, pluggy-1.6.0 -- /workspace/Faithkv-v4-20260718T040358Z/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /workspace/Faithkv-v4-20260718T040358Z
+configfile: pytest.ini
+plugins: cov-7.1.0
+collecting ... collected 7 items
+
+tests/integration/test_replay_gpu.py::test_replay_reproduces_identical_tokens_and_compaction_events[flash_attention_2] PASSED [ 14%]
+tests/integration/test_replay_gpu.py::test_replay_reproduces_identical_tokens_and_compaction_events[sdpa] PASSED [ 28%]
+tests/integration/test_replay_gpu.py::test_two_independent_replays_are_identical PASSED [ 42%]
+tests/integration/test_replay_gpu.py::test_restoring_same_snapshot_twice_yields_identical_probe_tokens PASSED [ 57%]
+tests/integration/test_replay_gpu.py::test_fullkv_replay_passes_identity_test PASSED [ 71%]
+tests/integration/test_replay_gpu.py::test_streaming_replay_vs_bulk_prefill_negative_control PASSED [ 85%]
+tests/integration/test_replay_gpu.py::test_note_event_once_records_exactly_one_entry_per_real_event PASSED [100%]
+
+======================== 7 passed in 778.37s (0:12:58) =========================

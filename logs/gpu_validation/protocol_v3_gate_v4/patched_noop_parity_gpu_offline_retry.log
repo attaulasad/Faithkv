@@ -1,0 +1,12 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.12, pytest-9.1.1, pluggy-1.6.0 -- /workspace/Faithkv-v4-20260718T040358Z/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /workspace/Faithkv-v4-20260718T040358Z
+configfile: pytest.ini
+plugins: cov-7.1.0
+collecting ... collected 1 item
+
+tests/integration/test_patched_noop_parity_gpu.py::test_stock_vs_patched_noop_parity patched_noop parity: max abs logit-max delta across steps = 0.000000
+PASSED
+
+============================== 1 passed in 18.95s ==============================

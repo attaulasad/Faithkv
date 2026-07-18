@@ -1,0 +1,4 @@
+generate plan: stage=early_gap_v3_b128 condition=full
+  model: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B@ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562
+  rows: 50  seeds: [42]  total planned records: 50
+  output: results/raw/protocol_v3/early_gap_b128/full.jsonl

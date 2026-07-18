@@ -1,0 +1,30 @@
+{
+  "command": "replay-fixed-trace",
+  "config_path": "configs/early_gap_v3_b128.yaml",
+  "config_sha256": "b456d018a54dffc075b677eb6d010c801340db83fe328994c949d49d0efc34d4",
+  "end_time_utc": "2026-07-18T07:19:21.271086+00:00",
+  "git_commit": "ef9bb1ed1039e759f2df286bd109eff2661c1d97",
+  "git_dirty": false,
+  "n_attempted": 9,
+  "n_cap_hits": 0,
+  "n_completed": 9,
+  "n_extraction_failures": 0,
+  "n_failed": 0,
+  "n_skipped_resumed": 0,
+  "n_think_parse_failures": 0,
+  "peak_vram_bytes": 3629125120,
+  "schema_version": "1.4.0",
+  "selection_file_sha256": "9f833fac257f951a10fe95e6cf43a11f016472764eb1aced42099d494b2b978f",
+  "selection_path": "results/selections/early_gap_v3_b128.json",
+  "start_time_utc": "2026-07-18T07:19:04.610971+00:00",
+  "total_compaction_events": 0,
+  "total_generated_tokens": 0,
+  "versions": {
+    "cuda": "12.4",
+    "flash_attn": "2.7.4.post1",
+    "python": "3.12.12",
+    "torch": "2.6.0+cu124",
+    "transformers": "4.55.4"
+  },
+  "wall_time_seconds": 16.660107300966047
+}

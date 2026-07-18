@@ -1,0 +1,110 @@
+2026-07-18T05:43:23 [INFO] accelerate.utils.modeling: We will use 90% of the memory on device 0 for storing the model, and 10% for the buffer to avoid OOM. You can set `max_memory` in to a higher value to use more memory (at your own risk).
+'(MaxRetryError('HTTPSConnectionPool(host=\'huggingface.co\', port=443): Max retries exceeded with url: /deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py (Caused by NameResolutionError("HTTPSConnection(host=\'huggingface.co\', port=443): Failed to resolve \'huggingface.co\' ([Errno -3] Temporary failure in name resolution)"))'), '(Request ID: ee69b741-cf0d-497e-90aa-f74c0f9f8c6c)')' thrown while requesting HEAD https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py
+2026-07-18T05:44:09 [WARNING] huggingface_hub.utils._http: '(MaxRetryError('HTTPSConnectionPool(host=\'huggingface.co\', port=443): Max retries exceeded with url: /deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py (Caused by NameResolutionError("HTTPSConnection(host=\'huggingface.co\', port=443): Failed to resolve \'huggingface.co\' ([Errno -3] Temporary failure in name resolution)"))'), '(Request ID: ee69b741-cf0d-497e-90aa-f74c0f9f8c6c)')' thrown while requesting HEAD https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py
+Retrying in 1s [Retry 1/5].
+2026-07-18T05:44:09 [WARNING] huggingface_hub.utils._http: Retrying in 1s [Retry 1/5].
+'(MaxRetryError('HTTPSConnectionPool(host=\'huggingface.co\', port=443): Max retries exceeded with url: /deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py (Caused by NameResolutionError("HTTPSConnection(host=\'huggingface.co\', port=443): Failed to resolve \'huggingface.co\' ([Errno -3] Temporary failure in name resolution)"))'), '(Request ID: 3729d6f4-20ac-46ae-9d18-9e953e855fa7)')' thrown while requesting HEAD https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py
+2026-07-18T05:44:50 [WARNING] huggingface_hub.utils._http: '(MaxRetryError('HTTPSConnectionPool(host=\'huggingface.co\', port=443): Max retries exceeded with url: /deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py (Caused by NameResolutionError("HTTPSConnection(host=\'huggingface.co\', port=443): Failed to resolve \'huggingface.co\' ([Errno -3] Temporary failure in name resolution)"))'), '(Request ID: 3729d6f4-20ac-46ae-9d18-9e953e855fa7)')' thrown while requesting HEAD https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py
+Retrying in 2s [Retry 2/5].
+2026-07-18T05:44:50 [WARNING] huggingface_hub.utils._http: Retrying in 2s [Retry 2/5].
+'(MaxRetryError('HTTPSConnectionPool(host=\'huggingface.co\', port=443): Max retries exceeded with url: /deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py (Caused by NameResolutionError("HTTPSConnection(host=\'huggingface.co\', port=443): Failed to resolve \'huggingface.co\' ([Errno -3] Temporary failure in name resolution)"))'), '(Request ID: 97d9fc6c-d387-4c2d-92da-16c7f295c449)')' thrown while requesting HEAD https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py
+2026-07-18T05:45:32 [WARNING] huggingface_hub.utils._http: '(MaxRetryError('HTTPSConnectionPool(host=\'huggingface.co\', port=443): Max retries exceeded with url: /deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py (Caused by NameResolutionError("HTTPSConnection(host=\'huggingface.co\', port=443): Failed to resolve \'huggingface.co\' ([Errno -3] Temporary failure in name resolution)"))'), '(Request ID: 97d9fc6c-d387-4c2d-92da-16c7f295c449)')' thrown while requesting HEAD https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py
+Retrying in 4s [Retry 3/5].
+2026-07-18T05:45:32 [WARNING] huggingface_hub.utils._http: Retrying in 4s [Retry 3/5].
+'(MaxRetryError('HTTPSConnectionPool(host=\'huggingface.co\', port=443): Max retries exceeded with url: /deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py (Caused by NameResolutionError("HTTPSConnection(host=\'huggingface.co\', port=443): Failed to resolve \'huggingface.co\' ([Errno -3] Temporary failure in name resolution)"))'), '(Request ID: 27338195-7a59-4ddf-81ab-44587746b754)')' thrown while requesting HEAD https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py
+2026-07-18T05:46:16 [WARNING] huggingface_hub.utils._http: '(MaxRetryError('HTTPSConnectionPool(host=\'huggingface.co\', port=443): Max retries exceeded with url: /deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py (Caused by NameResolutionError("HTTPSConnection(host=\'huggingface.co\', port=443): Failed to resolve \'huggingface.co\' ([Errno -3] Temporary failure in name resolution)"))'), '(Request ID: 27338195-7a59-4ddf-81ab-44587746b754)')' thrown while requesting HEAD https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py
+Retrying in 8s [Retry 4/5].
+2026-07-18T05:46:16 [WARNING] huggingface_hub.utils._http: Retrying in 8s [Retry 4/5].
+'(MaxRetryError('HTTPSConnectionPool(host=\'huggingface.co\', port=443): Max retries exceeded with url: /deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py (Caused by NameResolutionError("HTTPSConnection(host=\'huggingface.co\', port=443): Failed to resolve \'huggingface.co\' ([Errno -3] Temporary failure in name resolution)"))'), '(Request ID: 3f93fdb7-410b-4eb3-809b-cfe066ddbdcd)')' thrown while requesting HEAD https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py
+2026-07-18T05:47:04 [WARNING] huggingface_hub.utils._http: '(MaxRetryError('HTTPSConnectionPool(host=\'huggingface.co\', port=443): Max retries exceeded with url: /deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py (Caused by NameResolutionError("HTTPSConnection(host=\'huggingface.co\', port=443): Failed to resolve \'huggingface.co\' ([Errno -3] Temporary failure in name resolution)"))'), '(Request ID: 3f93fdb7-410b-4eb3-809b-cfe066ddbdcd)')' thrown while requesting HEAD https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py
+Retrying in 8s [Retry 5/5].
+2026-07-18T05:47:04 [WARNING] huggingface_hub.utils._http: Retrying in 8s [Retry 5/5].
+'(MaxRetryError('HTTPSConnectionPool(host=\'huggingface.co\', port=443): Max retries exceeded with url: /deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py (Caused by NameResolutionError("HTTPSConnection(host=\'huggingface.co\', port=443): Failed to resolve \'huggingface.co\' ([Errno -3] Temporary failure in name resolution)"))'), '(Request ID: 9a8001ed-5997-4430-96df-89df5fcd4b3e)')' thrown while requesting HEAD https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py
+2026-07-18T05:47:52 [WARNING] huggingface_hub.utils._http: '(MaxRetryError('HTTPSConnectionPool(host=\'huggingface.co\', port=443): Max retries exceeded with url: /deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py (Caused by NameResolutionError("HTTPSConnection(host=\'huggingface.co\', port=443): Failed to resolve \'huggingface.co\' ([Errno -3] Temporary failure in name resolution)"))'), '(Request ID: 9a8001ed-5997-4430-96df-89df5fcd4b3e)')' thrown while requesting HEAD https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/resolve/main/custom_generate/generate.py
+Traceback (most recent call last):
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/urllib3/connection.py", line 204, in _new_conn
+    sock = connection.create_connection(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/urllib3/util/connection.py", line 60, in create_connection
+    for res in socket.getaddrinfo(host, port, family, socket.SOCK_STREAM):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/venv/main/lib/python3.12/socket.py", line 978, in getaddrinfo
+    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+socket.gaierror: [Errno -3] Temporary failure in name resolution
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/urllib3/connectionpool.py", line 788, in urlopen
+    response = self._make_request(
+               ^^^^^^^^^^^^^^^^^^^
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/urllib3/connectionpool.py", line 488, in _make_request
+    raise new_e
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/urllib3/connectionpool.py", line 464, in _make_request
+    self._validate_conn(conn)
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/urllib3/connectionpool.py", line 1106, in _validate_conn
+    conn.connect()
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/urllib3/connection.py", line 759, in connect
+    self.sock = sock = self._new_conn()
+                       ^^^^^^^^^^^^^^^^
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/urllib3/connection.py", line 211, in _new_conn
+    raise NameResolutionError(self.host, self, e) from e
+urllib3.exceptions.NameResolutionError: HTTPSConnection(host='huggingface.co', port=443): Failed to resolve 'huggingface.co' ([Errno -3] Temporary failure in name resolution)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/requests/adapters.py", line 696, in send
+    resp = conn.urlopen(
+           ^^^^^^^^^^^^^
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/urllib3/connectionpool.py", line 842, in urlopen
+    retries = retries.increment(
+              ^^^^^^^^^^^^^^^^^^
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/urllib3/util/retry.py", line 543, in increment
+    raise MaxRetryError(_pool, url, reason) from reason  # type: ignore[arg-type]
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+urllib3.exceptions.MaxRetryError: HTTPSConnectionPool(host='huggingface.co', port=443): Max retries exceeded with url: /api/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/tree/ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562/additional_chat_templates?recursive=False&expand=False (Caused by NameResolutionError("HTTPSConnection(host='huggingface.co', port=443): Failed to resolve 'huggingface.co' ([Errno -3] Temporary failure in name resolution)"))
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/bin/kvcot", line 6, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/workspace/Faithkv-v4-20260718T040358Z/src/kvcot/cli.py", line 2122, in main
+    return args.func(args)
+           ^^^^^^^^^^^^^^^
+  File "/workspace/Faithkv-v4-20260718T040358Z/src/kvcot/cli.py", line 982, in cmd_replay_fixed_trace
+    tokenizer = AutoTokenizer.from_pretrained(lock.model.tokenizer_name, revision=lock.model.tokenizer_revision, use_fast=True)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/transformers/models/auto/tokenization_auto.py", line 1116, in from_pretrained
+    return tokenizer_class.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/transformers/tokenization_utils_base.py", line 2012, in from_pretrained
+    for template in list_repo_templates(
+                    ^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/transformers/utils/hub.py", line 169, in list_repo_templates
+    for entry in list_repo_tree(
+                 ^^^^^^^^^^^^^^^
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/huggingface_hub/hf_api.py", line 3191, in list_repo_tree
+    for path_info in paginate(path=tree_url, headers=headers, params={"recursive": recursive, "expand": expand}):
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/huggingface_hub/utils/_pagination.py", line 36, in paginate
+    r = session.get(path, params=params, headers=headers)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/requests/sessions.py", line 671, in get
+    return self.request("GET", url, params=params, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/requests/sessions.py", line 651, in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/requests/sessions.py", line 784, in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/huggingface_hub/utils/_http.py", line 96, in send
+    return super().send(request, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/Faithkv-v4-20260718T040358Z/.venv/lib/python3.12/site-packages/requests/adapters.py", line 729, in send
+    raise ConnectionError(e, request=request)
+requests.exceptions.ConnectionError: (MaxRetryError('HTTPSConnectionPool(host=\'huggingface.co\', port=443): Max retries exceeded with url: /api/models/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B/tree/ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562/additional_chat_templates?recursive=False&expand=False (Caused by NameResolutionError("HTTPSConnection(host=\'huggingface.co\', port=443): Failed to resolve \'huggingface.co\' ([Errno -3] Temporary failure in name resolution)"))'), '(Request ID: ed66e4d0-5e5a-4c70-a101-38662cd3514c)')
