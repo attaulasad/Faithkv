@@ -700,3 +700,51 @@ def test_strict_accuracy_gate_fails_on_accuracy_drop_even_with_complete_data():
     assert gate["gate_passed"] is False
     assert any("pilot_accuracy_plausible" in r for r in gate["reasons"])
     assert gate["accuracy_screen"]["accuracy_difference_rkv_minus_full"] == pytest.approx(-0.5)
+
+
+# --- build_strict_accuracy_gate must NEVER raise on malformed input
+# (2026-07-18 external review: the first pass extracted (source_row_index,
+# global_seed) keys by direct subscripting BEFORE schema validation, so a
+# malformed record raised KeyError out of the "never raises" function) ---
+
+def test_strict_accuracy_gate_returns_failure_for_missing_dataset():
+    good = _natural_schema_record(0, 42, "full")
+    bad = _natural_schema_record(1, 42, "full")
+    del bad["dataset"]  # _key() would raise KeyError on this pre-fix
+    gate = build_strict_accuracy_gate([good, bad], [_natural_schema_record(0, 42, "rkv_b128")], expected_n=2, settings=FixedTraceSettings())
+    assert gate["gate_passed"] is False
+    assert any("failed schema validation" in r for r in gate["reasons"])
+    assert gate["accuracy_screen"] is None  # never computed over malformed records
+    assert gate["n_full"] == 2 and gate["n_rkv"] == 1  # stable shape retained
+
+
+def test_strict_accuracy_gate_returns_failure_for_missing_seed():
+    bad = _natural_schema_record(0, 42, "rkv_b128")
+    del bad["global_seed"]
+    gate = build_strict_accuracy_gate([_natural_schema_record(0, 42, "full")], [bad], expected_n=1, settings=FixedTraceSettings())
+    assert gate["gate_passed"] is False
+    assert any("failed schema validation" in r for r in gate["reasons"])
+    assert gate["accuracy_screen"] is None
+
+
+def test_strict_accuracy_gate_returns_failure_for_non_dict_record():
+    gate = build_strict_accuracy_gate(
+        [["not", "a", "dict"]], [42], expected_n=1, settings=FixedTraceSettings(),
+    )
+    assert gate["gate_passed"] is False
+    assert any("failed schema validation" in r for r in gate["reasons"])
+    assert gate["accuracy_screen"] is None
+    # Full stable shape even on garbage input.
+    assert set(gate) >= {"gate_passed", "reasons", "expected_n", "n_full", "n_rkv", "accuracy_screen"}
+
+
+def test_strict_accuracy_gate_valid_records_still_checked_alongside_invalid_ones():
+    # Count/key checks still run over whatever IS valid -- one malformed row
+    # must not suppress the other diagnostics.
+    good_full = [_natural_schema_record(i, 42, "full") for i in range(3)]
+    bad = _natural_schema_record(3, 42, "full")
+    del bad["dataset"]
+    gate = build_strict_accuracy_gate(good_full + [bad], [_natural_schema_record(0, 42, "rkv_b128")], expected_n=4, settings=FixedTraceSettings())
+    assert gate["gate_passed"] is False
+    assert any("rkv record count" in r for r in gate["reasons"])
+    assert any("failed schema validation" in r for r in gate["reasons"])

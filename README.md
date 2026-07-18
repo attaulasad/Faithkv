@@ -31,9 +31,19 @@ fixed-trace screen (`configs/early_gap_v2_b128.yaml`) also ran for real —
 screen_valid=false hypothesis_status=not_tested` — a valid negative
 screening outcome, not a crash or a bug in the correctness machinery. See
 `CHANGELOG.md`'s 2026-07-17 entry for the two diagnosed causes and the
-protocol-v3 fixes (`configs/early_gap_v3_b128.yaml`), which have not yet
-been run on a GPU. No Stage 0-2 run (the frozen primary EAS/Delta_EAS
-pipeline) has happened yet. See `docs/GPU_VALIDATION_PLAN.md`.
+protocol-v3 fixes (`configs/early_gap_v3_b128.yaml`); a protocol-v3
+one-example GPU gate has run (`results/gate_artifacts/`,
+`results/run_manifests/`), but the full v3 selected-set screen has not.
+No Stage 0-2 run (the frozen primary EAS/Delta_EAS pipeline) has happened
+yet — in particular, the §10 f=1 stability control is UNRESOLVED: its
+prior GPU run used 10 of the pre-registered 20 smoke rows under broken
+validity accounting (fixed 2026-07-18, `CHANGELOG.md`), and it has not
+been re-run under the corrected definition. Separately, a 2026-07-18
+external audit found the final v3 CPU analysis path computed its
+natural-accuracy screen over the selection-filtered population (FullKV
+accuracy 10/10 by construction instead of the true 33/50) — fixed in the
+same entry; no completed raw GPU record was modified. See
+`docs/GPU_VALIDATION_PLAN.md`.
 
 `logs/git_commit.txt`/`logs/git_status.txt` reflect an OLDER commit
 (`bb1917a...`) than this repository's current history — they were captured

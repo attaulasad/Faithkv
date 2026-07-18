@@ -805,6 +805,18 @@ def build_strict_accuracy_gate(
     — same counts, same keys, same identity — and only this check catches
     it. `None` (no caller currently omits it, but kept optional for direct
     unit testing) skips this specific check.
+
+    Ordering discipline (2026-07-18 second-pass review — the first pass
+    VIOLATED the "never raises" promise above): every row is schema-
+    validated FIRST, and keys/identities/conditions/the accuracy screen are
+    computed only from schema-valid rows. The first pass extracted
+    `(source_row_index, global_seed)` keys by direct subscripting BEFORE any
+    validation, so a malformed record (missing `dataset`, missing
+    `global_seed`, or not a dict at all) raised `KeyError`/`TypeError` out
+    of this function instead of producing a `gate_passed: False` decision.
+    When ANY record fails validation, `accuracy_screen` is `None` (never a
+    screen computed over a partially-malformed population) and the returned
+    object still has the full stable shape.
     """
     reasons: list[str] = []
 
@@ -816,8 +828,31 @@ def build_strict_accuracy_gate(
     if len(rkv_records) != expected_n:
         reasons.append(f"rkv record count ({len(rkv_records)}) != expected ({expected_n})")
 
-    full_keys = [_key(r) for r in full_records]
-    rkv_keys = [_key(r) for r in rkv_records]
+    # Schema-validate every row BEFORE touching any field — all downstream
+    # checks run over the validated (normalized) rows only.
+    valid_full_records: list[dict] = []
+    valid_rkv_records: list[dict] = []
+    for label, records, output in (
+        ("full", full_records, valid_full_records),
+        ("rkv", rkv_records, valid_rkv_records),
+    ):
+        for index, row in enumerate(records):
+            try:
+                validated = BaseRunRecord.model_validate(row)
+            except Exception as error:
+                record_id = row.get("record_id") if isinstance(row, dict) else None
+                reasons.append(
+                    f"{label} record at index {index} (record_id={record_id!r}) "
+                    f"failed schema validation: {error}"
+                )
+            else:
+                output.append(validated.model_dump(mode="python"))
+    any_schema_invalid = (
+        len(valid_full_records) != len(full_records) or len(valid_rkv_records) != len(rkv_records)
+    )
+
+    full_keys = [_key(r) for r in valid_full_records]
+    rkv_keys = [_key(r) for r in valid_rkv_records]
     if len(set(full_keys)) != len(full_keys):
         reasons.append("duplicate (source_row_index, global_seed) keys within the full records")
     if len(set(rkv_keys)) != len(rkv_keys):
@@ -832,15 +867,8 @@ def build_strict_accuracy_gate(
             f"({missing_in_full[:5]}{'...' if len(missing_in_full) > 5 else ''})"
         )
 
-    for label, records in (("full", full_records), ("rkv", rkv_records)):
-        for r in records:
-            try:
-                BaseRunRecord.model_validate(r)
-            except Exception as e:
-                reasons.append(f"{label} record {r.get('record_id')!r} failed schema validation: {e}")
-
-    full_identities = {_record_identity(r) for r in full_records}
-    rkv_identities = {_record_identity(r) for r in rkv_records}
+    full_identities = {_record_identity(r) for r in valid_full_records}
+    rkv_identities = {_record_identity(r) for r in valid_rkv_records}
     if len(full_identities) > 1:
         reasons.append(f"full records were produced under {len(full_identities)} different identities")
     if len(rkv_identities) > 1:
@@ -855,25 +883,27 @@ def build_strict_accuracy_gate(
             f"{sorted(combined_identities)}"
         )
 
-    if any(r.get("condition") != "full" for r in full_records):
+    if any(r.get("condition") != "full" for r in valid_full_records):
         reasons.append("not every full record's own condition field is 'full'")
-    rkv_conditions = {r.get("condition") for r in rkv_records}
+    rkv_conditions = {r.get("condition") for r in valid_rkv_records}
     if len(rkv_conditions) > 1:
         reasons.append(f"rkv records have inconsistent condition values: {sorted(rkv_conditions)}")
-    elif expected_rkv_condition is not None and rkv_conditions != {expected_rkv_condition}:
+    elif expected_rkv_condition is not None and rkv_conditions and rkv_conditions != {expected_rkv_condition}:
         reasons.append(
             f"rkv records' own condition field is {sorted(rkv_conditions)}, but this gate was asked to "
             f"check {expected_rkv_condition!r} — refusing to treat a file recorded under a different "
             "condition (e.g. the wrong file passed as --replay-condition) as the requested R-KV data"
         )
 
-    accuracy_screen = build_accuracy_screen(full_records, rkv_records, settings)
-    if not accuracy_screen["pilot_accuracy_plausible"]:
-        reasons.append(
-            f"pilot_accuracy_plausible is False (accuracy_difference_rkv_minus_full="
-            f"{accuracy_screen['accuracy_difference_rkv_minus_full']}, "
-            f"max_pilot_accuracy_drop={settings.max_pilot_accuracy_drop})"
-        )
+    accuracy_screen: dict | None = None
+    if not any_schema_invalid:
+        accuracy_screen = build_accuracy_screen(valid_full_records, valid_rkv_records, settings)
+        if not accuracy_screen["pilot_accuracy_plausible"]:
+            reasons.append(
+                f"pilot_accuracy_plausible is False (accuracy_difference_rkv_minus_full="
+                f"{accuracy_screen['accuracy_difference_rkv_minus_full']}, "
+                f"max_pilot_accuracy_drop={settings.max_pilot_accuracy_drop})"
+            )
 
     return {
         "gate_passed": len(reasons) == 0,
@@ -910,6 +940,7 @@ def build_screen_validity(
     settings: "FixedTraceSettings",
     accuracy_screen: dict | None = None,
     meaningful_compression_rate: float | None = None,
+    strict_accuracy_gate: dict | None = None,
 ) -> tuple[bool, list[str]]:
     """§ Step 11: whether this screen cleared the minimum bar to be
     interpreted AT ALL — insufficient eligible examples, compression that
@@ -941,6 +972,16 @@ def build_screen_validity(
     (`require_meaningful_compression=False`, the default) are completely
     unaffected and keep checking `actual_compression_rate` exactly as
     before.
+
+    `strict_accuracy_gate` (2026-07-18 external review): optional
+    `build_strict_accuracy_gate(...)` output. When given, screen validity
+    additionally requires `gate_passed: True` — `accuracy_screen[
+    "pilot_accuracy_plausible"]` alone is NOT sufficient, because the
+    screen only pairs the intersection of keys present in both natural
+    files: incomplete or mismatched natural files could clear the
+    plausibility check on a tiny intersected subset while most of the
+    expected records were never generated at all. `None` (every protocol-v2
+    caller) skips this check entirely, exactly like `accuracy_screen`.
     """
     reasons: list[str] = []
     if n_eligible < settings.min_eligible_examples:
@@ -974,6 +1015,11 @@ def build_screen_validity(
             f"{accuracy_screen.get('accuracy_difference_rkv_minus_full')}, "
             f"max_pilot_accuracy_drop={settings.max_pilot_accuracy_drop})"
         )
+    if strict_accuracy_gate is not None and not strict_accuracy_gate.get("gate_passed"):
+        reasons.append(
+            "strict_accuracy_gate failed (gate_passed is not True): "
+            + "; ".join(strict_accuracy_gate.get("reasons", [])[:5])
+        )
     return (len(reasons) == 0, reasons)
 
 
@@ -986,6 +1032,7 @@ def build_fixed_trace_decision(
     full_probes: "FixedTraceRecords | None" = None,
     rkv_probes: "FixedTraceRecords | None" = None,
     accuracy_screen: dict | None = None,
+    strict_accuracy_gate: dict | None = None,
 ) -> dict:
     """`full_probes`/`rkv_probes`/`accuracy_screen` are protocol v3 additions
     (CHANGELOG.md 2026-07-17), all optional and defaulting to `None` so
@@ -994,6 +1041,15 @@ def build_fixed_trace_decision(
     (`retention_summary_by_fraction`, `compression_rate_by_fraction`, the
     `*_eligible_only` curves) are simply left empty/`None` rather than
     computed from data the caller didn't provide.
+
+    `strict_accuracy_gate` (2026-07-18 external review): the COMPLETE
+    `build_strict_accuracy_gate(...)` output, computed by
+    `run_fixed_trace_analysis` over ALL natural records (never the
+    selection-filtered subset). Stored verbatim in the decision JSON and
+    wired into `build_screen_validity` — a failed gate makes the whole
+    screen invalid (`hypothesis_status: "not_tested"`), independent of what
+    `accuracy_screen["pilot_accuracy_plausible"]` alone says. `None` (every
+    protocol-v2 caller) preserves prior behavior byte-for-byte.
     """
     eligible = [p for p in pair_results if p.eligibility.eligible]
     eligible_base_ids = {p.base_record_id for p in eligible}
@@ -1030,6 +1086,7 @@ def build_fixed_trace_decision(
         settings=settings,
         accuracy_screen=accuracy_screen,
         meaningful_compression_rate=meaningful_compression_rate,
+        strict_accuracy_gate=strict_accuracy_gate,
     )
     # Never report a characterization of the result ("positive"/"negative"/
     # "gap exists"/"gap does not exist") — this screen's job is kill/continue,
@@ -1085,6 +1142,7 @@ def build_fixed_trace_decision(
         "n_negative_cpss": n_negative_cpss,
         "n_ties_cpss": n_ties_cpss,
         "accuracy_screen": accuracy_screen,
+        "strict_accuracy_gate": strict_accuracy_gate,
         "screen_valid": screen_valid,
         "screen_invalid_reasons": screen_invalid_reasons,
         "hypothesis_status": hypothesis_status,
@@ -1338,6 +1396,8 @@ def run_fixed_trace_analysis(
     settings: "FixedTraceSettings",
     expected_identity: tuple | None = None,
     selected_base_record_ids: set[str] | None = None,
+    expected_accuracy_n: int | None = None,
+    selection_file_path: str | Path | None = None,
 ) -> int:
     """End-to-end: read the canonical base file plus both replay policies'
     fixed-trace probe files from `output_dir`, pair/score them, and write
@@ -1365,16 +1425,39 @@ def run_fixed_trace_analysis(
     existing caller before this parameter existed, and every protocol-v2
     invocation) preserves the exact prior behavior: analyze whatever is
     present, no completeness requirement.
+
+    Accuracy population (2026-07-18 external review — a real defect in the
+    first v3 pass): the natural accuracy gate is built from ALL canonical
+    base records and ALL natural R-KV records, BEFORE any
+    `selected_base_record_ids` filtering is applied. The first pass built
+    `build_accuracy_screen` from the already-filtered selected subset —
+    and since selection requires FullKV correctness, FullKV "accuracy" on
+    that population is 1.0 by construction (e.g. 10/10 instead of the true
+    33/50), which silently guaranteed `pilot_accuracy_plausible: True`
+    whenever the R-KV side was similar. Only pair construction, PSS/CPSS,
+    curves, and eligibility are selection-scoped; accuracy never is.
+
+    `expected_accuracy_n` (same review): the pre-registered natural record
+    count (manifest rows × seeds, `kvcot.cli._expected_stage_record_count`
+    — 50 for the current stage), enforced by `build_strict_accuracy_gate`
+    on BOTH natural files. `None` falls back to the canonical base file's
+    own record count — direct callers/tests only; the CLI always passes
+    the manifest-derived value.
+
+    Returns 0 on success; returns 1 (after still writing the decision JSON,
+    which documents the full `strict_accuracy_gate` object and reports
+    `hypothesis_status: "not_tested"`) when the strict accuracy gate fails.
     """
     output_dir = Path(output_dir)
     base_path = output_dir / f"{trace_condition}.jsonl"
     full_probes_path = output_dir / f"{trace_condition}_on_{trace_condition}_fixed_trace_probes.jsonl"
     rkv_probes_path = output_dir / f"{replay_condition}_on_{trace_condition}_fixed_trace_probes.jsonl"
+    rkv_natural_path = output_dir / f"{replay_condition}.jsonl"
 
-    base_records = list(read_jsonl(base_path))
+    all_base_records = list(read_jsonl(base_path))
     full_probes = load_fixed_trace_records(full_probes_path, trace_condition)
     rkv_probes = load_fixed_trace_records(rkv_probes_path, replay_condition)
-    base_identity = _validate_base_records(base_records, base_path, trace_condition)
+    base_identity = _validate_base_records(all_base_records, base_path, trace_condition)
     full_probes_identity = _validate_fixed_trace_probe_records(full_probes, full_probes_path)
     rkv_probes_identity = _validate_fixed_trace_probe_records(rkv_probes, rkv_probes_path)
     _assert_consistent_identity(
@@ -1387,9 +1470,54 @@ def run_fixed_trace_analysis(
     )
     _assert_shared_trace_source(full_probes, rkv_probes, trace_condition)
 
+    # Protocol v3: the strict natural-accuracy gate runs over ALL natural
+    # records, BEFORE selection filtering (see docstring). v2 stages
+    # (require_meaningful_compression=False) never had a natural R-KV run
+    # and keep producing byte-identical decision JSON (both gate fields
+    # stay None).
+    accuracy_screen: dict | None = None
+    strict_accuracy_gate: dict | None = None
+    if settings.require_meaningful_compression:
+        gate_expected_n = expected_accuracy_n if expected_accuracy_n is not None else len(all_base_records)
+        if rkv_natural_path.exists():
+            rkv_natural_records = list(read_jsonl(rkv_natural_path))
+            strict_accuracy_gate = build_strict_accuracy_gate(
+                all_base_records,
+                rkv_natural_records,
+                expected_n=gate_expected_n,
+                settings=settings,
+                expected_identity=expected_identity,
+                expected_rkv_condition=replay_condition,
+            )
+        else:
+            strict_accuracy_gate = {
+                "gate_passed": False,
+                "reasons": [
+                    f"natural R-KV base file {rkv_natural_path} not found -- the strict "
+                    "accuracy gate (and therefore the accuracy screen) could not be built"
+                ],
+                "expected_n": gate_expected_n,
+                "n_full": len(all_base_records),
+                "n_rkv": 0,
+                "accuracy_screen": None,
+            }
+        accuracy_screen = strict_accuracy_gate["accuracy_screen"]
+        if accuracy_screen is None:
+            accuracy_screen = {
+                "statistical_note": (
+                    "accuracy screen could not be built -- see strict_accuracy_gate.reasons"
+                ),
+                "n_accuracy_pairs": 0,
+                "full_accuracy": None,
+                "rkv_accuracy": None,
+                "accuracy_difference_rkv_minus_full": None,
+                "pilot_accuracy_plausible": False,
+            }
+
+    base_records = all_base_records
     if selected_base_record_ids is not None:
-        _verify_selection_completeness(selected_base_record_ids, base_records, full_probes, rkv_probes)
-        base_records = [b for b in base_records if b["record_id"] in selected_base_record_ids]
+        _verify_selection_completeness(selected_base_record_ids, all_base_records, full_probes, rkv_probes)
+        base_records = [b for b in all_base_records if b["record_id"] in selected_base_record_ids]
         # Scope EVERYTHING (curves included, not just the pairing step) to
         # exactly the selected set -- otherwise a probe file containing
         # leftover records from a different/superset selection would still
@@ -1414,39 +1542,61 @@ def run_fixed_trace_analysis(
     full_curve = fixed_trace_curve_by_fraction(full_probes)
     rkv_curve = fixed_trace_curve_by_fraction(rkv_probes)
 
-    # Protocol v3 (CHANGELOG.md 2026-07-17): a natural (non-fixed-trace)
-    # R-KV base run on the SAME manifest is required to even attempt a
-    # pilot accuracy screen -- only look for one when this stage actually
-    # requires the meaningful-compression gate (the v2/v3 discriminator);
-    # v2 stages never had a natural R-KV run to read here, and must keep
-    # producing byte-identical decision JSON (accuracy_screen stays None).
-    accuracy_screen: dict | None = None
-    if settings.require_meaningful_compression:
-        rkv_natural_path = output_dir / f"{replay_condition}.jsonl"
-        if rkv_natural_path.exists():
-            rkv_natural_records = list(read_jsonl(rkv_natural_path))
-            accuracy_screen = build_accuracy_screen(base_records, rkv_natural_records, settings)
-        else:
-            accuracy_screen = {
-                "statistical_note": (
-                    f"natural R-KV base file {rkv_natural_path} not found -- accuracy screen "
-                    "could not be built"
-                ),
-                "n_accuracy_pairs": 0,
-                "full_accuracy": None,
-                "rkv_accuracy": None,
-                "accuracy_difference_rkv_minus_full": None,
-                "pilot_accuracy_plausible": False,
-            }
-
     decision = build_fixed_trace_decision(
         len(pairs), pairs, full_curve, rkv_curve, settings,
         full_probes=full_probes, rkv_probes=rkv_probes, accuracy_screen=accuracy_screen,
+        strict_accuracy_gate=strict_accuracy_gate,
     )
+    decision["analysis_provenance"] = _analysis_provenance()
+    decision["input_sha256"] = {
+        "full_base": _sha256_or_none(base_path),
+        "natural_rkv": _sha256_or_none(rkv_natural_path),
+        "full_fixed_trace_probes": _sha256_or_none(full_probes_path),
+        "rkv_fixed_trace_probes": _sha256_or_none(rkv_probes_path),
+        "selection": _sha256_or_none(selection_file_path),
+    }
     out_path = Path("results/decisions") / f"{stage_name}_fixed_trace.json"
     write_json(out_path, decision)
     print(
         f"wrote {out_path}: n_shared={decision['n_shared']} n_eligible={decision['n_eligible']} "
         f"mean_delta_pss={decision['mean_delta_pss']} hypothesis_status={decision['hypothesis_status']}"
     )
+    if strict_accuracy_gate is not None and not strict_accuracy_gate["gate_passed"]:
+        print(
+            "run_fixed_trace_analysis: STRICT ACCURACY GATE FAILED -- the decision above is "
+            "recorded with hypothesis_status='not_tested' and must not be interpreted:"
+        )
+        for reason in strict_accuracy_gate["reasons"]:
+            print(f"  - {reason}")
+        return 1
     return 0
+
+
+def _analysis_provenance() -> dict:
+    """Git commit/dirty state of the code that ran THIS analysis (2026-07-18
+    external review). The GPU data producer's own commit is already recorded
+    per-record (`provenance.git_commit`); data-production and analysis code
+    identities are separate facts and both belong in the decision JSON —
+    the analyzer commit must never be presented as having generated the raw
+    data. Deferred import: kvcot.runtime is torch-free at module scope, but
+    kvcot.analysis keeps zero module-scope dependencies on it regardless
+    (tests/unit/test_no_analysis_torch_import.py discipline)."""
+    from kvcot.runtime import git_commit, git_is_dirty
+    from kvcot.schemas import utc_now_iso
+
+    return {
+        "git_commit": git_commit(),
+        "git_dirty": git_is_dirty(),
+        "analyzed_at_utc": utc_now_iso(),
+    }
+
+
+def _sha256_or_none(path: str | Path | None) -> str | None:
+    from kvcot.utils.hashing import sha256_file
+
+    if path is None:
+        return None
+    path = Path(path)
+    if not path.exists():
+        return None
+    return sha256_file(path)

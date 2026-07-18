@@ -279,3 +279,21 @@ value. Finally, a natural-accuracy pilot screen (`build_accuracy_screen`,
 remains reserved for §9's frozen `paired_accuracy_diff`) checks that R-KV's
 own natural accuracy on the same manifest has not collapsed relative to
 FullKV's, something protocol v2 never generated the data to check at all.
+
+**Accuracy population vs. analysis population (2026-07-18, external
+review).** These are different populations by design, and conflating them
+was a real defect fixed on this date (CHANGELOG.md): the final v3
+PSS/CPSS/curve/eligibility computations run over the SELECTED examples
+(`--selection-file`, in practice 10), but the natural-accuracy gate always
+runs over ALL natural records of both conditions on the stage manifest (in
+practice 50 per condition, enforced as an exact pre-registered count by
+`build_strict_accuracy_gate` — `kvcot check-fixed-trace-accuracy`
+deliberately accepts no `--limit`/`--problem-index`/`--seed`). Selection
+conditions on FullKV correctness, so "accuracy" measured on the selected
+subset is 1.0 by construction and is not an accuracy measurement at all.
+The defective version computed `full_accuracy: 10/10` where the true
+value was 33/50. And in all cases: this gate is a small-n pilot
+PLAUSIBILITY check ("`pilot_accuracy_plausible`") — it never supports an
+"accuracy neutral" or "accuracy preserving" claim; §9's frozen
+`paired_accuracy_diff` on the 200-problem main split remains the only test
+allowed to speak to distributional accuracy preservation.
