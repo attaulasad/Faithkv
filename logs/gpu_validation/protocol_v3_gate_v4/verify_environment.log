@@ -1,0 +1,14 @@
+== kvcot environment verification ==
+python: Python 3.12.12
+torch: 2.6.0+cu124
+cuda available: True
+cuda device: NVIDIA GeForce RTX 3090
+cuda version (torch build): 12.4
+bf16: supported
+flash_attn: 2.7.4.post1
+transformers: 4.55.4
+== checking pinned submodule ==
+submodule pinned correctly: 45eaa7d69d20b7388321f077020a610d9afb65bd
+== checking requirements-lock.txt against installed versions ==
+requirements-lock.txt matches installed state-critical packages
+== environment verification passed ==

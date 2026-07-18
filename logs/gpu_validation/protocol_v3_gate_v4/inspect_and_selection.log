@@ -1,0 +1,11 @@
+inspect-fixed-trace: results/raw/protocol_v3/early_gap_b128/full.jsonl
+  number of records: 50
+  number correct: 33
+  cap hits: 0
+  think parse failures: 0
+  think length: min=61 median=162.5 max=384
+  prompt+think length: min=166 median=281.5 max=536
+  configured R-KV budget: 128
+  fraction of traces longer than budget: 1.0
+  best-case (optimistic) mean retention achievable at this budget: 0.4725877572867254
+wrote results/selections/early_gap_v3_b128.json: n_ranked=33 n_predicted_eligible=10 n_selected=10 (of 50 base records, 17 rejected on correctness/cap/think-parse)
