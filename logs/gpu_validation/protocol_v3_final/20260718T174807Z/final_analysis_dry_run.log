@@ -1,0 +1,7 @@
+analyze-fixed-trace plan: stage=early_gap_v3_b128
+  trace_condition=full  replay_condition=rkv_b128
+  reads: results/raw/protocol_v3/early_gap_b128/full.jsonl, results/raw/protocol_v3/early_gap_b128/full_on_full_fixed_trace_probes.jsonl, results/raw/protocol_v3/early_gap_b128/rkv_b128_on_full_fixed_trace_probes.jsonl
+  reads natural R-KV base file: results/raw/protocol_v3/early_gap_b128/rkv_b128.jsonl
+  strict accuracy gate: REQUIRED -- expected natural record count (both conditions, all-population, never selection-filtered): 50
+  selection file: results/selections/early_gap_v3_b128.json
+  writes: results/decisions/early_gap_v3_b128_fixed_trace.json

@@ -1,0 +1,17 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.12, pytest-9.1.1, pluggy-1.6.0 -- /workspace/Faithkv-v3-20260718T174807Z/.venv/bin/python3.12
+cachedir: .pytest_cache
+rootdir: /workspace/Faithkv-v3-20260718T174807Z
+configfile: pytest.ini
+plugins: cov-7.1.0
+collecting ... collected 7 items
+
+tests/integration/test_replay_gpu.py::test_replay_reproduces_identical_tokens_and_compaction_events[flash_attention_2] PASSED [ 14%]
+tests/integration/test_replay_gpu.py::test_replay_reproduces_identical_tokens_and_compaction_events[sdpa] PASSED [ 28%]
+tests/integration/test_replay_gpu.py::test_two_independent_replays_are_identical PASSED [ 42%]
+tests/integration/test_replay_gpu.py::test_restoring_same_snapshot_twice_yields_identical_probe_tokens PASSED [ 57%]
+tests/integration/test_replay_gpu.py::test_fullkv_replay_passes_identity_test PASSED [ 71%]
+tests/integration/test_replay_gpu.py::test_streaming_replay_vs_bulk_prefill_negative_control PASSED [ 85%]
+tests/integration/test_replay_gpu.py::test_note_event_once_records_exactly_one_entry_per_real_event PASSED [100%]
+
+======================== 7 passed in 447.72s (0:07:27) =========================

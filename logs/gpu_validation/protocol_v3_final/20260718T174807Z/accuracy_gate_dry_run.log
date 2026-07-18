@@ -1,0 +1,5 @@
+check-fixed-trace-accuracy plan: stage=early_gap_v3_b128  replay_condition=rkv_b128
+  reads: results/raw/protocol_v3/early_gap_b128/full.jsonl, results/raw/protocol_v3/early_gap_b128/rkv_b128.jsonl
+  expected_n=50 (manifest rows x seeds; partial overrides disabled -- 
+    this command accepts no --limit/--problem-index/--seed by design)
+  writes: results/decisions/early_gap_v3_b128_accuracy_gate.json
