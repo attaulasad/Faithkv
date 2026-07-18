@@ -5,6 +5,115 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-18 — Analysis-path fixes: selected-population accuracy defect, strict-gate hardening, provenance (no frozen §1/§4/§8/§9 value changed; no generation/replay/compression/PSS-CPSS math touched; no completed raw GPU record modified)
+
+An external audit of the completed protocol-v3 code found one mandatory
+correctness defect in the final CPU analysis path, two robustness defects
+around it, and a set of reproducibility/test-accounting gaps. All verified
+against the code before fixing. The GPU generation, R-KV integration,
+replay/snapshot machinery, frozen-cache probing, retention measurement, and
+schedule-simulator code are untouched.
+
+- **THE selected-population accuracy defect (mandatory).**
+  `kvcot.analysis.fixed_trace.run_fixed_trace_analysis` filtered the
+  canonical base records down to the `--selection-file` subset BEFORE
+  building the natural-accuracy screen, so `build_accuracy_screen` paired
+  the 10 selected FullKV records (all correct BY CONSTRUCTION — selection
+  requires FullKV correctness) against the natural R-KV records:
+  `full_accuracy` came out 10/10 instead of the true 33/50, silently
+  biasing `pilot_accuracy_plausible` toward passing. Fixed: the strict
+  natural-accuracy gate (`build_strict_accuracy_gate`) now runs over ALL
+  natural records of both conditions, before any selection filtering; only
+  pair construction/PSS/CPSS/curves/eligibility are selection-scoped. The
+  decision JSON now records the complete `strict_accuracy_gate` object
+  (never just the inner `accuracy_screen`), `build_screen_validity` fails
+  the whole screen when `gate_passed` is not True (a failed gate can never
+  produce `hypothesis_status: "screened"`), and `run_fixed_trace_analysis`
+  exits 1 (after still writing the decision JSON documenting why) on gate
+  failure. The prior GPU-produced records themselves are unaffected — the
+  defect lived purely in the CPU analysis path; no decision computed from
+  it was ever published as a result.
+- **`check-fixed-trace-accuracy` accepted `--limit`/`--problem-index`/
+  `--seed` (mandatory).** Those flags fed `expected_n`, so a partial pair
+  of natural files could be blessed as "the expected experiment" by passing
+  a matching restriction. Removed outright; both
+  `cmd_check_fixed_trace_accuracy` and `cmd_analyze_fixed_trace` now derive
+  the expected natural count from one shared helper
+  (`kvcot.cli._expected_stage_record_count`: manifest rows after the
+  config's own `limit` × resolved seeds — 50 for the current stage) that
+  takes no CLI-args input at all, so the two commands can never derive
+  different expectations.
+- **`build_strict_accuracy_gate` violated its "never raises" contract
+  (mandatory).** It extracted `(source_row_index, global_seed)` keys by
+  direct subscripting BEFORE schema validation, so a malformed record
+  (missing `dataset`/`global_seed`, or not a dict) raised `KeyError` out of
+  the function instead of returning `gate_passed: False`. Rewritten:
+  every row is schema-validated first; keys/identities/conditions/accuracy
+  are computed only from valid rows; any invalid row fails the gate with a
+  per-index reason and `accuracy_screen: null`; the returned object always
+  has the full stable shape.
+- **Analysis provenance + input hashes.** The fixed-trace decision JSON and
+  the accuracy-gate JSON now record `analysis_provenance` (the ANALYZER's
+  own git commit + dirty flag — the GPU data producer's commit is already
+  on every raw record and the two must never be conflated: the raw pilot
+  data was produced at `ef9bb1e...`, analysis code moves independently) and
+  `input_sha256` over every file read (base, natural R-KV, both probe
+  files, selection; config + lock hashes on the gate JSON).
+- **Selection-file validation.** `kvcot.cli._load_fixed_trace_selection`
+  silently collapsed duplicate candidate entries via a dict comprehension.
+  Now rejected: duplicate candidate `base_record_id`/`source_row_index`
+  entries, `n_ranked`/`n_predicted_eligible` disagreeing with the actual
+  candidate entries, candidates' own `selected` flags disagreeing with
+  `selected_base_record_ids`, and selected ids not present in the canonical
+  base file. Count checks key off `n_ranked` (the entries actually written),
+  never `n_candidates_considered` (which legitimately counts the 17
+  rejected-before-ranking rows the real committed selection file never
+  wrote as candidates).
+- **f=1 stability test accounting
+  (`tests/integration/test_probe_stability_gpu.py`).** Two defects: it ran
+  10 of the pre-registered 20 smoke rows, and it incremented `n_valid`
+  BEFORE checking probe-answer extractability, so an unextractable probe
+  counted as valid-but-unstable while the assertion message claimed a
+  both-extractable denominator. A valid pair now requires: base not
+  cap-hit, base answer extracted, think span parsed, probe not stopped on
+  `max_new_tokens`, probe answer extracted; per-example diagnostics are
+  returned; a crashed child process is detected by polling instead of
+  blocking the full queue timeout, and child exceptions propagate as
+  structured errors. The 0.90 threshold and control suffix are NOT touched.
+  **The prior 7/10 result remains unresolved** — this changes what is
+  counted, not what passes; the corrected 20-row run has not happened.
+- **`scripts/verify_environment.sh` now enforces instead of printing:**
+  Python 3.12.x, torch `2.6.0+cu124` (CUDA 12.4), transformers `4.55.4`
+  (was a warning), flash-attn `2.7.4.post1`, CXX11 ABI False, CUDA + BF16
+  availability, and the pinned R-KV commit are all FATAL on mismatch; a
+  real BF16 FlashAttention kernel is executed (`causal=True`, shape +
+  finiteness checked); the requirements-lock checker now parses the
+  flash_attn direct-URL pin (the old `==`-only parser skipped that line —
+  the single most state-critical pin — entirely) and reads installed
+  versions via `importlib.metadata`, since `pip freeze` reports direct-URL
+  installs in `pkg @ url` form.
+- **Dry-run reporting**: `analyze-fixed-trace --dry-run` now reports the
+  natural R-KV file, the selection file, the expected natural record count,
+  and the strict-gate requirement for v3 stages;
+  `check-fixed-trace-accuracy --dry-run` prints `expected_n` and that
+  partial overrides are disabled.
+- **Regression tests** for all of the above (27 new tests; the CPU-side
+  suite grows from 331 to 358), including: selected-analysis-uses-all-50 (asserts
+  `full_accuracy == 33/50`-shaped population, `n_accuracy_pairs == 50`,
+  `n_shared == 10`), partial/wrong-condition/identity-mismatch natural
+  R-KV rejection, gate-failure-blocks-"screened", never-raises gate inputs
+  (missing `dataset`, missing `global_seed`, non-dict), CLI flag removal,
+  selection duplicate/count-consistency rejection, and explicit
+  protocol-v2-unchanged coverage (v2 stages: no gate built, no natural file
+  read, `strict_accuracy_gate: null`, rc 0).
+- **Deferred by design (documented, not implemented):** the producer-side
+  identity extension (schema 1.5.0: `stage_config_sha256`,
+  `lock_config_sha256`, `data_producer_tree_sha` over the generation-
+  critical tree) is future-stage work. Existing pilot records stay schema
+  1.4.0 exactly as produced (commit `ef9bb1e`, environment recorded in
+  `requirements-lock.txt`/`results/run_manifests/`); no schema migration or
+  rewrite of completed raw data.
+
 ## 2026-07-19 — Fixed-trace protocol v3, third pass: setup-script fix, selection/accuracy-gate hardening, safe-default reversal (secondary, additive; no frozen §1/§4/§8/§9 value changed)
 
 A third review of `66f477e` independently re-verified the cache-schedule

@@ -376,3 +376,98 @@ def test_replay_fixed_trace_resume_accepts_matching_model_and_tokenizer_revision
     args = _fixed_trace_args(replay_condition="rkv_b512", resume=True)
     rc = cmd_replay_fixed_trace(args)
     assert rc == 0
+
+
+# --- check-fixed-trace-accuracy must not accept partial-data flags
+# (2026-07-18 external review: --limit/--problem-index/--seed fed expected_n,
+# so a partial pair of natural files could be blessed as "the expected
+# experiment" just by passing a matching restriction) ---
+
+def test_accuracy_cli_does_not_accept_limit():
+    from kvcot.cli import build_parser
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            ["check-fixed-trace-accuracy", "--config", "configs/early_gap_v3_b128.yaml",
+             "--replay-condition", "rkv_b128", "--limit", "5"]
+        )
+
+
+def test_accuracy_cli_does_not_accept_problem_index():
+    from kvcot.cli import build_parser
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            ["check-fixed-trace-accuracy", "--config", "configs/early_gap_v3_b128.yaml",
+             "--replay-condition", "rkv_b128", "--problem-index", "3"]
+        )
+
+
+def test_accuracy_cli_does_not_accept_seed():
+    from kvcot.cli import build_parser
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            ["check-fixed-trace-accuracy", "--config", "configs/early_gap_v3_b128.yaml",
+             "--replay-condition", "rkv_b128", "--seed", "42"]
+        )
+
+
+def test_accuracy_cli_still_accepts_its_supported_flags():
+    from kvcot.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["check-fixed-trace-accuracy", "--config", "configs/early_gap_v3_b128.yaml",
+         "--replay-condition", "rkv_b128", "--dry-run"]
+    )
+    assert args.dry_run is True
+
+
+def test_check_fixed_trace_accuracy_dry_run_reports_expected_n(capsys):
+    from kvcot.cli import cmd_check_fixed_trace_accuracy
+
+    args = SimpleNamespace(config="configs/early_gap_v3_b128.yaml", replay_condition="rkv_b128", dry_run=True)
+    rc = cmd_check_fixed_trace_accuracy(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    # 50 manifest rows x 1 seed, from the stage config + lock only.
+    assert "expected_n=50" in out
+    assert "partial overrides disabled" in out
+
+
+def test_expected_stage_record_count_ignores_cli_style_restrictions():
+    from kvcot.cli import _expected_stage_record_count
+    from kvcot.config import load_stage_config
+
+    stage, lock = load_stage_config("configs/early_gap_v3_b128.yaml")
+    # Takes no args namespace at all -- there is nothing a CLI flag could
+    # feed it. 50 manifest rows (config limit 50) x 1 seed (seeds_override).
+    assert _expected_stage_record_count(stage, lock) == 50
+
+
+def test_analyze_fixed_trace_dry_run_reports_v3_gate_inputs(capsys):
+    args = SimpleNamespace(
+        config="configs/early_gap_v3_b128.yaml", trace_condition="full",
+        replay_condition="rkv_b128", dry_run=True,
+        selection_file="results/selections/early_gap_v3_b128.json",
+    )
+    rc = cmd_analyze_fixed_trace(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "rkv_b128.jsonl" in out  # natural R-KV file reported
+    assert "strict accuracy gate: REQUIRED" in out
+    assert "50" in out  # expected natural record count
+    assert "selection file: results/selections/early_gap_v3_b128.json" in out
+    assert "early_gap_v3_b128_fixed_trace.json" in out
+
+
+def test_analyze_fixed_trace_dry_run_v2_config_reports_no_strict_gate(capsys):
+    # v2 stage: no natural R-KV file, no strict gate -- the dry-run plan
+    # must not claim one is required.
+    args = SimpleNamespace(
+        config=EARLY_GAP_CONFIG, trace_condition="full", replay_condition="rkv_b512", dry_run=True
+    )
+    rc = cmd_analyze_fixed_trace(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "strict accuracy gate: REQUIRED" not in out

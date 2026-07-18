@@ -60,8 +60,8 @@ def _valid_selection(tmp_path, stage, lock, base_path) -> dict:
         "selected_source_row_indices": [0, 1],
         "selected_base_record_ids": ["base-full-x-0", "base-full-x-1"],
         "candidates": [
-            {"source_row_index": 0, "base_record_id": "base-full-x-0", "predicted_eligible": True},
-            {"source_row_index": 1, "base_record_id": "base-full-x-1", "predicted_eligible": True},
+            {"source_row_index": 0, "base_record_id": "base-full-x-0", "predicted_eligible": True, "selected": True},
+            {"source_row_index": 1, "base_record_id": "base-full-x-1", "predicted_eligible": True, "selected": True},
         ],
     }
 
@@ -264,3 +264,134 @@ def test_load_fixed_trace_selection_rejects_max_selected_not_matching_preregiste
     args = SimpleNamespace(config=_LOCK_PATH)
     with pytest.raises(SelectionFileMismatchError, match="max_selected"):
         _load_fixed_trace_selection(str(selection_path), args, stage, lock, base_path)
+
+
+# --- candidate-level duplicate/count-consistency validation
+# (2026-07-18 external review: duplicate candidate entries were silently
+# collapsed by the candidates_by_id dict -- last row won) ---
+
+def test_selection_rejects_duplicate_candidate_base_ids(tmp_path):
+    _write_base_file(tmp_path / "full.jsonl", [_base_row(0), _base_row(1)])
+    stage = _stage(tmp_path)
+    lock = load_lock_config("configs/lock.yaml")
+    base_path = tmp_path / "full.jsonl"
+    selection = _valid_selection(tmp_path, stage, lock, base_path)
+    selection["candidates"].append(
+        {"source_row_index": 7, "base_record_id": "base-full-x-0", "predicted_eligible": False, "selected": False}
+    )
+    selection["n_ranked"] = 3
+    selection_path = tmp_path / "selection.json"
+    write_json(selection_path, selection)
+
+    args = SimpleNamespace(config=_LOCK_PATH)
+    with pytest.raises(SelectionFileMismatchError, match="duplicate base_record_id"):
+        _load_fixed_trace_selection(str(selection_path), args, stage, lock, base_path)
+
+
+def test_selection_rejects_duplicate_candidate_row_indices(tmp_path):
+    _write_base_file(tmp_path / "full.jsonl", [_base_row(0), _base_row(1)])
+    stage = _stage(tmp_path)
+    lock = load_lock_config("configs/lock.yaml")
+    base_path = tmp_path / "full.jsonl"
+    selection = _valid_selection(tmp_path, stage, lock, base_path)
+    selection["candidates"].append(
+        {"source_row_index": 0, "base_record_id": "base-full-x-9", "predicted_eligible": False, "selected": False}
+    )
+    selection["n_ranked"] = 3
+    selection_path = tmp_path / "selection.json"
+    write_json(selection_path, selection)
+
+    args = SimpleNamespace(config=_LOCK_PATH)
+    with pytest.raises(SelectionFileMismatchError, match="duplicate source_row_index"):
+        _load_fixed_trace_selection(str(selection_path), args, stage, lock, base_path)
+
+
+def test_selection_rejects_n_ranked_disagreeing_with_candidates(tmp_path):
+    _write_base_file(tmp_path / "full.jsonl", [_base_row(0), _base_row(1)])
+    stage = _stage(tmp_path)
+    lock = load_lock_config("configs/lock.yaml")
+    base_path = tmp_path / "full.jsonl"
+    selection = _valid_selection(tmp_path, stage, lock, base_path)
+    selection["n_ranked"] = 9
+    selection_path = tmp_path / "selection.json"
+    write_json(selection_path, selection)
+
+    args = SimpleNamespace(config=_LOCK_PATH)
+    with pytest.raises(SelectionFileMismatchError, match="n_ranked"):
+        _load_fixed_trace_selection(str(selection_path), args, stage, lock, base_path)
+
+
+def test_selection_rejects_n_predicted_eligible_disagreeing_with_candidates(tmp_path):
+    _write_base_file(tmp_path / "full.jsonl", [_base_row(0), _base_row(1)])
+    stage = _stage(tmp_path)
+    lock = load_lock_config("configs/lock.yaml")
+    base_path = tmp_path / "full.jsonl"
+    selection = _valid_selection(tmp_path, stage, lock, base_path)
+    selection["n_predicted_eligible"] = 1  # both candidates are predicted_eligible=True
+    selection_path = tmp_path / "selection.json"
+    write_json(selection_path, selection)
+
+    args = SimpleNamespace(config=_LOCK_PATH)
+    with pytest.raises(SelectionFileMismatchError, match="n_predicted_eligible"):
+        _load_fixed_trace_selection(str(selection_path), args, stage, lock, base_path)
+
+
+def test_selection_rejects_selected_flags_disagreeing_with_selected_ids(tmp_path):
+    _write_base_file(tmp_path / "full.jsonl", [_base_row(0), _base_row(1)])
+    stage = _stage(tmp_path)
+    lock = load_lock_config("configs/lock.yaml")
+    base_path = tmp_path / "full.jsonl"
+    selection = _valid_selection(tmp_path, stage, lock, base_path)
+    selection["candidates"][1]["selected"] = False  # still in selected_base_record_ids though
+    selection_path = tmp_path / "selection.json"
+    write_json(selection_path, selection)
+
+    args = SimpleNamespace(config=_LOCK_PATH)
+    with pytest.raises(SelectionFileMismatchError, match="selected=true flags"):
+        _load_fixed_trace_selection(str(selection_path), args, stage, lock, base_path)
+
+
+def test_selection_rejects_selected_id_missing_from_base_file(tmp_path):
+    # Base file only contains x-0/x-1; the selection additionally selects an
+    # x-2 whose candidate entry exists -- must be rejected against the
+    # canonical base records, not just against the candidates list.
+    _write_base_file(tmp_path / "full.jsonl", [_base_row(0), _base_row(1)])
+    stage = _stage(tmp_path)
+    lock = load_lock_config("configs/lock.yaml")
+    base_path = tmp_path / "full.jsonl"
+    selection = _valid_selection(tmp_path, stage, lock, base_path)
+    selection["candidates"].append(
+        {"source_row_index": 2, "base_record_id": "base-full-x-2", "predicted_eligible": True, "selected": True}
+    )
+    selection["n_ranked"] = 3
+    selection["n_predicted_eligible"] = 3
+    selection["n_selected"] = 3
+    selection["selected_base_record_ids"] = ["base-full-x-0", "base-full-x-1", "base-full-x-2"]
+    selection["selected_source_row_indices"] = [0, 1, 2]
+    selection_path = tmp_path / "selection.json"
+    write_json(selection_path, selection)
+
+    args = SimpleNamespace(config=_LOCK_PATH)
+    with pytest.raises(SelectionFileMismatchError, match="not present in the canonical base file"):
+        _load_fixed_trace_selection(str(selection_path), args, stage, lock, base_path)
+
+
+def test_selection_accepts_real_committed_selection_shape(tmp_path):
+    # The real committed results/selections/early_gap_v3_b128.json has
+    # n_candidates_considered=50 but only 33 candidate ENTRIES (n_ranked=33;
+    # 17 rejected rows are counted but never written as candidates). The
+    # count-consistency checks must key off n_ranked, never
+    # n_candidates_considered, or the real file would be rejected.
+    _write_base_file(tmp_path / "full.jsonl", [_base_row(0), _base_row(1)])
+    stage = _stage(tmp_path)
+    lock = load_lock_config("configs/lock.yaml")
+    base_path = tmp_path / "full.jsonl"
+    selection = _valid_selection(tmp_path, stage, lock, base_path)
+    selection["n_candidates_considered"] = 50  # >> len(candidates), like the real file
+    selection["n_rejected_invalid_base"] = 48
+    selection_path = tmp_path / "selection.json"
+    write_json(selection_path, selection)
+
+    args = SimpleNamespace(config=_LOCK_PATH)
+    loaded = _load_fixed_trace_selection(str(selection_path), args, stage, lock, base_path)
+    assert loaded["n_selected"] == 2

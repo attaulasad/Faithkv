@@ -245,6 +245,32 @@ def _resolve_seeds_for_run(stage, lock, args) -> list[int]:
     return seeds
 
 
+def _expected_stage_record_count(stage, lock) -> int:
+    """The PRE-REGISTERED natural record count for this stage — manifest rows
+    (after the stage config's own `limit`, the config-declared cap) × the
+    stage's resolved seeds. Deliberately takes no `args` (2026-07-18 external
+    review): `check-fixed-trace-accuracy` and `analyze-fixed-trace` both
+    derive their expected natural-population size from THIS function and
+    nothing else, so no CLI flag (`--limit`/`--problem-index`/`--seed`) can
+    shrink the expectation and let a partial pair of natural files pass the
+    strict accuracy gate as if it were the complete pre-registered
+    experiment. For the current protocol-v3 stage (50 manifest rows × 1
+    seed) this is always 50."""
+    rows = list(read_manifest(stage.dataset_manifest))
+    if stage.limit is not None:
+        rows = rows[: stage.limit]
+    return len(rows) * len(stage.resolve_seeds(lock))
+
+
+def _resolve_lock_path(config_path: str, stage) -> Path:
+    """The same lock-file resolution `kvcot.config.load_stage_config` uses —
+    sibling of the stage config first, then the literal configured path."""
+    lock_path = Path(config_path).parent / Path(stage.lock_config_path).name
+    if not lock_path.exists():
+        lock_path = Path(stage.lock_config_path)
+    return lock_path
+
+
 # ---------------------------------------------------------------- freeze-manifests
 
 def cmd_freeze_manifests(args: argparse.Namespace) -> int:
@@ -785,6 +811,12 @@ class SelectionFileMismatchError(ValueError):
     pass
 
 
+def _read_jsonl_for_selection(path: Path):
+    from kvcot.utils.io import read_jsonl
+
+    return read_jsonl(path)
+
+
 def _load_fixed_trace_selection(selection_path: str, args, stage, lock, base_path: Path) -> dict:
     """Load and verify a `results/selections/{stage}.json` file (protocol v3,
     CHANGELOG.md 2026-07-17/2026-07-18) before trusting it to restrict any
@@ -840,7 +872,39 @@ def _load_fixed_trace_selection(selection_path: str, args, stage, lock, base_pat
     selected_ids = selection.get("selected_base_record_ids", [])
     selected_rows = selection.get("selected_source_row_indices", [])
     n_selected = selection.get("n_selected")
-    candidates_by_id = {c["base_record_id"]: c for c in selection.get("candidates", [])}
+    candidates = selection.get("candidates", [])
+
+    # 2026-07-18 external review: duplicate CANDIDATE entries were silently
+    # collapsed by the candidates_by_id dict below (last row won), so a
+    # corrupted/hand-edited selection with two conflicting entries for the
+    # same base_record_id passed every check against whichever happened to
+    # come last. Duplicates are structural corruption -- reject them, and
+    # cross-check every summary count field against the actual entries.
+    candidate_ids = [c.get("base_record_id") for c in candidates]
+    if len(candidate_ids) != len(set(candidate_ids)):
+        dupes = sorted({cid for cid in candidate_ids if candidate_ids.count(cid) > 1})
+        mismatches.append(f"candidates contain duplicate base_record_id entries: {dupes}")
+    candidate_row_indices = [c.get("source_row_index") for c in candidates]
+    if len(candidate_row_indices) != len(set(candidate_row_indices)):
+        dupes = sorted({r for r in candidate_row_indices if candidate_row_indices.count(r) > 1})
+        mismatches.append(f"candidates contain duplicate source_row_index entries: {dupes}")
+    n_ranked = selection.get("n_ranked")
+    if n_ranked is not None and n_ranked != len(candidates):
+        mismatches.append(f"n_ranked ({n_ranked!r}) does not equal the number of candidate entries ({len(candidates)})")
+    n_predicted_eligible = selection.get("n_predicted_eligible")
+    actual_predicted_eligible = sum(1 for c in candidates if c.get("predicted_eligible") is True)
+    if n_predicted_eligible is not None and n_predicted_eligible != actual_predicted_eligible:
+        mismatches.append(
+            f"n_predicted_eligible ({n_predicted_eligible!r}) does not equal the number of "
+            f"predicted_eligible=true candidate entries ({actual_predicted_eligible})"
+        )
+    selected_flagged_ids = {c.get("base_record_id") for c in candidates if c.get("selected") is True}
+    if selected_flagged_ids != set(selected_ids):
+        mismatches.append(
+            f"candidates' own selected=true flags ({sorted(selected_flagged_ids)}) do not agree with "
+            f"selected_base_record_ids ({sorted(set(selected_ids))})"
+        )
+    candidates_by_id = {c["base_record_id"]: c for c in candidates}
 
     if len(selected_ids) != len(set(selected_ids)):
         mismatches.append(f"selected_base_record_ids contains duplicates: {selected_ids}")
@@ -850,6 +914,17 @@ def _load_fixed_trace_selection(selection_path: str, args, stage, lock, base_pat
         mismatches.append(
             f"n_selected ({n_selected!r}) does not equal len(selected_base_record_ids) ({len(selected_ids)})"
         )
+    # Every selected id must name a record in the canonical base file itself
+    # (only checkable when the base file exists on this machine -- the
+    # base_file_sha256 check above already pins its exact bytes when it does).
+    if base_path.exists():
+        base_record_ids = {r.get("record_id") for r in _read_jsonl_for_selection(base_path)}
+        missing_from_base = sorted(set(selected_ids) - base_record_ids)
+        if missing_from_base:
+            mismatches.append(
+                f"selected_base_record_ids not present in the canonical base file {base_path}: "
+                f"{missing_from_base}"
+            )
     if len(selected_ids) != len(selected_rows):
         mismatches.append(
             f"selected_base_record_ids has {len(selected_ids)} entries but "
@@ -1494,6 +1569,21 @@ def cmd_analyze_fixed_trace(args: argparse.Namespace) -> int:
             f"{stage.output_dir}/{trace_condition}_on_{trace_condition}_fixed_trace_probes.jsonl, "
             f"{stage.output_dir}/{replay_condition}_on_{trace_condition}_fixed_trace_probes.jsonl"
         )
+        # Protocol v3 (2026-07-18 external review): the dry run must report
+        # the FULL input set of a v3 analysis -- the natural R-KV file, the
+        # selection file, the pre-registered natural record count, and the
+        # strict accuracy-gate requirement -- not just the three fixed-trace
+        # files a v2 analysis reads.
+        if stage.fixed_trace.require_meaningful_compression:
+            print(f"  reads natural R-KV base file: {stage.output_dir}/{replay_condition}.jsonl")
+            print(
+                "  strict accuracy gate: REQUIRED -- expected natural record count "
+                f"(both conditions, all-population, never selection-filtered): "
+                f"{_expected_stage_record_count(stage, lock)}"
+            )
+        selection_arg_dry = getattr(args, "selection_file", None)
+        if selection_arg_dry:
+            print(f"  selection file: {selection_arg_dry}")
         print(f"  writes: results/decisions/{stage.stage_name}_fixed_trace.json")
         return 0
 
@@ -1524,6 +1614,12 @@ def cmd_analyze_fixed_trace(args: argparse.Namespace) -> int:
         settings=stage.fixed_trace,
         expected_identity=expected_identity,
         selected_base_record_ids=selected_base_record_ids,
+        # 2026-07-18 external review: the natural accuracy population is the
+        # PRE-REGISTERED stage count (manifest x seeds, shared helper with
+        # check-fixed-trace-accuracy so the two commands can never derive
+        # different expectations) -- never the selected subset's size.
+        expected_accuracy_n=_expected_stage_record_count(stage, lock),
+        selection_file_path=selection_arg or None,
     )
 
 
@@ -1546,6 +1642,14 @@ def cmd_check_fixed_trace_accuracy(args: argparse.Namespace) -> int:
     `build_accuracy_screen`'s own intersection-only pairing could otherwise
     report `pilot_accuracy_plausible: True` from a single matching pair
     while the other 49 R-KV records were never generated at all.
+
+    No `--limit`/`--problem-index`/`--seed` (removed 2026-07-18, external
+    review): those flags fed `expected_n`, so a partial pair of natural
+    files could be blessed as "the expected experiment" just by passing a
+    matching restriction. The expected count comes only from the stage
+    config + lock (`_expected_stage_record_count`, shared with
+    `analyze-fixed-trace` so the two commands can never derive different
+    expectations) — for the current stage, always 50.
     """
     stage, lock = load_stage_config(args.config)
     if stage.fixed_trace is None:
@@ -1553,19 +1657,18 @@ def cmd_check_fixed_trace_accuracy(args: argparse.Namespace) -> int:
     replay_condition = _resolve_condition_name(stage, args.replay_condition)
     full_path = Path(stage.output_dir) / "full.jsonl"
     rkv_path = Path(stage.output_dir) / f"{replay_condition}.jsonl"
+    expected_n = _expected_stage_record_count(stage, lock)
 
     if args.dry_run:
         print(f"check-fixed-trace-accuracy plan: stage={stage.stage_name}  replay_condition={replay_condition}")
         print(f"  reads: {full_path}, {rkv_path}")
+        print(f"  expected_n={expected_n} (manifest rows x seeds; partial overrides disabled -- ")
+        print("    this command accepts no --limit/--problem-index/--seed by design)")
         print(f"  writes: results/decisions/{stage.stage_name}_accuracy_gate.json")
         return 0
 
     from kvcot.analysis.fixed_trace import build_strict_accuracy_gate
     from kvcot.utils.io import read_jsonl
-
-    manifest_rows = _load_manifest_filtered(stage, args)
-    seeds = _resolve_seeds_for_run(stage, lock, args)
-    expected_n = len(manifest_rows) * len(seeds)
 
     full_records = list(read_jsonl(full_path))
     rkv_records = list(read_jsonl(rkv_path))
@@ -1581,6 +1684,17 @@ def cmd_check_fixed_trace_accuracy(args: argparse.Namespace) -> int:
         full_records, rkv_records, expected_n=expected_n, settings=stage.fixed_trace,
         expected_identity=expected_identity, expected_rkv_condition=replay_condition,
     )
+    # 2026-07-18 external review: the gate decision must record which
+    # analyzer code produced it and the exact input bytes it judged --
+    # data-production and analysis code identities are separate facts.
+    lock_path = _resolve_lock_path(args.config, stage)
+    gate["analysis_provenance"] = {"git_commit": git_commit(), "git_dirty": git_is_dirty()}
+    gate["config_sha256"] = config_identity(args.config)
+    gate["lock_sha256"] = sha256_file(lock_path) if lock_path.exists() else None
+    gate["input_sha256"] = {
+        "full_base": sha256_file(full_path) if full_path.exists() else None,
+        "natural_rkv": sha256_file(rkv_path) if rkv_path.exists() else None,
+    }
     out_path = Path("results/decisions") / f"{stage.stage_name}_accuracy_gate.json"
     write_json(out_path, gate)
     print(
@@ -2076,12 +2190,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(func=cmd_analyze_fixed_trace)
 
+    # Deliberately NO --limit/--problem-index/--seed here (2026-07-18
+    # external review): they fed expected_n, letting a partial pair of
+    # natural files pass the strict gate as "the expected experiment". The
+    # expected count comes only from the stage config + lock
+    # (_expected_stage_record_count).
     p = sub.add_parser("check-fixed-trace-accuracy")
     p.add_argument("--config", required=True)
     p.add_argument("--replay-condition", required=True)
-    p.add_argument("--limit", type=int, default=None)
-    p.add_argument("--problem-index", type=int, default=None)
-    p.add_argument("--seed", type=int, default=None)
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_check_fixed_trace_accuracy)
 

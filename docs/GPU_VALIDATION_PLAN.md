@@ -66,8 +66,11 @@ cosmetic).
 pytest -m "not gpu" tests/ -q
 ```
 
-Pass criterion: all tests pass (107 passed on the build machine — see the
-final report for the exact count and any environment-specific skips).
+Pass criterion: all tests pass. Do not key on an exact count — the suite
+has grown across protocol versions (107 at the original Stage 0 writing,
+358 after the 2026-07-18 analysis-path fixes); the only pass criterion is
+zero failures, with any environment-specific skips noted in the final
+report.
 
 ## 3. Stock-vs-patched parity (§3.2)
 
@@ -141,10 +144,25 @@ pytest -m gpu tests/integration/test_probe_stability_gpu.py -v
 Pass criterion: ≥90% f=1 stability for both `full` and the smoke R-KV
 budget, on the 20-row smoke manifest.
 
+**Status: NOT passed (2026-07-18).** The prior GPU run of this test used
+only 10 of the 20 pre-registered smoke rows and counted unextractable
+probe answers as valid-but-unstable pairs (both fixed 2026-07-18,
+CHANGELOG.md); its 7/10 result under that broken accounting is unresolved
+and must not be described as a pass anywhere. The corrected test uses the
+frozen 20-row definition, requires a valid pair to have (base not
+cap-hit, base answer extracted, think span parsed, probe not stopped on
+its token cap, probe answer extracted), and returns per-example
+diagnostics — re-run it and inspect individual failures before drawing
+any Stage 0 conclusion. The accounting fix changes what is COUNTED, not
+what passes.
+
 **On failure:** per the build brief, do not tune the statistic. Inspect
 `kvcot.probes.templates.CONTROL_SUFFIX_TEXT` and the greedy probe decoding
 config first (temperature/max_new_tokens), then report and ask before
-changing anything.
+changing anything. Note this criterion belongs to the original Stage 0
+smoke sequence — the protocol-v3 fixed-trace continuation (§10 below) is a
+separate workstream with its own gates and does not inherit a Stage 0 pass
+from it, nor vice versa.
 
 ## 7. Stage 0
 
@@ -182,9 +200,14 @@ unless synced.
 
 Not a Stage 0-2 step and not gated behind any of the stages above — this can
 run any time after `test_replay_gpu.py` passes (§5), since it depends on the
-same replay engine. **Use `configs/early_gap_v2_b128.yaml` first** (not
-`early_gap_b512.yaml`) — see "Which budget to run" below for why. Requires
-FullKV base generation for the screen's manifest first:
+same replay engine. **For any NEW run, skip straight to "Protocol v3 (use
+this, not v2, for any new run)" further down — it is the ONLY current run
+order.** The v2 command block immediately below is retained for provenance
+of the already-completed v2 screen only (2026-07-18: earlier revisions of
+this section left both orders reading as live instructions; v2's is not).
+The v2 screen already ran and is archived
+(`results/decisions/early_gap_v2_b128_fixed_trace.json`); do not run it
+again:
 
 ```bash
 kvcot generate --config configs/early_gap_v2_b128.yaml --condition full
@@ -343,6 +366,18 @@ kvcot replay-fixed-trace --config configs/early_gap_v3_b128.yaml --trace-conditi
 #    incomplete under either policy.
 kvcot analyze-fixed-trace --config configs/early_gap_v3_b128.yaml --replay-condition rkv_b128 \
   --selection-file results/selections/early_gap_v3_b128.json
+# ^ 2026-07-18: this ALSO re-runs the strict natural-accuracy gate itself,
+#   over ALL 50 natural records of both conditions (full.jsonl +
+#   rkv_b128.jsonl) -- NEVER over the selected 10 (selection conditions on
+#   FullKV correctness, so selected-population "accuracy" is 1.0 by
+#   construction and means nothing). PSS/CPSS/curves/eligibility use the
+#   selected set; accuracy never does. If the strict gate fails, the
+#   decision JSON is still written (documenting the full strict_accuracy_
+#   gate object, hypothesis_status="not_tested") and the command exits 1.
+#   This gate is a small-n pilot PLAUSIBILITY check only -- it never
+#   licenses an "accuracy neutral"/"accuracy preserving" claim; only the
+#   frozen primary paired_accuracy_diff on the 200-problem main split
+#   (CLAUDE.md par.8.5) can do that.
 ```
 
 **One-example frozen-probe/schedule-prediction gate — mandatory, before

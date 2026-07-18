@@ -1050,3 +1050,226 @@ def test_run_fixed_trace_analysis_rejects_swapped_full_and_rkv_probe_files(tmp_p
             output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
             stage_name="early_gap_v2_b128", settings=_SETTINGS,
         )
+
+
+# --- Strict natural-accuracy gate wiring in run_fixed_trace_analysis
+# (2026-07-18 external review: the accuracy screen was built from the
+# SELECTION-FILTERED base records, so FullKV "accuracy" on the selected
+# population was 1.0 by construction -- e.g. 10/10 instead of the true 33/50) ---
+
+_V3_SETTINGS = FixedTraceSettings(
+    min_eligible_examples=1,
+    min_actual_compression_rate=0.0,
+    max_mean_f1_retention_ratio=1.0,
+    require_meaningful_compression=True,
+    meaningful_retention_ceiling=0.7,
+    min_meaningfully_compressed_scored_fractions=0,
+    min_meaningful_compression_rate=0.0,
+    max_pilot_accuracy_drop=0.10,
+)
+
+
+def _natural_population(n: int, condition: str, incorrect_indices: set[int] = frozenset()) -> list[dict]:
+    from kvcot.schemas import MethodConfig
+
+    records = []
+    for i in range(n):
+        overrides = dict(
+            record_id=f"base-{condition}-gsm8k_calibration_50-{i}-seed42",
+            condition=condition,
+            dataset={"dataset_name": "gsm8k", "source_row_index": i, "question_hash": "b" * 64, "normalized_gold": "42"},
+            is_correct=i not in incorrect_indices,
+        )
+        if condition != "full":
+            overrides["method_config"] = MethodConfig(method="rkv").model_dump(mode="json")
+        records.append(_valid_base_run_record(**overrides))
+    return records
+
+
+def _v3_selected_run(tmp_path, n_total: int = 50, n_selected: int = 10, *,
+                     rkv_natural_records: list[dict] | None = None,
+                     full_incorrect_indices: set[int] = frozenset()) -> tuple[list[str], list[dict]]:
+    """Write a complete v3 fixture: n_total natural FullKV records (the
+    canonical trace source), a natural R-KV file, and complete fixed-trace
+    probe files covering exactly the first n_selected (correct) examples."""
+    full_natural = _natural_population(n_total, "full", incorrect_indices=full_incorrect_indices)
+    if rkv_natural_records is None:
+        rkv_natural_records = _natural_population(n_total, "rkv_b128")
+    # Select the first n_selected FullKV-correct examples -- mirroring the
+    # real selection's correctness requirement.
+    selected = [r for r in full_natural if r["is_correct"]][:n_selected]
+    selected_ids = [r["record_id"] for r in selected]
+    full_probe_recs = []
+    rkv_probe_recs = []
+    for r in selected:
+        full_probe_recs.extend(_all_fraction_records(r["record_id"], "full"))
+        rkv_probe_recs.extend(_all_fraction_records(r["record_id"], "rkv_b128"))
+    _write(tmp_path / "full.jsonl", full_natural)
+    _write(tmp_path / "rkv_b128.jsonl", rkv_natural_records)
+    _write(tmp_path / "full_on_full_fixed_trace_probes.jsonl", full_probe_recs)
+    _write(tmp_path / "rkv_b128_on_full_fixed_trace_probes.jsonl", rkv_probe_recs)
+    return selected_ids, full_natural
+
+
+def test_selected_analysis_uses_all_natural_records_for_accuracy(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    # 17 of 50 FullKV records incorrect (the true accuracy is 33/50) but the
+    # 10 SELECTED examples are all correct -- the defect under test reported
+    # full_accuracy=1.0 from the selected subset.
+    incorrect = set(range(40, 50))  # keep the first 40 correct so selection finds 10
+    incorrect |= {33, 34, 35, 36, 37, 38, 39}
+    selected_ids, _ = _v3_selected_run(tmp_path, full_incorrect_indices=incorrect)
+    rc = run_fixed_trace_analysis(
+        output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
+        stage_name="test_v3_accuracy_population", settings=_V3_SETTINGS,
+        selected_base_record_ids=set(selected_ids), expected_accuracy_n=50,
+    )
+    assert rc == 0
+    decision = read_json(Path("results/decisions/test_v3_accuracy_population_fixed_trace.json"))
+    assert decision["n_shared"] == 10
+    assert decision["strict_accuracy_gate"]["expected_n"] == 50
+    assert decision["strict_accuracy_gate"]["gate_passed"] is True
+    assert decision["strict_accuracy_gate"]["accuracy_screen"]["n_accuracy_pairs"] == 50
+    # THE regression: accuracy must reflect the full 50-record population
+    # (33/50 = 0.66), never the artificially-all-correct selected 10.
+    assert decision["accuracy_screen"]["n_accuracy_pairs"] == 50
+    assert decision["accuracy_screen"]["full_accuracy"] == pytest.approx(33 / 50)
+
+
+def test_selected_analysis_rejects_partial_natural_rkv(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    # Only 10 natural R-KV records exist where 50 are expected --
+    # build_accuracy_screen alone would happily intersect down to 10 pairs
+    # and report pilot_accuracy_plausible=True; the strict gate must fail.
+    partial_rkv = _natural_population(10, "rkv_b128")
+    selected_ids, _ = _v3_selected_run(tmp_path, rkv_natural_records=partial_rkv)
+    rc = run_fixed_trace_analysis(
+        output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
+        stage_name="test_v3_partial_rkv", settings=_V3_SETTINGS,
+        selected_base_record_ids=set(selected_ids), expected_accuracy_n=50,
+    )
+    assert rc == 1
+    decision = read_json(Path("results/decisions/test_v3_partial_rkv_fixed_trace.json"))
+    assert decision["strict_accuracy_gate"]["gate_passed"] is False
+    assert any("rkv record count" in r for r in decision["strict_accuracy_gate"]["reasons"])
+    assert decision["hypothesis_status"] == "not_tested"
+    assert decision["screen_valid"] is False
+
+
+def test_final_analysis_rejects_wrong_natural_rkv_condition(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    # rkv_b128.jsonl actually contains condition="full" records (the wrong
+    # file copied/renamed) -- counts, keys, and identities all match, so only
+    # the expected_rkv_condition check can catch it.
+    mislabeled = _natural_population(50, "full")
+    selected_ids, _ = _v3_selected_run(tmp_path, rkv_natural_records=mislabeled)
+    rc = run_fixed_trace_analysis(
+        output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
+        stage_name="test_v3_wrong_condition", settings=_V3_SETTINGS,
+        selected_base_record_ids=set(selected_ids), expected_accuracy_n=50,
+    )
+    assert rc == 1
+    decision = read_json(Path("results/decisions/test_v3_wrong_condition_fixed_trace.json"))
+    assert decision["strict_accuracy_gate"]["gate_passed"] is False
+    assert any("this gate was asked to check" in r for r in decision["strict_accuracy_gate"]["reasons"])
+    assert decision["hypothesis_status"] == "not_tested"
+
+
+def test_final_analysis_rejects_natural_rkv_identity_mismatch(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    mismatched = [
+        dict(r, model_revision="some-other-model-revision")
+        for r in _natural_population(50, "rkv_b128")
+    ]
+    selected_ids, _ = _v3_selected_run(tmp_path, rkv_natural_records=mismatched)
+    rc = run_fixed_trace_analysis(
+        output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
+        stage_name="test_v3_identity_mismatch", settings=_V3_SETTINGS,
+        selected_base_record_ids=set(selected_ids), expected_accuracy_n=50,
+    )
+    assert rc == 1
+    decision = read_json(Path("results/decisions/test_v3_identity_mismatch_fixed_trace.json"))
+    assert decision["strict_accuracy_gate"]["gate_passed"] is False
+    assert any("do not share one" in r for r in decision["strict_accuracy_gate"]["reasons"])
+
+
+def test_failed_strict_accuracy_gate_prevents_screened_status(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    # Every pair is fully eligible and the intersected accuracy screen alone
+    # would be plausible -- ONLY the strict gate fails (missing natural R-KV
+    # records). hypothesis_status must be "not_tested", never "screened".
+    partial_rkv = _natural_population(10, "rkv_b128")
+    selected_ids, _ = _v3_selected_run(tmp_path, rkv_natural_records=partial_rkv)
+    rc = run_fixed_trace_analysis(
+        output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
+        stage_name="test_v3_gate_blocks_screened", settings=_V3_SETTINGS,
+        selected_base_record_ids=set(selected_ids), expected_accuracy_n=50,
+    )
+    assert rc == 1
+    decision = read_json(Path("results/decisions/test_v3_gate_blocks_screened_fixed_trace.json"))
+    # Eligibility itself was fine -- the pairs are complete and valid.
+    assert decision["n_eligible"] >= 1
+    # The intersected screen would have looked plausible on its own.
+    assert decision["strict_accuracy_gate"]["accuracy_screen"]["pilot_accuracy_plausible"] is True
+    # But the gate failed, so the screen must not report "screened".
+    assert decision["hypothesis_status"] == "not_tested"
+    assert any("strict_accuracy_gate failed" in r for r in decision["screen_invalid_reasons"])
+
+
+def test_v3_analysis_missing_natural_rkv_file_fails_gate_not_crash(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    selected_ids, _ = _v3_selected_run(tmp_path)
+    (tmp_path / "rkv_b128.jsonl").unlink()
+    rc = run_fixed_trace_analysis(
+        output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
+        stage_name="test_v3_missing_natural", settings=_V3_SETTINGS,
+        selected_base_record_ids=set(selected_ids), expected_accuracy_n=50,
+    )
+    assert rc == 1
+    decision = read_json(Path("results/decisions/test_v3_missing_natural_fixed_trace.json"))
+    assert decision["strict_accuracy_gate"]["gate_passed"] is False
+    assert any("not found" in r for r in decision["strict_accuracy_gate"]["reasons"])
+    assert decision["hypothesis_status"] == "not_tested"
+
+
+def test_v2_analysis_without_strict_gate_is_unchanged(tmp_path, monkeypatch):
+    # Protocol-v2 stages (require_meaningful_compression=False) never had a
+    # natural R-KV run: no strict gate is built, no natural file is read,
+    # rc stays 0, and both gate fields stay None in the decision JSON.
+    monkeypatch.chdir(tmp_path)
+    base = _valid_base_run_record()
+    full_rec = _valid_fixed_trace_probe_record(replay_policy_condition="full")
+    rkv_rec = _valid_fixed_trace_probe_record(record_id="fixed-probe-rkv-f1", replay_policy_condition="rkv_b128")
+    _write(tmp_path / "full.jsonl", [base])
+    _write(tmp_path / "full_on_full_fixed_trace_probes.jsonl", [full_rec])
+    _write(tmp_path / "rkv_b128_on_full_fixed_trace_probes.jsonl", [rkv_rec])
+
+    rc = run_fixed_trace_analysis(
+        output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
+        stage_name="test_v2_unchanged", settings=_SETTINGS,
+    )
+    assert rc == 0
+    decision = read_json(Path("results/decisions/test_v2_unchanged_fixed_trace.json"))
+    assert decision["accuracy_screen"] is None
+    assert decision["strict_accuracy_gate"] is None
+
+
+def test_decision_json_records_analysis_provenance_and_input_hashes(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    selected_ids, _ = _v3_selected_run(tmp_path)
+    rc = run_fixed_trace_analysis(
+        output_dir=tmp_path, trace_condition="full", replay_condition="rkv_b128",
+        stage_name="test_v3_provenance", settings=_V3_SETTINGS,
+        selected_base_record_ids=set(selected_ids), expected_accuracy_n=50,
+    )
+    assert rc == 0
+    decision = read_json(Path("results/decisions/test_v3_provenance_fixed_trace.json"))
+    prov = decision["analysis_provenance"]
+    assert isinstance(prov["git_commit"], str) and prov["git_commit"]
+    assert isinstance(prov["git_dirty"], bool)
+    hashes = decision["input_sha256"]
+    assert hashes["full_base"] is not None and len(hashes["full_base"]) == 64
+    assert hashes["natural_rkv"] is not None
+    assert hashes["full_fixed_trace_probes"] is not None
+    assert hashes["rkv_fixed_trace_probes"] is not None
+    assert hashes["selection"] is None  # no selection file path passed in this direct call
