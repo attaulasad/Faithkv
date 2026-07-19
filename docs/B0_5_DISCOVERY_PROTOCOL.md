@@ -1,5 +1,23 @@
 # B0.5 — Causal false-negative discovery protocol (preregistration, not authorized to run)
 
+**[SUPERSEDED IN PART — see `docs/B0_5_PROTOCOL_REPAIR.md` (B0.5-R,
+2026-07-19)].** Direct inspection of the pinned R-KV source found two
+load-bearing assumptions below to be false: §1's "fixed 128-token block"
+experimental unit (repaired in B0.5-R §4-§5 — the real unit is a single
+per-layer, per-KV-head cache slot; `divide_length=128` is only a
+compaction *cadence*, never an eviction unit), and §5's claim that a
+shadow-FullKV replay recovers a block's "true" pre-eviction R-KV state
+(repaired in B0.5-R §6 — it does not; a read-only capture hook at the
+real R-KV compaction boundary is required instead). §7's vague thresholds
+("low or near-zero", "non-trivial variance", "strong correlation",
+"notably above") are replaced by exact numeric cutoffs in B0.5-R §12
+gate 10. Nothing below is deleted; the passages above remain as the
+historical record of what this document originally proposed. The current
+authorized document is `docs/B0_5_PROTOCOL_REPAIR.md`; its verdict
+(**READY FOR B1A PREREQUISITE IMPLEMENTATION**, not this document's
+original "READY FOR B1 DISCOVERY-HARNESS IMPLEMENTATION") supersedes the
+verdict recorded in `docs/b0_5_decision.json` prior to this repair.
+
 Phase B0.5 artifact (2026-07-19). Branch `research/b0-5-discovery-protocol`,
 created from `research/phase-b0-method-pivot` at commit `68b56f1` (which sits
 on top of the B0 merge commit `f7e9dcc`, itself on top of B0's own commit
@@ -35,6 +53,20 @@ existence evidence — its operating point failed the accuracy gate by 40pp
 attributed to a *deployed, accuracy-plausible* policy's behavior.
 
 ## 1. Experimental unit: fixed 128-token block
+
+**[SUPERSEDED — see `docs/B0_5_PROTOCOL_REPAIR.md` §4-§5.** Direct
+inspection of `third_party/R-KV/HuggingFace/rkv/{modeling.py,compression/r1_kv.py}`
+at the pinned commit shows `divide_length=128` is only the periodic
+*cadence* at which every layer checks whether to compact
+(`self.length % divide_length == 0`, `modeling.py:601`) — it decides only
+*when* an attempt happens, never *what* is evicted. Actual eviction is
+decided independently per layer (each layer owns its own `R1KV` instance)
+and independently per KV head within a layer (`topk` runs per-head over
+the sequence dimension, `r1_kv.py:75-82`), over individual cache slots —
+never over a contiguous 128-token span as one object. The corrected unit
+is `(compaction_event_id, layer_index, kv_head_index,
+absolute_token_position, pre_compaction_storage_position)`. The text below
+is preserved as the historical (incorrect) proposal.]**
 
 **Unit chosen: a fixed block of `divide_length=128` consecutive generated
 tokens**, aligned exactly to this repository's already-audited R-KV
@@ -123,6 +155,25 @@ brief §6 and by this repository's existing outcome-blind-selection
 discipline, `kvcot inspect-fixed-trace --write-selection`).
 
 ## 5. Reference cache state and the exact KV-only ablation
+
+**[SUPERSEDED IN PART — see `docs/B0_5_PROTOCOL_REPAIR.md` §6-§7.** The
+"Rescue intervention" paragraph below claims a shadow-FullKV replay
+recovers block `i`'s KV entries "exactly as it would have been had it
+never been evicted." This is false whenever the sampled event is not the
+run's first compaction (true of every eligible event under this
+document's own §2 rule 1): the real R-KV run's token `i` was produced by
+attending over an *already-compressed* history, while a shadow-FullKV
+replay from position 0 never experiences any eviction anywhere in the
+prefix. These are different cache-policy trajectories, so the "recovered"
+tensor is a policy-dependent hybrid state, not block `i`'s true
+pre-eviction R-KV state. B0.5-R §6 requires a read-only instrumentation
+hook that captures the real pre-gather tensors directly from the live
+R-KV run instead. The "mask/zero" language in the "Ablation intervention"
+paragraph below is also superseded: B0.5-R §7.1 shows a zeroed key/value
+slot is not equivalent to physical removal from the attention computation
+(it can still receive nonzero softmax weight), and requires physical
+tensor-slice removal instead. Text below preserved as the historical
+(incorrect) proposal.]**
 
 Let `C_rkv,t` be the **real, deployed R-KV cache** exactly as it existed
 immediately after compaction event `t` (the actually-realized compressed
@@ -270,6 +321,15 @@ deployability constraints already documented for this class of signal
   computed.
 
 **Predeclared success/failure judgment (frozen before any GPU result):**
+
+**[SUPERSEDED — see `docs/B0_5_PROTOCOL_REPAIR.md` §12, gate 10.** The
+qualitative language below ("low or near-zero correlation", "non-trivial
+variance", "strong correlation", "notably above") is replaced by exact
+numeric cutoffs (`|Spearman ρ| < 0.30`, `IQR(u_i) > 0.01` nats), and the
+evicted-candidate and retained-control populations are analyzed
+separately, never pooled into one correlation/recall statistic, per
+B0.5-R §7.2's Design-A/Design-C split. Text below preserved as the
+historical (underspecified) proposal.]**
 
 1. **Primary — rank-based, threshold-free:** Spearman rank correlation
    between `b_i` (and separately, each baseline signal) and `u_i`, computed

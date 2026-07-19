@@ -1,6 +1,42 @@
 # Plan and status
 
-## Current status: B0.5 discovery-protocol feasibility gate ran — READY FOR B1 DISCOVERY-HARNESS IMPLEMENTATION (harness design only; no GPU authorized)
+## Current status: B0.5-R protocol repair ran — READY FOR B1A PREREQUISITE IMPLEMENTATION (CPU prerequisites only; no GPU authorized)
+
+**Phase B0.5-R (2026-07-19, CHANGELOG.md) audited B0.5 against the pinned
+R-KV source and found two load-bearing assumptions false: the "fixed
+128-token block" experimental unit (real unit is a single per-layer,
+per-KV-head cache slot — `divide_length=128` is only a compaction cadence,
+never an eviction unit) and the shadow-FullKV KV-recovery method (does not
+reconstruct R-KV's true pre-eviction state for any event past the run's
+first compaction; a read-only pre-compaction capture hook is required
+instead). Both are repaired, along with an intervention-design fix
+(equal-byte add-back vs. retained-only physical removal, never pooled;
+zeroing replaced by physical tensor-slice removal), an exact numeric gate
+table (replacing every vague threshold), and confirmation of two concrete
+B1A prerequisites this repository does not yet have: architecture-aware
+R-KV monkeypatch dispatch (`src/kvcot/generation/policies.py` currently
+calls only `replace_qwen2` unconditionally — Candidate A's Llama-8B
+checkpoint would silently run unpatched, mislabeled as `rkv_b1024`) and a
+MATH-500 symbolic-equivalence verifier (`src/kvcot/utils/answers.py` is
+numeric-only). Full repair: `docs/B0_5_PROTOCOL_REPAIR.md`. B0's method-
+pivot verdict is unchanged.**
+
+**B0.5-R VERDICT: READY FOR B1A PREREQUISITE IMPLEMENTATION**
+(`docs/B0_5_PROTOCOL_REPAIR.md` §19, `docs/b0_5_decision.json`
+`b0_5_r_verdict`) — **this authorizes only B1A: CPU-side prerequisite
+implementation (MATH-500 verifier, architecture-aware dispatch,
+decision/provenance schema, read-only compaction instrumentation, CPU
+tests). It does NOT authorize B1B, GPU use, model inference, or any
+method implementation.** `CLAUDE.md` §4's model freeze
+(`DeepSeek-R1-Distill-Qwen-1.5B` only) still requires a separate dated
+amendment before any GPU run of a later phase.
+
+## Prior status: B0.5 discovery-protocol feasibility gate ran — READY FOR B1 DISCOVERY-HARNESS IMPLEMENTATION (superseded — see B0.5-R above)
+
+**[Superseded by B0.5-R above — the "fixed 128-token block" unit and the
+shadow-FullKV KV-recovery method described just below were found false
+against the pinned R-KV source. Preserved verbatim as the historical
+record.]**
 
 **Phase B0.5 (2026-07-19, CHANGELOG.md) is documentation-only** — it does
 not implement a compression method, does not implement the discovery
@@ -195,19 +231,24 @@ permitted under that B0 result** — it would have required at least one
 SURVIVES PROVISIONALLY candidate, and there is none.
 
 Separately, **Phase B0.5 (2026-07-19) evaluated a narrower, non-method
-*discovery* question** (see Current status above) and returned **READY FOR
-B1 DISCOVERY-HARNESS IMPLEMENTATION** — this permits only a future,
-user-requested, CPU-developed discovery-harness *implementation* (code
+*discovery* question**, and Phase B0.5-R (2026-07-19) then repaired that
+protocol's technical design against the pinned R-KV source (see Current
+status above) — the current authorized verdict is **READY FOR B1A
+PREREQUISITE IMPLEMENTATION** (`docs/B0_5_PROTOCOL_REPAIR.md`), which
+supersedes B0.5's original "READY FOR B1 DISCOVERY-HARNESS
+IMPLEMENTATION." This permits only B1A: CPU-side prerequisite
+implementation (MATH-500 symbolic-equivalence verifier, architecture-aware
+R-KV monkeypatch dispatch, decision/provenance schema, read-only
+pre-compaction instrumentation hook, CPU unit/integration tests — code
 living in `src/kvcot`, testable via `--dry-run` exactly like every other
-stage in this repository, per `docs/B0_5_DISCOVERY_PROTOCOL.md` and
-`docs/B0_5_FEASIBILITY_AUDIT.md` §6). **It still does not authorize any
-GPU run, model inference, or method implementation** — those each require
-their own separate authorization, and the model-freeze amendment
-(`CLAUDE.md` §4) that a GPU run of this harness would additionally need has
-not been granted. No MATH-500 manifest, config, evaluator, or result
-directory has been created by either B0 or B0.5. The §10 f=1 stability
-control remains UNRESOLVED (not a B0 or B0.5 task); the GSM8K b128
-operating point remains retired.
+stage in this repository). **It still does not authorize any GPU run,
+model inference, or method implementation** — those each require their
+own separate authorization (B1B/B2A/B2B/C0, `docs/B0_5_PROTOCOL_REPAIR.md`
+§17), and the model-freeze amendment (`CLAUDE.md` §4) that a GPU run of a
+later phase would additionally need has not been granted. No MATH-500
+manifest, config, evaluator, or result directory has been created by B0,
+B0.5, or B0.5-R. The §10 f=1 stability control remains UNRESOLVED (not a
+B0/B0.5/B0.5-R task); the GSM8K b128 operating point remains retired.
 
 3. **Phase C — GPU rental.** No new GPU host is rented until a redesigned,
    non-retired, genuinely-novel experiment is specified and approved. The

@@ -5,7 +5,71 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
-## 2026-07-19 — Phase B0.5: causal false-negative discovery protocol and operating-point feasibility gate (documentation-only; no method or harness implemented; no GPU used, no model inference, no model weights or datasets downloaded; no MATH-500 manifest/config/evaluator/result directory created; no code under `src/`, `tests/`, `configs/`, `scripts/`, `results/`, `schemas/`, or `third_party/` touched; no frozen §1/§4/§8/§9 value changed)
+## 2026-07-19 — Phase B0.5-R: causal discovery protocol repair (documentation-only; no method or harness implemented; no GPU used, no model inference, no model weights or datasets downloaded; no MATH-500 manifest/config/evaluator/result directory created; no code under `src/`, `tests/`, `configs/`, `scripts/`, `results/`, `schemas/`, or `third_party/` touched; no frozen §1/§4/§8/§9 value changed)
+
+Run on branch `research/b0-5-protocol-repair`, cut from `main` at
+`48fdf7f5020cbac6501fa45a7d1ffc38e668d4f1`. Purpose: verify Phase B0.5's
+technical design directly against the pinned R-KV source
+(`third_party/R-KV` @ `45eaa7d69d20b7388321f077020a610d9afb65bd`) rather
+than trust its already-committed READY verdict. Two load-bearing
+assumptions were found false:
+
+- **§1's "fixed 128-token block" experimental unit does not exist.**
+  `divide_length=128` is only the periodic cadence at which every layer
+  *checks* whether to compact (`modeling.py:601`); actual eviction is
+  decided independently per layer (one `R1KV` instance per layer) and
+  independently per KV head within a layer (`topk` over the sequence
+  dimension, per head, `r1_kv.py:75-82`) — never over a contiguous
+  128-token span as one object. Repaired unit: `(compaction_event_id,
+  layer_index, kv_head_index, absolute_token_position,
+  pre_compaction_storage_position)`, a single cache slot.
+- **§5's shadow-FullKV KV-recovery method does not recover R-KV's true
+  pre-eviction state**, for any sampled event beyond the run's first
+  compaction (true of every eligible event under the protocol's own
+  eligibility rule): the real R-KV run's token was produced by attending
+  over an already-compressed history, while a shadow-FullKV replay never
+  experiences any eviction anywhere in its prefix — a different
+  cache-policy trajectory, not a reconstruction of the same one. Repaired
+  source: a read-only instrumentation hook capturing the real pre-gather
+  tensors immediately before `R1KV.update_kv`'s eviction gather; if
+  unattachable at implementation time, the intervention is blocked for
+  that run rather than silently substituted.
+
+Also repaired: the intervention design (equal-byte add-back for evicted
+candidates vs. retained-only physical removal for retained controls,
+analyzed separately and never pooled into one utility distribution;
+"mask/zero" replaced by physical tensor-slice removal, since a zeroed
+key/value slot is not equivalent to removal from the attention softmax);
+an exact numeric gate table replacing every vague threshold ("e.g.
+0.10-0.15", "meaningful fraction", "say 8 of 12", "dramatically", "low or
+near-zero", "strong correlation", "notably above"), reusing this
+repository's existing `0.10` accuracy-plausibility ceiling and `0.70`
+`meaningful_retention_ceiling` where applicable and stating the purpose of
+every new threshold explicitly; and confirmation of two concrete B1A
+prerequisites this repository does not yet have — `src/kvcot/generation/policies.py`
+calls only `rkv.monkeypatch.replace_qwen2` unconditionally (Candidate A's
+Llama-8B checkpoint would silently run with stock, unpatched Llama
+attention while still being labeled `rkv_b1024` — a silent mislabeling
+defect, not a crash) and `src/kvcot/utils/answers.py` is numeric-only (no
+symbolic-equivalence checking for MATH-500's fractions/algebraic answers).
+B0's method-pivot verdict (M1/M2/M3 all still non-survives) is unchanged
+and not reopened.
+
+Full repair: `docs/B0_5_PROTOCOL_REPAIR.md`. Superseded passages in
+`docs/B0_5_DISCOVERY_PROTOCOL.md` and `docs/B0_5_FEASIBILITY_AUDIT.md` are
+marked inline, not deleted; `docs/b0_5_decision.json` retains every
+original field and adds `superseded_by`/`b0_5_r_*` fields pointing to the
+repair.
+
+**B0.5-R VERDICT: READY FOR B1A PREREQUISITE IMPLEMENTATION** — supersedes
+B0.5's original "READY FOR B1 DISCOVERY-HARNESS IMPLEMENTATION" below.
+Authorizes only CPU-side B1A prerequisite implementation (MATH-500
+verifier, architecture-aware R-KV dispatch, decision/provenance schema,
+read-only compaction instrumentation, CPU tests). Does not authorize B1B,
+GPU use, model inference, or any method implementation. The `CLAUDE.md`
+§4 model-freeze amendment remains ungranted.
+
+## 2026-07-19 — Phase B0.5 (superseded by B0.5-R above): causal false-negative discovery protocol and operating-point feasibility gate (documentation-only; no method or harness implemented; no GPU used, no model inference, no model weights or datasets downloaded; no MATH-500 manifest/config/evaluator/result directory created; no code under `src/`, `tests/`, `configs/`, `scripts/`, `results/`, `schemas/`, or `third_party/` touched; no frozen §1/§4/§8/§9 value changed)
 
 Run on branch `research/b0-5-discovery-protocol`, created from
 `research/phase-b0-method-pivot` at commit `68b56f1` (itself created for
