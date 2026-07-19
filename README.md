@@ -3,9 +3,16 @@
 ## Current status (read this first)
 
 **Phase B0.5 (2026-07-19) audited Phase B0 and produced a discovery-study
-feasibility gate; see `docs/B0_5_DISCOVERY_PROTOCOL.md`,
-`docs/B0_5_FEASIBILITY_AUDIT.md`, `docs/b0_5_decision.json` for the
-verdict.** This sits on top of, and does not reverse, the prior chain:
+feasibility gate; Phase B0.5-R (2026-07-19) then repaired that protocol's
+technical design after direct inspection of the pinned R-KV source found
+two of its load-bearing assumptions false (the "fixed 128-token block"
+eviction unit, and a shadow-FullKV method for recovering evicted KV
+tensors) — see `docs/B0_5_PROTOCOL_REPAIR.md` for the current, authorized
+design and verdict (**READY FOR B1A PREREQUISITE IMPLEMENTATION**,
+CPU-side prerequisites only, no GPU authorized). `docs/B0_5_DISCOVERY_PROTOCOL.md`,
+`docs/B0_5_FEASIBILITY_AUDIT.md`, and `docs/b0_5_decision.json` remain as
+the historical record with inline superseded-passage markers.** This sits
+on top of, and does not reverse, the prior chain:
 Phase A3 found the original diagnostic (below) does not survive as a novel
 contribution against prior art (CASK, Lanham et al.) — **PHASE B (the
 original diagnostic path) IS BLOCKED.** Phase B0 then specified and

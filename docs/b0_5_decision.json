@@ -141,5 +141,39 @@
     "That Candidate A's published 'lossless' point transfers to this repository's own replay engine without independent verification.",
     "That this document's READY verdict authorizes GPU use, inference, or implementation of any kind beyond a CPU-developed B1 harness.",
     "Any condition named by a retention percentage (Section 9 rule, unchanged)."
-  ]
+  ],
+  "superseded_by": {
+    "document": "docs/B0_5_PROTOCOL_REPAIR.md",
+    "phase": "B0.5-R",
+    "date": "2026-07-19",
+    "reason": "Direct inspection of the pinned R-KV source (third_party/R-KV @ 45eaa7d69d20b7388321f077020a610d9afb65bd) found two load-bearing assumptions above false: the 'intervention_unit' field below (a fixed 128-token block) does not exist as R-KV's eviction unit -- divide_length=128 is only a per-layer compaction cadence trigger, and eviction is decided independently per layer and per KV head over individual cache slots. The 'primary_metric'/eligibility_rules' shadow-FullKV KV-recovery claim is also false for any event beyond the run's first compaction, because a shadow-FullKV replay never experiences the eviction history the real R-KV run did. Both are repaired in docs/B0_5_PROTOCOL_REPAIR.md sections 4-7. The verdict and gate fields below are retained verbatim for provenance; they are superseded by b0_5_r_verdict and b0_5_r_exact_gates, not deleted.",
+    "fields_superseded": ["intervention_unit", "accuracy_gate.definition", "compression_gate.definition", "eligibility_rules[4]", "verdict", "verdict_scope"]
+  },
+  "b0_5_r_verdict": "B0.5-R VERDICT: READY FOR B1A PREREQUISITE IMPLEMENTATION",
+  "b0_5_r_verdict_scope": "Authorizes only B1A: CPU-side prerequisite implementation (MATH-500 symbolic-equivalence verifier, architecture-aware R-KV monkeypatch dispatch, decision/provenance schema, read-only pre-compaction instrumentation hook, CPU unit/integration tests). Does NOT authorize B1B, model inference, a GPU, Vast.ai, the 12-example pilot, or any method claim. A dated CLAUDE.md/CHANGELOG.md model-freeze amendment remains required before any GPU run of B1B/B2A/B2B and is not granted by this record.",
+  "b0_5_r_repaired_intervention_unit": "(compaction_event_id, layer_index, kv_head_index, absolute_token_position, pre_compaction_storage_position) -- a single cache slot, never a contiguous 128-token block. See docs/B0_5_PROTOCOL_REPAIR.md section 4.",
+  "b0_5_r_repaired_kv_source": "Read-only instrumentation hook capturing key_states/value_states immediately before R1KV.update_kv's gather (r1_kv.py line 82-179), not a shadow-FullKV replay. If unattachable at implementation time, the intervention is blocked for that run rather than substituted. See docs/B0_5_PROTOCOL_REPAIR.md section 6.",
+  "b0_5_r_repaired_intervention_design": {
+    "primary": "Design A -- equal-byte add-back, evicted-candidate population only; every intervention adds exactly +1 KV slot at one (layer_index, kv_head_index) pair",
+    "secondary_never_pooled": "Design C -- retained-only physical-removal ablation, retained-control population only; every intervention removes exactly -1 KV slot at one (layer_index, kv_head_index) pair, via tensor-slice removal, never zeroing",
+    "sign_convention": "u_state = NLL_mean(ref | state ABSENT) - NLL_mean(ref | state PRESENT); positive u means the block's presence helps prediction, for both populations"
+  },
+  "b0_5_r_exact_gates": {
+    "1_natural_accuracy_plausibility": "(FullKV_correct - RKV_correct) / 12 <= 0.10, exact rational comparison, non-strict",
+    "2_realized_physical_compression": "instantaneous_retention_ratio <= 0.70 on at least 9 of 12 natural R-KV runs",
+    "3_min_eligible_events": "at least 3 eligible events (per example) on at least 9 of 12 examples",
+    "4_cap_hit_asymmetry": "abs(cap_hit_rate_FullKV - cap_hit_rate_RKV) <= 0.20, both proportions out of 12",
+    "5_intervention_capture_validity": "exact shape/dtype/(layer,kv_head) identity match at hook capture, zero tolerance, per labeled slot",
+    "6_replay_parity_error": "reuses existing repo replay-determinism discipline; no new numeric tolerance introduced",
+    "7_missing_failed_branch_handling": "any failed slot marked valid_flag=false with non-null invalid_reason, excluded from statistics, always counted",
+    "8_runtime_feasibility_B2A": "projected wall-clock from B2A-measured throughput <= 4.00 GPU-hours, hard stop otherwise",
+    "9_memory_feasibility_B2A": "peak allocated CUDA memory <= 22 GiB AND all parameters device.type == cuda (no offload)",
+    "10_discovery_pattern_rule_B2B": "per population (never pooled): discovery-supporting iff every baseline signal has abs(Spearman rho) < 0.30 against u AND IQR(u) > 0.01 nats",
+    "full_text": "docs/B0_5_PROTOCOL_REPAIR.md section 12"
+  },
+  "b0_5_r_prerequisites_identified_not_implemented": [
+    "Architecture-aware R-KV monkeypatch dispatch: src/kvcot/generation/policies.py currently imports and calls only rkv.monkeypatch.replace_qwen2 unconditionally; loading Candidate A's Llama-8B checkpoint under this code would silently leave LlamaAttention/LlamaForCausalLM unpatched (stock FullKV-equivalent behavior, no compaction ever fires) while still being labeled rkv_b1024 -- a silent mislabeling defect, not a crash.",
+    "MATH-500 symbolic-equivalence verifier: src/kvcot/utils/answers.py normalizes numeric strings only; boxed content such as fractions or algebraic expressions is returned as opaque literal text with no equivalence checking."
+  ],
+  "b0_5_r_roadmap": ["B0.5-R (this repair, documentation-only)", "B1A (CPU prerequisite implementation -- authorized by this record)", "B1B (intervention harness -- not authorized)", "B2A (one-example GPU calibration, mandatory hard-stop gate -- not authorized)", "B2B (bounded discovery pilot -- not authorized)", "C0 (fresh method design and novelty gate -- not authorized)"]
 }

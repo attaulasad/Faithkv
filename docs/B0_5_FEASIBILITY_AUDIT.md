@@ -1,5 +1,25 @@
 # B0.5 — Operating-point feasibility audit and GPU cost model
 
+**[SUPERSEDED IN PART — see `docs/B0_5_PROTOCOL_REPAIR.md` (B0.5-R,
+2026-07-19)].** §7's gate wording below uses non-exact qualifiers ("e.g.
+0.10-0.15", "meaningful fraction", "dramatically", "say 8 of 12") that the
+task's readiness standard requires to be exact numeric cutoffs with exact
+denominators — replaced in B0.5-R §12 (reusing this repository's existing
+`0.10` accuracy-plausibility ceiling and `0.70` `meaningful_retention_ceiling`
+exactly, and fixing new thresholds — 9/12, ±0.20, 22 GiB — explicitly,
+each with a stated rationale). The candidate selection (§3-§4 below), the
+GPU cost model's *caveats* (§5 below — already correctly labeled as an
+estimate, not a measurement), and the submodule-modification check (§6
+below) are **not** found defective and are not superseded. §5's specific
+**shadow-FullKV prefix reconstruction** line items (the "~1,500 tokens"
+row and the "1,500 shadow-FullKV prefix" cost-subtotal term) describe a
+cost driver that no longer exists in the repaired design — B0.5-R §6
+replaces shadow-FullKV reconstruction with a read-only pre-compaction
+capture hook, and B0.5-R §15 gives the corrected, separated cost
+breakdown. The overall estimate/measurement caveat discipline in §5
+survives; these specific line items are superseded by B0.5-R §15. Text
+below is otherwise unchanged.
+
 Phase B0.5 artifact (2026-07-19). Companion to
 `docs/B0_5_DISCOVERY_PROTOCOL.md` (what would be measured) and
 `docs/B0_5_SEARCH_LOG.md` (literature verification log). Documentation and
@@ -208,6 +228,10 @@ upstream source). **Criterion 7 is satisfiable without submodule
 modification.**
 
 ## 7. Gates (predeclared, to apply in a future pilot — not run here)
+
+**[SUPERSEDED — see `docs/B0_5_PROTOCOL_REPAIR.md` §12 for the exact
+numeric replacement of every gate below (exact ceiling, exact denominator,
+exact equality rule). Text below preserved as the historical proposal.]**
 
 1. **Natural-accuracy plausibility gate:** on the 12-example calibration
    subset, R-KV's natural accuracy must not fall further below FullKV's
