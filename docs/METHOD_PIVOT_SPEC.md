@@ -2,7 +2,9 @@
 
 Phase B0 artifact (2026-07-19). Companion files:
 `docs/METHOD_NOVELTY_MATRIX.md` (adversarial matrix and per-candidate
-verdicts), `docs/B0_SEARCH_LOG.md`, `docs/method_novelty_matrix.json`.
+verdicts), `docs/B0_SEARCH_LOG.md`, `docs/method_novelty_matrix.json`,
+`docs/PIVOT_PILOT_PROTOCOL.md` (future pilot measurement checklist, not
+authorized to run).
 Documentation-only: no method implemented, no MATH-500 infrastructure
 created, no GPU used, no model inference run, no frozen §1/§4/§8/§9 value
 changed.
@@ -95,6 +97,51 @@ Importance Recurrence" and VaSE's catastrophic value-eviction findings are
 adjacent observational evidence that *temporal* and *magnitude* false
 negatives exist for specific scores, at aggregate level; neither is the
 per-state causal quantity defined here.
+
+## 5a. Confound: entropy-amplified branching, not causal information loss (added 2026-07-19)
+
+Threat identified against §5's motivating hypothesis by
+`docs/METHOD_NOVELTY_MATRIX.md` §3a (Lotfi et al., "Quantized Reasoning
+Models Think They Need to Think Longer, but They Do Not," arXiv:2606.00206,
+verified by direct fetch 2026-07-19 — a quantization diagnostic, not a
+KV-eviction method, so it cannot itself corroborate or kill M1/M2/M3, but it
+threatens the *validity* of any future causal-false-negative measurement):
+
+> A compressed model may fail not because an evicted state contains
+> uniquely necessary information, but because cache perturbation changes a
+> locally uncertain token decision and triggers overthinking. Conditional
+> rescue utility must therefore be evaluated against entropy, logit-margin
+> and branching-marker controls.
+
+That paper shows, for weight/activation/KV quantization specifically, that
+"position-level KL divergence correlates strongly with the BF16 model's
+next-token entropy (Spearman ρ=0.92)" and that up to 52% of failures are a
+correct intermediate answer abandoned during continued (overthinking)
+generation — a behavioral change traceable to decision-boundary sensitivity
+at high-entropy positions, not to any specific piece of information being
+destroyed. R-KV eviction is a different perturbation than quantization
+noise, but the same confound applies structurally: evicting a KV state
+changes attention inputs at every subsequent position, and a resulting
+answer change at a locally uncertain (high-entropy, low-logit-margin)
+token is equally consistent with "the evicted state carried causally
+necessary information" and with "the perturbation, of any kind and any
+source, nudged an already-close decision and the model branched/overthought
+as a result." §5's controlled-KV-ablation utility measurement `u_i` does
+not by itself distinguish these two explanations — a state can show high
+measured `u_i` purely because it sits upstream of a high-entropy decision
+point, regardless of what information it contained.
+
+**Consequence for any future evidence claim:** a causal false negative
+(§5) is not established by a high `u_i` alone. Any future report of
+rescue utility, or of causal-false-negative existence, must show the
+effect survives after conditioning on (or matching against) entropy,
+top-1/top-2 logit margin, and branching/overthinking-marker frequency at
+the affected position — otherwise the claimed effect may be fully
+explained by decision-boundary sensitivity, which needs no new cache
+operation to describe and is already documented (arXiv:2606.00206). This
+is why `docs/B0_5_DISCOVERY_PROTOCOL.md` §7 lists entropy, logit margin,
+and branching-marker mass as mandatory baseline-signal controls, not
+optional diagnostics.
 
 ## 6. M1 formal specification — residual causal-utility protection
 
@@ -237,6 +284,11 @@ Recorded for completeness; overhead was not a factor in any verdict.
    cannot be it.
 4. **Baseline evidence:** matched-byte comparisons against, at minimum,
    R-KV, VaSE, and one learned evictor (ForesightKV or Learning to Evict).
+5. **Confound-controlled evidence (§5a):** every claimed causal false
+   negative reported alongside its position's entropy, logit margin, and
+   branching-marker mass, per `docs/PIVOT_PILOT_PROTOCOL.md` §2 — an effect
+   that disappears after conditioning on these is not evidence of a novel
+   cache-operation target.
 
 None of this evidence exists today; none may be collected without a
 separately authorized phase.
