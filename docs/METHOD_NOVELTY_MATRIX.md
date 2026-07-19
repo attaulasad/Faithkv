@@ -80,6 +80,41 @@ fields in `docs/method_novelty_matrix.json`.
 | LKV | 2605.06676 | search only | LOW | UNKNOWN | MEDIUM |
 | IndexMem | 2605.25475 | search only | MEDIUM | UNKNOWN | NONE |
 
+## 3a. Adjacent-compression threat (weight/activation/KV quantization, not KV eviction)
+
+Not part of the M1/M2/M3 overlap table above (different compression mechanism
+entirely — quantization, not eviction), but load-bearing for M1's motivating
+hypothesis (`docs/METHOD_PIVOT_SPEC.md` §5) and recorded here per the same
+adversarial discipline. Verified 2026-07-19 by direct fetch of the arXiv
+abstract and HTML full text (`arxiv.org/abs/2606.00206`,
+`arxiv.org/html/2606.00206`); quotes captured, not a full cover-to-cover
+read — same limitation as every other B0 record (§1).
+
+| Field | Entry |
+|---|---|
+| Paper | Quantized Reasoning Models Think They Need to Think Longer, but They Do Not |
+| arXiv | 2606.00206 |
+| Compression | Weight PTQ (GPTQ, AWQ, 3-/4-bit); FlatQuant also quantizes activations and KV (W4A4KV4, W8A8KV8) |
+| Reasoning model | DeepSeek-R1-Distill-Qwen 1.5B/7B/14B, DeepSeek-R1-Distill-Llama 8B, QwQ-32B |
+| Same-prefix control | Yes — "we run both models on the same MATH-500 prompts under identical generation prefixes to isolate the effects of quantization" |
+| Diagnostic | Token-level KL divergence between quantized and full-precision output distributions; next-token entropy (Spearman ρ=0.92 with KL); top-1/top-2 logit margin; overthinking markers ("wait", "but", "alternatively") |
+| Failure | Correct intermediate answer reached, then abandoned — "in up to 52% of the quantized models' failures, models reach the right answer in intermediate reasoning steps but do not output it as a final answer" |
+| Method | Training-free fixed logit penalty on a curated set of overthinking/branching markers, cutting CoT length 12-23% |
+| Cache intervention | No KV-entry rescue or eviction — the fix operates on output logits, not on cache contents; FlatQuant quantizes KV cache values but performs no per-state rescue |
+| Direct overlap | Medium diagnostic overlap (KL/entropy/logit-margin position-level diagnostic is close kin to a controlled-intervention causal-utility measurement); low method overlap (no cache operation of any kind) |
+| Threat to FaithKV | Entropy-amplified branching may explain some compression failures independent of any per-state KV-information loss — a confound M1's motivating hypothesis (§5 causal-false-negative existence) must rule out, not just a competing method |
+| Required response | Any future rescue-utility claim must be shown to hold beyond entropy, logit-margin, and branching-marker controls — see the added threat paragraph in `docs/METHOD_PIVOT_SPEC.md` §5a |
+
+This record does not change any M1/M2/M3 verdict in §12 — it is a
+different compression family (quantization, not eviction) and does not
+implement a KV-cache operation, so it cannot itself kill or corroborate a
+cache-operation novelty claim. Its relevance is entirely to §5's
+*measurement validity*: a future discovery pilot (`docs/B0_5_DISCOVERY_PROTOCOL.md`)
+must separate "the compressor removed causally necessary information" from
+"the compressor's perturbation nudged a locally uncertain, high-entropy
+token decision and triggered overthinking/branching that would have
+happened from any sufficiently large perturbation, KV or otherwise."
+
 ## 4. Signal comparison
 
 | Signal | Already owned by | Deployable | FlashAttention-safe | Reasoning-specific evidence |

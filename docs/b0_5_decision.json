@@ -1,0 +1,145 @@
+{
+  "phase": "B0.5",
+  "date": "2026-07-19",
+  "initial_repository_state": {
+    "initial_branch": "research/phase-b0-method-pivot",
+    "initial_head": "8d5aa21d039fe728316aee3006d5f74f5545ca0b",
+    "working_tree_dirty_before_session": false,
+    "session_added_a_prior_commit": "68b56f184a76a2c22c9d141a36e6214067becd55 (Phase-B0 doc additions requested alongside B0.5: quantization-overthinking threat + docs/PIVOT_PILOT_PROTOCOL.md; committed before branching so B0.5 starts clean)",
+    "b0_5_branch": "research/b0-5-discovery-protocol",
+    "b0_5_branch_created_from": "68b56f184a76a2c22c9d141a36e6214067becd55",
+    "rkv_submodule_gitlink_sha": "45eaa7d69d20b7388321f077020a610d9afb65bd",
+    "rkv_submodule_checked_out_locally": false,
+    "b0_commit_8d5aa21_is_ancestor_of_head": true,
+    "b0_commit_8d5aa21_is_ancestor_of_origin_main": true,
+    "origin_main_tip": "f7e9dcc8d28f5b2b2d1894d2cc03ef7ef4e7b6e4 (Merge pull request #13, confirmed pure fast-forward over 8d5aa21, zero content diff)"
+  },
+  "historical_gates": {
+    "a1_gsm8k_1_5b_b128_natural_accuracy_gate": {"fullkv_correct": 33, "rkv_correct": 13, "n": 50, "gap_pp": 40, "gate_passed": false, "operating_point_status": "retired"},
+    "a2_failure_atlas": "post_hoc_diagnostic, hypothesis_status not_tested, operating_point_valid false",
+    "a3_diagnostic_novelty": "DIAGNOSTIC SURVIVAL VERDICT: DOES NOT SURVIVE -- PHASE B BLOCKED -- DIAGNOSTIC NOT NOVEL",
+    "b0_method_novelty": {
+      "m1_residual_causal_utility_protection": "PARTIAL -- INSUFFICIENT METHOD NOVELTY (not killed outright, not survives)",
+      "m2_interaction_aware_dynamic_rescue": "KILLED",
+      "m3_faithfulness_constrained_allocation": "PARTIAL -- INSUFFICIENT METHOD NOVELTY",
+      "overall": "METHOD PIVOT VERDICT: BLOCKED -- NO NOVEL METHOD YET"
+    }
+  },
+  "b0_audit_verdict": {
+    "m1_reassessment": "Verdict upheld. Killed on three independent HIGH-overlap directions (ArborKV ablation-supervision pipeline, IntentKV residual architecture, ThinKV counterfactual-to-policy pipeline), each grounded in full-text-inspected quotes, not search snippets alone. Correctly not classified as fully KILLED (no single paper performs the exact composite operation) nor SURVIVES.",
+    "m2_reassessment": "Verdict upheld, strongly grounded. Killed by directly quoted primitives: ForesightKV's MDP state literally defined as 'the current remaining KV cache at step t'; Neural GC's cache-state conditioning; R-KV's own pinned source rescoring at every compaction (locally audited, not a secondary claim).",
+    "m3_reassessment": "Verdict upheld. Allocation machinery is prior art (ReasonAlloc, Ada-KV/LKV lineage); the only new element is a constraint metric, which the project's own predeclared standard (applied against its own N3 in A3) rules insufficient by itself. This is a self-consistency argument, not a literature-strength argument, and it holds regardless of any single paper's evidence tier.",
+    "reliance_on_search_snippets_only": "Present but confined to corroborating, non-load-bearing entries (e.g. LKV, IndexMem, Locret marked search_summary_only in docs/method_novelty_matrix.json); none of the three verdicts depends solely on a snippet-tier source.",
+    "uncertainty_directionality": "docs/B0_SEARCH_LOG.md's own 'Saturation status' section already argues every logged uncertainty could only add overlaps (worsen novelty), never remove an already-quoted overlap -- reviewed and endorsed, not merely repeated, in this session's audit.",
+    "conclusion": "B0 remains scientifically valid. No verdict is reversed by this audit."
+  },
+  "documentation_corrections": {
+    "readme_md": "Added a 'Current status (read this first)' section ahead of the original diagnostic framing; relabeled the original opening paragraphs 'Historical research question (original framing)'; no historical sentence removed or edited.",
+    "experiment_md": "Added a top-of-file ARCHIVAL NOTICE banner stating this is the frozen historical protocol, A3 killed diagnostic novelty, B0 found no novel method, and no new run should follow this protocol without a separately approved redesign; no body content below the notice was edited."
+  },
+  "research_question": "At an operating point that first passes a predeclared natural-accuracy plausibility gate and a realized-compression gate, does a deployed reasoning KV compressor evict blocks that (1) it ranks safe to remove, (2) are actually removed, (3) have high counterfactual future utility under a controlled KV-only intervention, (4) are not identified by established cheap signals, (5) occur frequently enough to motivate a distinct algorithmic operation? ('unexplained causal false negatives')",
+  "hypothesis_status": "UNTESTED",
+  "candidate_operating_points": [
+    {
+      "id": "A",
+      "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+      "dataset": "MATH-500",
+      "budget": 1024,
+      "reported_ratio": "34%",
+      "evidence_tier": "primary_source (third_party/R-KV/README.md, pinned submodule, arXiv:2505.24133)",
+      "preferred": true
+    },
+    {
+      "id": "B",
+      "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+      "dataset": "AIME-24",
+      "budget": 1536,
+      "reported_ratio": "10%",
+      "evidence_tier": "primary_source (same table)",
+      "preferred": false,
+      "reason_not_preferred": "small population (~30 problems/year), ~5x longer traces, does not fit the GPU-hour ceiling at the same sample size as A"
+    },
+    {
+      "id": "C",
+      "model": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+      "dataset": "MATH-500",
+      "budget": null,
+      "reported_ratio": null,
+      "evidence_tier": "search_summary_only for the R-KV-specific accuracy-vs-budget curve",
+      "preferred": false,
+      "reason_not_preferred": "no primary-source lossless-budget number for this exact model"
+    }
+  ],
+  "selected_operating_point": "A",
+  "selected_operating_point_blocker": "CLAUDE.md Section 4 freezes the model as deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B ONLY for this repository's pipeline. Candidate A uses a different model. A dated CHANGELOG.md/CLAUDE.md amendment BEFORE any GPU run is required and is NOT performed by this document.",
+  "intervention_unit": "fixed 128-token block, aligned to R-KV's own divide_length=128 compaction schedule",
+  "primary_metric": "reference-token NLL increase over a fixed 48-token future horizon, comparing a single-block-present vs single-block-absent cache state relative to the real deployed R-KV cache at a sampled compaction event",
+  "secondary_metrics": ["answer_token_nll_delta", "kl_divergence_or_topk_approximation", "top1_agreement_rate", "target_logprob_present_and_absent", "branching_marker_probability_mass"],
+  "baseline_signals": ["r_kv_base_score", "recent_attention", "value_norm", "key_norm", "recency_position", "entropy", "top1_top2_logit_margin", "hidden_state_delta", "recurrence_flag", "future_attention_oracle_non_deployable"],
+  "accuracy_gate": {
+    "definition": "pilot_accuracy_plausible-style: R-KV natural accuracy on the 12-example calibration subset must not fall more than a predeclared ceiling (recommend reusing this repository's existing ~0.10-0.15 convention) below FullKV natural accuracy",
+    "claim_boundary": "keeps the pilot off an absurd operating point only; never supports an 'accuracy preserving' or 'accuracy neutral' claim at this n, matching docs/EXPERIMENT.md Section 8/Section 11's existing discipline"
+  },
+  "compression_gate": {
+    "definition": "measured instantaneous_retention_ratio materially below 1.0 on a meaningful fraction of natural R-KV runs, reusing require_meaningful_compression machinery"
+  },
+  "eligibility_rules": [
+    "both-conditions natural base answer correct (loosened relative to the frozen primary pipeline's both-correct rule, since accuracy is not this pilot's primary axis, but a wrong-answer trace is excluded from event sampling)",
+    "natural run did not hit the generation token cap",
+    "sampled compaction event is not the first or last event in its run",
+    "at least horizon=48 tokens remain in the natural run after the sampled event",
+    "shadow-FullKV replay passes a schema/identity check against the R-KV run it shadows"
+  ],
+  "cost_model": {
+    "n_examples": 12,
+    "events_per_example": 3,
+    "evicted_per_event": 2,
+    "control_per_event": 2,
+    "total_labeled_blocks": 144,
+    "horizon_tokens": 48,
+    "unablated_replay_passes": 36,
+    "ablated_or_rescued_replay_passes": 144,
+    "shadow_fullkv_prefix_reconstructions": 36,
+    "core_forward_token_equivalents": 144240,
+    "safety_factor": 3,
+    "total_forward_token_equivalents_with_safety_factor": 432720,
+    "assumed_throughput_tokens_per_second_range": [35, 50],
+    "projected_gpu_hours_range": [2.4, 3.4],
+    "ceiling_gpu_hours": 4,
+    "fits_under_ceiling": true,
+    "margin_at_pessimistic_estimate_pct": 15
+  },
+  "projected_gpu_hours": 3.4,
+  "decision_criteria": {
+    "1_feasible_non_retired_operating_point_identified": true,
+    "2_future_accuracy_and_compression_gates_explicit": true,
+    "3_intervention_deterministic_and_implementable": true,
+    "4_pilot_estimated_below_4_gpu_hours": true,
+    "5_analysis_can_distinguish_three_outcomes": true,
+    "6_thresholds_and_stopping_rules_frozen_before_gpu_results": true,
+    "7_b1_harness_implementable_without_modifying_rkv_submodule": true,
+    "8_no_method_novelty_claim_made": true
+  },
+  "verdict": "B0.5 VERDICT: READY FOR B1 DISCOVERY-HARNESS IMPLEMENTATION",
+  "verdict_scope": "Authorizes only a later, user-requested, CPU-developed B1 discovery-harness implementation. Does NOT authorize GPU use, model inference, model/dataset download, or any method implementation.",
+  "blockers": [
+    "CLAUDE.md model freeze (Section 4) names only DeepSeek-R1-Distill-Qwen-1.5B; Candidate A's model requires a separate dated CHANGELOG.md/CLAUDE.md amendment before any GPU run, not granted by this document.",
+    "The 'lossless' accuracy claim for Candidate A is the R-KV paper's own eval protocol, not yet reproduced in this repository's own batch-1 replay engine; the accuracy gate could still fail exactly as the retired GSM8K point did, and passing is not guaranteed by the published number alone.",
+    "GPU cost estimate is a planning estimate built on an assumed 3090-vs-A100 throughput ratio, not a measurement; the protocol's own stopping rule 3 requires empirical re-projection after the first example before continuing."
+  ],
+  "uncertainties": [
+    "Exact source paper for the 32-token/stride-16 'counterfactual occlusion' methodology (docs/B0_5_SEARCH_LOG.md Section 4) not pinned down this session.",
+    "The 'R-KV improved from 37.20% to 42.60% on MATH500' snippet for a 7B backbone is search-summary-level only and not relied upon for any decision.",
+    "RTX 3090 BF16 throughput for an 8B dense model was estimated from general hardware-comparison knowledge, not a source specific to this exact model.",
+    "R-KV's monkeypatch compatibility with the exact DeepSeek-R1-Distill-Qwen-7B architecture variant (Candidate C) was not independently confirmed this session.",
+    "No systematic forward-citation-database sweep was run (same gap as B0's and A3's logs)."
+  ],
+  "prohibited_claims": [
+    "That causal false negatives exist (still an untested hypothesis).",
+    "That A1/A2 provide causal existence evidence (their operating point failed the accuracy gate).",
+    "That any method (M1/M2/M3 or otherwise) works, beats a baseline, or preserves accuracy.",
+    "That Candidate A's published 'lossless' point transfers to this repository's own replay engine without independent verification.",
+    "That this document's READY verdict authorizes GPU use, inference, or implementation of any kind beyond a CPU-developed B1 harness.",
+    "Any condition named by a retention percentage (Section 9 rule, unchanged)."
+  ]
+}

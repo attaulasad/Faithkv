@@ -781,6 +781,38 @@
       "claims_surviving": [],
       "evidence": ["WebSearch snippet (2026-07-19): 'lightweight latent memory module that compresses evicted tokens into a compact, online-updated state and provides residual readouts to compensate for the attention contributions lost through KV eviction.'"],
       "uncertainties": ["Screened only; would require full review before any M1-adjacent claim is made in a future phase"]
+    },
+    {
+      "paper_id": "quantized_reasoning_overthinking_2606_00206",
+      "title": "Quantized Reasoning Models Think They Need to Think Longer, but They Do Not",
+      "authors": ["Sanae Lotfi", "Polina Kirichenko", "Steven Li", "Zechun Liu"],
+      "year": 2026,
+      "version_reviewed": "as fetched 2026-07-19 (no version tag captured)",
+      "date_accessed": "2026-07-19",
+      "official_source": "https://arxiv.org/abs/2606.00206",
+      "code_source": "UNKNOWN -- not captured this session",
+      "evidence_quality": "full_text_inspected_via_fetch",
+      "compression_family": "quantization -- NOT KV eviction; weight-only PTQ (GPTQ, AWQ, 3-/4-bit) and end-to-end weight+activation+KV quantization (FlatQuant, W4A4KV4/W8A8KV8)",
+      "importance_signal": ["token_level_KL_divergence_quantized_vs_full_precision", "next_token_entropy", "top1_top2_logit_margin", "overthinking_branching_marker_frequency"],
+      "intervention_type": ["same_prefix_matched_generation_quantized_vs_full_precision"],
+      "cache_action": ["none -- fix is a logit penalty on output distribution, not a cache operation; FlatQuant quantizes KV values but performs no per-state rescue or eviction"],
+      "reasoning_granularity": "token (position-level KL/entropy/margin)",
+      "offline_supervision": "N/A -- diagnostic paper, not a trained cache policy",
+      "online_predictor": false,
+      "dynamic_rescoring": false,
+      "conditional_on_compressed_state": null,
+      "residual_over_baseline_score": false,
+      "protected_reserve": false,
+      "matched_physical_memory": null,
+      "m1_overlap": "MEDIUM (diagnostic only, not method) -- position-level KL/entropy/logit-margin under a same-prefix matched-generation control is close kin to a controlled-intervention causal-utility measurement, but this paper measures quantization noise, not per-state KV-ablation utility, and proposes no cache operation",
+      "m2_overlap": "NONE -- no cache-state-conditional mechanism",
+      "m3_overlap": "NONE -- no allocation mechanism",
+      "strongest_overlap": "Not a method threat (no cache action). The threat is a measurement-validity confound: 'in up to 52% of the quantized models' failures, models reach the right answer in intermediate reasoning steps but do not output it as a final answer,' and 'position-level KL divergence correlates strongly with the BF16 model's next-token entropy (Spearman rho=0.92)' -- i.e., compression-induced behavior change can be explained by entropy-amplified branching at locally uncertain tokens, independent of any per-state information loss.",
+      "substantive_distinction": "Different compression family entirely (quantization, not KV eviction); no cache operation of any kind; cannot be credited or debited against M1/M2/M3 novelty. Its role is as a required control for any future causal-false-negative claim (docs/METHOD_PIVOT_SPEC.md 5a, docs/B0_5_DISCOVERY_PROTOCOL.md baseline signals).",
+      "claims_killed": [],
+      "claims_surviving": [],
+      "evidence": ["WebFetch of arxiv.org/abs/2606.00206 (2026-07-19): abstract quotes on the 52% intermediate-answer-abandoned failure mode and the training-free logit-penalty fix.", "WebFetch of arxiv.org/html/2606.00206 (2026-07-19): verbatim quotes on evaluated models (DeepSeek-R1-Distill-Qwen 1.5B/7B/14B, DeepSeek-R1-Distill-Llama 8B, QwQ-32B), quantization methods (GPTQ/AWQ weight-only vs FlatQuant W4A4KV4/W8A8KV8 end-to-end), same-prefix matched-generation control, and the entropy/KL/logit-margin diagnostic."],
+      "uncertainties": ["Fetch-summarizer mediated, per this file's schema_notice; full appendix and exact benchmark list not independently read", "Code source not located this session"]
     }
   ]
 }
