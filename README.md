@@ -103,6 +103,17 @@ project's own predefined rule that gap is an application of known
 ingredients, not by itself a new method contribution, so Phase B (including
 any MATH-500 work) does not proceed on the current diagnostic combination.
 
+**Phase B0 — method pivot and adversarial method-novelty gate
+(2026-07-19).** Following the A3 block, three candidate *methods* (residual
+causal-utility protection; interaction-aware dynamic rescue;
+faithfulness-constrained memory allocation) were specified and
+adversarially checked against literature to a 2026-07-19 cutoff. None
+survived (M1 PARTIAL, M2 KILLED, M3 PARTIAL): **METHOD PIVOT VERDICT:
+BLOCKED — NO NOVEL METHOD YET.** B1 is not authorized; no GPU, inference,
+MATH-500, or method implementation is permitted. See
+`docs/METHOD_PIVOT_SPEC.md`, `docs/METHOD_NOVELTY_MATRIX.md`,
+`docs/B0_SEARCH_LOG.md`, `docs/method_novelty_matrix.json`, and `PLAN.md`.
+
 `logs/git_commit.txt`/`logs/git_status.txt` reflect an OLDER commit
 (`bb1917a...`) than this repository's current history — they were captured
 during the GPU run that produced the protocol-v2 result above and were

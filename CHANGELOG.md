@@ -5,6 +5,66 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-19 — Phase B0: method pivot specification and adversarial method-novelty gate (documentation-only; no frozen §1/§4/§8/§9 value changed; no code/config/test/schema/result/manifest modified; no GPU used, no model inference, no model weights downloaded; no MATH-500 file created; R-KV submodule untouched; A1/A2/A3 artifacts untouched)
+
+Run on branch `research/phase-b0-method-pivot`, created from `main` at the
+A3 merge commit `e0b6c68`. Purpose: decide whether FaithKV has a
+sufficiently novel candidate *method* (not diagnostic — A3 closed that) to
+justify a later GPU pilot. Search cutoff 2026-07-19; 6 targeted web
+queries + 20 successful direct arXiv/GitHub fetches + reuse of frozen A3
+records; ~40 works screened, 13 abstracts reviewed, 7 full texts
+inspected via fetch, CASK repository re-fetched, R-KV audited locally.
+Full log: `docs/B0_SEARCH_LOG.md`. Narrative matrix:
+`docs/METHOD_NOVELTY_MATRIX.md`. Machine-readable:
+`docs/method_novelty_matrix.json` (25 records, `python -m json.tool`
+passes). Spec and verdict: `docs/METHOD_PIVOT_SPEC.md`.
+
+Three candidates were evaluated against a prospective (untested)
+causal-false-negative failure hypothesis, defined in
+`docs/METHOD_PIVOT_SPEC.md` §5 — A2 motivates but cannot evidence it:
+
+- **M1 — residual causal-utility protection: PARTIAL — INSUFFICIENT
+  METHOD NOVELTY.** Strongest threats: ArborKV (arXiv:2605.22106 —
+  leave-one-out KV-block zeroing with answer-accuracy supervision
+  calibrating a lightweight online estimator); IntentKV (arXiv:2606.09916
+  — zero-initialized learned residual head explicitly correcting "cases
+  the rule scorer misses" on top of a deployable heuristic retention
+  score); ThinKV v2 (arXiv:2510.01290 — counterfactual segment-ablation
+  KL directly determining a deployed reasoning compression policy);
+  ForesightKV (arXiv:2602.03203 — post-eviction loss increase inside the
+  training reward of a deployed reasoning evictor); Adaptive Filtering
+  (arXiv:2607.13205 — intervention-diagnosed systematic-error correction
+  of an existing score); protected partitions in CASK/VaSE/arXiv:2605.18053.
+  Remaining delta is an unstudied intersection of published components —
+  insufficient under the same predefined rule that killed A3's N3.
+- **M2 — interaction-aware dynamic rescue: KILLED.** ForesightKV's GRPO
+  stage is an MDP whose state is "the current remaining KV cache at step
+  t"; Neural Garbage Collection (arXiv:2604.18002) conditions learned
+  eviction on cache state for reasoning models; the pinned R-KV itself
+  already rescores at every compaction over the retained set.
+- **M3 — faithfulness-constrained memory allocation: PARTIAL —
+  INSUFFICIENT METHOD NOVELTY.** ReasonAlloc (arXiv:2606.11164) and the
+  Ada-KV/LKV lineage own the constrained-allocation machinery; swapping in
+  a causal-dependence constraint is a new metric in a known optimizer,
+  explicitly insufficient under the predeclared decision standard.
+
+**Overall: METHOD PIVOT VERDICT: BLOCKED — NO NOVEL METHOD YET.** B1 is
+not permitted under this result and has not started; no GPU rental, model
+inference, MATH-500 implementation, or method implementation is authorized
+by this entry. §10 f=1 stability remains UNRESOLVED (not a B0 task);
+GSM8K b128 remains retired.
+
+Files created: `docs/METHOD_PIVOT_SPEC.md`, `docs/METHOD_NOVELTY_MATRIX.md`,
+`docs/B0_SEARCH_LOG.md`, `docs/method_novelty_matrix.json`. Files updated:
+`PLAN.md` (status + roadmap), `CHANGELOG.md` (this entry), `README.md`
+(one-paragraph B0 status link), `docs/EXPERIMENT.md` §11 (one bracketed
+dated note fixing a genuine stale current-status sentence that still named
+"a MATH-500 longer-trace feasibility design" as the next experimental work
+— written before A3/B0 blocked that path; the historical sentence itself
+is preserved). No other file changed. The frozen A3 artifacts
+(`docs/RELATED_WORK_MATRIX.md`, `docs/A3_SEARCH_LOG.md`,
+`docs/related_work_matrix.json`) were read, cited, and not modified.
+
 ## 2026-07-19 — Phase A3: adversarial literature matrix and diagnostic novelty kill-check (documentation-only; no frozen §1/§4/§8/§9 value changed; no code/config/test/schema modified; no GPU used, no model inference, no historical result artifact touched; no MATH-500 code added; R-KV submodule untouched)
 
 Literature-only gate, run before any further experimental work per

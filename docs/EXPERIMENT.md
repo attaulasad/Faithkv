@@ -385,6 +385,13 @@ and meaningfully compressing. No further GSM8K b128 or b160 runs are
 planned. The next experimental work is (1) a CPU-only failure atlas over the
 existing 50 pairs (using only the committed gate artifacts above — no new
 GPU generation), then (2) a MATH-500 longer-trace feasibility design with
-SEPARATE calibration and held-out manifests. The earlier one-example
+SEPARATE calibration and held-out manifests. **[Superseded 2026-07-19,
+same day, by Phases A3 and B0: item (1) was completed (the failure atlas
+above); item (2) is BLOCKED — the A3 kill-check found the diagnostic not
+novel and the B0 method-novelty gate returned BLOCKED — NO NOVEL METHOD
+YET, so no MATH-500 feasibility design, manifest, or implementation is
+authorized (`PLAN.md`, `CHANGELOG.md` 2026-07-19 A3/B0 entries,
+`docs/METHOD_PIVOT_SPEC.md`). This paragraph is preserved as the record of
+what was planned when the retirement was written.]** The earlier one-example
 frozen fixed-trace gate result (row 30's probe answered 109) is superseded
 by this failed natural gate and must not be cited as evidence.
