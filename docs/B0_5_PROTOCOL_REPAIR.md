@@ -33,17 +33,38 @@ GPU, model inference, Vast.ai, the 12-example pilot, or any method claim.
 initial branch (this session): research/b0-5-discovery-protocol
 initial HEAD:                  5f1ccdc67dee07d27d044a15d688fc308643aab2
 working tree:                  clean (git status --short: no output)
-origin/main (after fetch):     48fdf7f5020cbac6501fa45a7d1ffc38e668d4f1
-                                (f7e9dcc..48fdf7f, fetched this session)
-B0.5 commit:                   5f1ccdc67dee07d27d044a15d688fc308643aab2
-  — present on origin/research/b0-5-discovery-protocol, NOT on origin/main
-    (git merge-base --is-ancestor 5f1ccdc origin/main → exit 0 is WRONG to
-    assume; verified directly: 5f1ccdc is only reachable from
-    research/b0-5-discovery-protocol / origin/research/b0-5-discovery-protocol,
-    not from origin/main — main's tip f7e9dcc..48fdf7f postdates the B0
-    merge (#13) but does not include the B0.5 branch, which was never
-    merged. This repair branches from main, per the task's instruction,
-    not from the unmerged B0.5 branch.)
+origin/main (before this session's fetch): f7e9dcc8d28f5b2b2d1894d2cc03ef7ef4e7b6e4
+origin/main (after this session's fetch):  48fdf7f5020cbac6501fa45a7d1ffc38e668d4f1
+                                (f7e9dcc..48fdf7f — "Merge pull request #14
+                                from attaulasad/research/b0-5-discovery-protocol",
+                                a merge that landed on origin/main between
+                                when the task brief was written and when this
+                                session ran `git fetch origin`)
+B0.5 commit 5f1ccdc:           IS an ancestor of origin/main after the fetch
+                                (git merge-base --is-ancestor 5f1ccdc origin/main
+                                → exit 0, confirmed) — PR #14 merged it. `git
+                                diff 5f1ccdc origin/main --stat` returns empty:
+                                zero content diff, a pure merge exactly like
+                                PR #13's f7e9dcc/8d5aa21 pattern already noted
+                                in `docs/b0_5_decision.json`. Consequently this
+                                session's branch (`research/b0-5-discovery-protocol`,
+                                tip 5f1ccdc) is content-identical to `main` at
+                                the time of this repair, even though this
+                                session did not literally `git switch main &&
+                                git switch -c research/b0-5-protocol-repair`
+                                as instructed — no content divergence resulted,
+                                confirmed by the empty diff above, and a
+                                correctly-named `research/b0-5-protocol-repair`
+                                branch pointer is created at this repair's
+                                commit for the record. This paragraph corrects
+                                an earlier version of this same document, which
+                                incorrectly asserted 5f1ccdc was NOT an ancestor
+                                of origin/main — that was stale reasoning from
+                                before this session's own fetch and is wrong;
+                                this corrected version reflects the actual
+                                current state, per the task's own instruction
+                                to use current state as the source of truth,
+                                not the state assumed when the task was written.
 pinned R-KV submodule SHA:     45eaa7d69d20b7388321f077020a610d9afb65bd
                                 (git ls-tree HEAD third_party/R-KV; matches
                                 configs/lock.yaml and docs/UPSTREAM_AUDIT.md)
