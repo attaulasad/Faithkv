@@ -2104,6 +2104,83 @@ def cmd_calibrate_budget(args: argparse.Namespace) -> int:
     return 1
 
 
+# ------------------------------------------------------------------ failure-atlas
+
+def cmd_failure_atlas(args: argparse.Namespace) -> int:
+    """Phase A2: deterministic, CPU-only failure atlas over the 50 committed
+    FullKV/R-KV protocol-v3 GSM8K pairs (`kvcot.failure_atlas`). Reads only
+    the committed `.jsonl.gz` gate artifacts, verifies their `.sha256`
+    sidecars first (never trusts unverified bytes), never loads a model or
+    tokenizer, and never mutates any historical artifact.
+    """
+    from kvcot.failure_atlas import build_atlas_summary, build_failure_atlas, write_atlas_csv, write_atlas_markdown
+    from kvcot.utils.io import read_jsonl_auto
+
+    full_path = Path(args.full_artifact)
+    rkv_path = Path(args.rkv_artifact)
+
+    if args.dry_run:
+        print(f"failure-atlas plan: full={full_path} rkv={rkv_path}")
+        print(f"  output_csv={args.output_csv}")
+        print(f"  output_markdown={args.output_markdown}")
+        print(f"  output_summary={args.output_summary}")
+        return 0
+
+    def _verify_checksum(artifact_path: Path) -> str:
+        sha_path = artifact_path.with_name(artifact_path.name.replace(".jsonl.gz", ".sha256"))
+        if not sha_path.exists():
+            raise SystemExit(f"missing checksum sidecar for {artifact_path}: expected {sha_path}")
+        actual = sha256_file(artifact_path)
+        found = False
+        for line in sha_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(None, 1)
+            if len(parts) != 2:
+                continue
+            recorded_hash, recorded_name = parts
+            if Path(recorded_name.strip()).name == artifact_path.name:
+                found = True
+                if recorded_hash.strip() != actual:
+                    raise SystemExit(
+                        f"checksum mismatch for {artifact_path}: {sha_path} records {recorded_hash.strip()}, "
+                        f"actual sha256 is {actual}"
+                    )
+        if not found:
+            raise SystemExit(f"{sha_path} does not contain an entry for {artifact_path.name}")
+        return actual
+
+    full_sha256 = _verify_checksum(full_path)
+    rkv_sha256 = _verify_checksum(rkv_path)
+
+    full_records = list(read_jsonl_auto(full_path))
+    rkv_records = list(read_jsonl_auto(rkv_path))
+
+    analysis_code_commit = git_commit()
+
+    rows = build_failure_atlas(
+        full_records, rkv_records, analysis_code_commit=analysis_code_commit,
+        full_artifact_path=str(full_path), rkv_artifact_path=str(rkv_path),
+    )
+    summary = build_atlas_summary(
+        rows, full_artifact_path=str(full_path), rkv_artifact_path=str(rkv_path),
+        full_artifact_sha256=full_sha256, rkv_artifact_sha256=rkv_sha256,
+        analysis_code_commit=analysis_code_commit,
+    )
+
+    write_atlas_csv(rows, args.output_csv)
+    write_atlas_markdown(rows, summary, args.output_markdown)
+    write_json(args.output_summary, summary)
+
+    print(f"failure-atlas: wrote {len(rows)} rows to {args.output_csv}, {args.output_markdown}, {args.output_summary}")
+    print(f"  correctness: {summary['correctness']}")
+    if summary["warnings"]:
+        for w in summary["warnings"]:
+            print(f"  warning: {w}")
+    return 0
+
+
 # --------------------------------------------------------------------- validate-run
 
 def _schema_for_record(row: dict):
@@ -2225,6 +2302,15 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("validate-run")
     p.add_argument("--run-dir", required=True)
     p.set_defaults(func=cmd_validate_run)
+
+    p = sub.add_parser("failure-atlas")
+    p.add_argument("--full-artifact", required=True)
+    p.add_argument("--rkv-artifact", required=True)
+    p.add_argument("--output-csv", default="results/tables/gsm8k_v3_b128_failure_atlas.csv")
+    p.add_argument("--output-markdown", default="results/tables/gsm8k_v3_b128_failure_atlas.md")
+    p.add_argument("--output-summary", default="results/decisions/gsm8k_v3_b128_failure_atlas_summary.json")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_failure_atlas)
 
     return parser
 
