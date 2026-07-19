@@ -5,6 +5,98 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-19 — Phase A3: adversarial literature matrix and diagnostic novelty kill-check (documentation-only; no frozen §1/§4/§8/§9 value changed; no code/config/test/schema modified; no GPU used, no model inference, no historical result artifact touched; no MATH-500 code added; R-KV submodule untouched)
+
+Literature-only gate, run before any further experimental work per
+`PLAN.md`'s "literature matrix" next step. Cutoff: 2026-07-19. 24 distinct
+search queries across 5 rounds (mandatory-paper lookup, screened-paper
+lookup, semantic/combination variants, CASK code-level deep dive,
+Fixed-Contract deep dive); 20 papers fully entered into the matrix (9
+mandatory papers from the task brief + 11 screened); 2 papers (CASK,
+Fixed-Contract) escalated to direct primary-source fetch (arXiv abstract
+page; for CASK also the official GitHub README and the
+`replay_reference_fidelity.py` evaluation script source) since they are the
+two papers capable of independently deciding the verdict. Full
+methodology and query log: `docs/A3_SEARCH_LOG.md`. Full matrix (narrative):
+`docs/RELATED_WORK_MATRIX.md`. Machine-readable: `docs/related_work_matrix.json`
+(schema-validated, `python -m json.tool` passes).
+
+**Highest-threat paper: CASK (arXiv:2604.10900, "Core-Aware Selective KV
+Compression for Reasoning Traces"), released 2026-04-13.** Its official,
+publicly released evaluation harness (`scripts/replay_reference_fidelity.py`,
+fetched directly from `github.com/Skyline-23/CASK`) implements the exact
+fixed-generated-trace / teacher-forced / cache-policy-varying replay
+primitive this repository's narrower novelty claim (N1) rested on: it reads
+a FullKV reference continuation, feeds its tokens through a compressed-cache
+condition via strict teacher forcing (`target_token =
+continuation_ids[step_idx:step_idx+1]` fed unconditionally every step,
+regardless of the candidate model's own prediction), and records per-step
+fidelity/agreement/cache-size statistics — applied to reasoning models
+(AIME24/AIME25) under decode-time KV eviction. It does not implement an
+early-answering/omitted-suffix intervention (the replay always consumes the
+full reference continuation, never truncates it), does not report a
+predeclared accuracy-neutral gate as a headline claim boundary, and does not
+produce a held-out per-example mechanism taxonomy.
+
+**Verdicts:**
+- **N1 (diagnostic primitive): DOES NOT SURVIVE** — killed by CASK's public
+  evaluation code, three months before this repository's Phase A2 commit.
+- **N2 (reasoning + decode-time KV application): DOES NOT SURVIVE** — CASK
+  kills the "reasoning model, decode-time KV eviction" half directly; Lanham
+  et al. (arXiv:2307.13702, 2023) independently kills the
+  "early-answering-as-a-technique" half (no KV-cache axis in Lanham).
+- **N3 (accuracy-neutral intervention-based FaithKV gap): SURVIVES** as an
+  empirical gap — no reviewed paper combines KV-cache compression,
+  early-answering/omitted-suffix intervention, a predeclared accuracy-neutral
+  gate, realized-memory matching, held-out evaluation, and per-example
+  mechanism classification, together, on a reasoning model.
+- **Overall: DIAGNOSTIC SURVIVAL VERDICT: DOES NOT SURVIVE.** Per the
+  project's predefined rule, an earlier implementation of the essential
+  matched-trace decode-time cache diagnostic (CASK) means the diagnostic
+  does not survive overall, even though the specific N3 empirical
+  intersection remains open — that intersection is an application of two
+  independently known ingredients (CASK-style replay; Lanham-style early
+  answering) to a new setting, not by itself a new method contribution.
+- **PHASE B: BLOCKED — DIAGNOSTIC NOT NOVEL.**
+
+**Claims removed from this repository's documentation as a result (see
+`README.md`, `docs/RELATED_WORK_MATRIX.md` §16/Part 16 mapping):** this
+repository does not claim, and must not claim going forward, to be the
+first fixed-trace FullKV/compressed-KV diagnostic, the first teacher-forced
+KV-policy replay, the first reasoning-trace replay under decode-time
+compression, the first early-answering CoT-faithfulness diagnostic, the
+first causal reasoning-to-answer intervention, or the first separation of
+accuracy and reasoning faithfulness. The repository never made most of
+these claims explicitly (its `CLAIM_BOUNDARY_NOTICE` already disclaimed
+faithfulness conclusions), but this entry records the check as performed
+and the boundary as now literature-grounded rather than merely
+self-imposed.
+
+**Also verified during this pass (A1/A2 spot-check, no A1/A2 numeric claim
+changed):** independently recomputed every A2 headline number directly
+from the committed `results/tables/gsm8k_v3_b128_failure_atlas.csv` (50
+rows, 50 unique `source_row_index`, FullKV 33/50, R-KV 13/50, correctness
+distribution 12/21/1/16, retention mean 0.3596/median 0.3485, compaction
+mean 3.9/median 4.0, 9/50 `identical_through_think` with 3 correct→wrong
+flips, 41/50 diverge inside the reasoning region) — all match the committed
+`results/decisions/gsm8k_v3_b128_failure_atlas_summary.json` and prior
+CHANGELOG entries exactly; no discrepancy found. Two genuine documentation
+gaps (not data/code defects) were found and fixed by adding prose-only
+caveats to `docs/EXPERIMENT.md` §11 (no historical artifact modified): (1)
+the "0/50 pairs diverge before first compaction" finding rests on a short
+pre-compaction observation window (mean 15.6 / median 13.5 generated tokens,
+~4.0% of the mean 450.7-token trace, since first compaction fires at
+absolute position 129 for all 50 pairs on this schedule) and is therefore
+weak temporal, not causal, evidence; (2) the atlas's own committed
+"decoded text after `</think>`" excerpts (`results/tables/
+gsm8k_v3_b128_failure_atlas.md`) show substantial step-by-step mathematical
+re-derivation continuing past the closing marker on all three
+correct→wrong flip rows, so `</think>` is confirmed to be a token-format
+boundary, not a validated semantic reasoning/answer boundary — the
+`reasoning`/`post_think_answer` split must be read as a literal token-
+position classification, not proof that everything after `</think>` is
+answer-only text.
+
 ## 2026-07-19 — Phase A2: deterministic GSM8K protocol-v3 failure atlas (CPU-only, post-hoc diagnostic; no frozen §1/§4/§8/§9 value changed; no GPU used, no model/tokenizer loaded, no generation rerun, no historical `results/raw/`, `results/gate_artifacts/`, or `results/decisions/*_accuracy_gate.json` file modified)
 
 New `src/kvcot/failure_atlas.py` + `kvcot failure-atlas` CLI command build a

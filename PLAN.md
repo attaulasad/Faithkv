@@ -1,6 +1,30 @@
 # Plan and status
 
-## Current status: protocol-v3 GSM8K b128 gate FAILED; GSM8K b128 retired; hypothesis `not_tested`
+## Current status: A3 diagnostic novelty kill-check DOES NOT SURVIVE; PHASE B BLOCKED
+
+**Phase A3 (2026-07-19, CHANGELOG.md) found that CASK (arXiv:2604.10900),
+released 2026-04-13, independently implements the fixed-generated-trace /
+teacher-forced / cache-policy-varying replay diagnostic this repository's
+narrower novelty claim (N1) rested on — confirmed by direct inspection of
+CASK's official evaluation code, not just its abstract
+(`docs/RELATED_WORK_MATRIX.md` §6.1, §8).** Early answering itself is
+independently non-novel since Lanham et al. 2023 (arXiv:2307.13702). No
+paper was found that combines both (KV-cache-policy replay + early-
+answering/omitted-suffix intervention) under an accuracy-neutral gate with
+realized-memory matching and held-out per-example mechanism classification —
+that specific empirical intersection remains open, but per the project's
+predefined rule it is an application of known ingredients, not a standalone
+method contribution, so the overall verdict is still negative:
+
+**DIAGNOSTIC SURVIVAL VERDICT: DOES NOT SURVIVE — PHASE B: BLOCKED —
+DIAGNOSTIC NOT NOVEL.** Full matrix: `docs/RELATED_WORK_MATRIX.md`; search
+log: `docs/A3_SEARCH_LOG.md`; machine-readable: `docs/related_work_matrix.json`.
+
+This is layered on top of, and does not reverse, the pre-existing GSM8K
+b128 status below — the operating point was already retired on independent
+(accuracy) grounds before this literature check ran.
+
+## Prior status (2026-07-19): protocol-v3 GSM8K b128 gate FAILED; GSM8K b128 retired; hypothesis `not_tested`
 
 The implementation is complete and its GPU correctness gates have passed, but
 the pilot has **not** reached the §1 research question. The protocol-v3
@@ -67,40 +91,67 @@ obsolete.
   identical-through-think flip is the minority pattern, not the typical
   one, at this retired operating point. Still `post_hoc_diagnostic` /
   `hypothesis_status: not_tested` — this does not test the §1 hypothesis.
+- **Phase A3 — adversarial literature matrix and diagnostic novelty
+  kill-check (2026-07-19, CHANGELOG.md).** `docs/RELATED_WORK_MATRIX.md`,
+  `docs/A3_SEARCH_LOG.md`, `docs/related_work_matrix.json` (20 papers,
+  schema-validated). CASK (arXiv:2604.10900) independently implements this
+  repository's core fixed-trace/teacher-forced replay diagnostic primitive
+  (confirmed against its official evaluation code); Lanham et al.
+  (arXiv:2307.13702) independently established early answering. **DIAGNOSTIC
+  SURVIVAL VERDICT: DOES NOT SURVIVE — PHASE B: BLOCKED — DIAGNOSTIC NOT
+  NOVEL.** A specific empirical intersection (KV-cache replay + early
+  answering + accuracy gate + held-out per-example classification) remains
+  unstudied but is not, by itself, a new method.
 - All docs: `UPSTREAM_AUDIT.md`, `REPLAY_DESIGN.md`, `EXPERIMENT.md`,
   `PROBE_PROTOCOL.md` (real tokenizer output), `SCHEMA.md`,
   `REPRODUCIBILITY.md`, `GPU_VALIDATION_PLAN.md`.
 
-## What's next (CPU-only; no new GPU rental until Phase C)
-
-The immediate next work is **CPU-only** and uses only the committed gate
-artifacts — no new GPU generation:
+## What's next (CPU-only; no new GPU rental; Phase B/MATH-500 blocked)
 
 1. ~~**Failure atlas** over the existing 50 gate pairs~~ — **done, 2026-07-19**
    (Phase A2 above).
-2. **Literature matrix** situating this negative pilot result against prior
-   faithfulness / KV-compression work.
+2. ~~**Literature matrix** situating this negative pilot result against prior
+   faithfulness / KV-compression work.~~ — **done, 2026-07-19** (Phase A3
+   above): **DOES NOT SURVIVE**, Phase B blocked under the diagnostic's old
+   novelty story.
 
-Only after those, and still on paper / CPU:
+**MATH-500 implementation and any other Phase B work remain BLOCKED** —
+not merely "not yet started" — until a genuinely new technique is designed
+and approved; the current diagnostic combination (fixed-trace replay +
+early answering + KV compression) is not, by itself, that new technique
+(`docs/RELATED_WORK_MATRIX.md` §16).
 
-3. A MATH-500 longer-trace feasibility **design**, with separate calibration
-   and held-out manifests — a redesign, not the current frozen config re-run.
+The only currently-permitted next activity is an **evidence-grounded
+research pivot/design phase**: using the A3 matrix's identified gap (§12 of
+`docs/RELATED_WORK_MATRIX.md`) and threat memos as the starting point for
+designing a technique that is not simply an application of CASK-style
+replay + Lanham-style early answering to a new dataset. This design phase
+is itself still CPU/paper-only — **no GPU experiment is authorized by this
+entry**, and no MATH-500 manifest, config, evaluator, or script may be
+created until that redesign is specified and separately approved.
 
-4. **Phase C — GPU rental.** No new GPU host is rented until a redesigned,
-   non-retired experiment is specified and approved. The retired GSM8K b128
-   operating point is not re-run, and Phase C does not begin before steps 1–3
-   are complete.
+3. **Phase C — GPU rental.** No new GPU host is rented until a redesigned,
+   non-retired, genuinely-novel experiment is specified and approved. The
+   retired GSM8K b128 operating point is not re-run, and Phase C does not
+   begin before a design phase addressing the A3 verdict is complete.
 
 ## Open decisions needing human input
 
 - **License.** Not chosen. See `README.md`.
-- **Whether to pursue MATH-500 at all.** The old "Stage 1A decides GSM8K vs
-  MATH-500" decision is now moot — the failed natural gate retired GSM8K b128
-  outright. MATH-500, if pursued, needs the fresh feasibility design in step 3
-  above, not the current frozen configuration.
+- **Whether to pursue MATH-500 at all, and under what redesigned method.**
+  The old "Stage 1A decides GSM8K vs MATH-500" decision was already moot
+  (GSM8K b128 retired on accuracy grounds); Phase A3 adds a second, deeper
+  reason a MATH-500 rerun of the SAME diagnostic would not be worth GPU
+  spend even if GSM8K accuracy had passed — the diagnostic combination
+  itself does not clear the novelty bar. Any MATH-500 work needs both the
+  fresh feasibility design AND a design response to the A3 gap, not the
+  current frozen configuration.
 - **§10 f=1 stability control.** UNRESOLVED, and a separate Stage-0
   prerequisite that any future non-retired stage must clear on its own terms
   (`docs/GPU_VALIDATION_PLAN.md`, 2026-07-19).
+- **What the genuinely new technique should be.** Not designed or
+  implemented in this entry, per its own scope boundary — this is now the
+  single open question blocking Phase B.
 
 ## Changes to frozen settings
 
