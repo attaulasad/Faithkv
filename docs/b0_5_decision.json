@@ -210,5 +210,14 @@
     "Frozen event/layer/head/candidate/donor sampling algorithms (sha256_seed helper, four independent random.Random draws) -- docs/B0_5_R2_1_FINAL_PROTOCOL.md sections 4-6, not yet coded in src/.",
     "Mandatory no-op control CPU unit test (donor replaced with its own captured K/V, exactly zero change asserted) -- docs/B0_5_R2_1_FINAL_PROTOCOL.md section 9.C, not yet coded in tests/.",
     "Repaired pairwise provenance schema with timing fields -- docs/B0_5_R2_1_FINAL_PROTOCOL.md section 10, not yet coded in src/."
-  ]
+  ],
+  "superseded_by_r2_2": {
+    "document": "docs/B0_5_R2_2_AUTHORITY_AND_IMPLEMENTATION.md",
+    "phase": "B0.5-R2.2",
+    "date": "2026-07-19",
+    "reason": "Authority reconciliation (CLAUDE.md's blanket 7B-support prohibition technically contradicted the already-selected Llama-8B discovery operating point; resolved with a dated CLAUDE.md Section 1a/4a exception) plus four blocker closures: (1) the b0_5_r2_1_new_schema_fields entry 'first_affected_logit_absolute_position' conflated an input position (t+1) with a logit-target position (t+2) -- replaced by two explicit fields in the now-actually-coded active schema (kvcot.discovery.schemas.SwapPairRecord, schema_version 'b0_5_r2_2.v1'); (2) the b0_5_r2_1_repaired_sampling layer-selection rule assigned depth stratum directly from chronological draw ordinal, confounding compaction time with layer depth -- depth strata are now independently permuted (kvcot.discovery.sampling.assign_depth_strata); (3) entropy/logit-margin were classified mandatory (b0_5_r2_1_repaired_gate_10) but never operationally defined -- now frozen exactly (kvcot.discovery.uncertainty); (4) all B1A prerequisites listed in b0_5_r2_1_prerequisites_repaired_not_implemented above are now actually implemented and CPU-tested. No inference ran; no GPU was used; B1B/B2A/B2B remain unauthorized.",
+    "fields_superseded": ["b0_5_r2_1_new_schema_fields", "b0_5_r2_1_prerequisites_repaired_not_implemented"]
+  },
+  "b0_5_r2_2_verdict": "B0.5-R2.2: AUTHORITY RECONCILIATION COMPLETE; B1A CPU PREREQUISITES IMPLEMENTED AND CPU-VALIDATED",
+  "b0_5_r2_2_verdict_scope": "Authorizes exactly the CPU-side B1A prerequisites listed in docs/B0_5_R2_2_AUTHORITY_AND_IMPLEMENTATION.md section 3, plus the CLAUDE.md Section 1a/4a discovery-only exception (Llama-8B + MATH-500 infrastructure support only, no method, no GPU, no inference). Does NOT authorize B1B, B2A, B2B, model inference, a GPU, or Vast.ai. No discovery hypothesis result exists -- none is claimed."
 }

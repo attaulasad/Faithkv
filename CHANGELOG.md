@@ -5,6 +5,98 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-19 — Phase B0.5-R2.2: authority reconciliation and B1A CPU prerequisite implementation (no GPU used, no model inference, no model weights or datasets downloaded, no MATH-500 manifest/result directory created; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged)
+
+Run on branch `research/b1a-cpu-prerequisites-r2-2`, cut from
+`research/b0-5-r2-dense-cache-repair` at commit
+`ac3e7d545d13e4b663fe575430ba13e6e4b9bdc5` ("Finalize B0.5 timing sampling
+and discovery controls"). Two things in one consolidated pass:
+
+**Authority reconciliation.** `CLAUDE.md` §1's original "no 7B support"
+blanket line technically contradicted the already-selected
+`deepseek-ai/DeepSeek-R1-Distill-Llama-8B` discovery operating point
+(`docs/b0_5_decision.json`'s `selected_operating_point`, chosen in Phase
+B0.5). Resolved with two new, dated `CLAUDE.md` subsections — §1a and §4a —
+that narrowly authorize CPU-side infrastructure only (architecture
+dispatch, state-reset generalization, construction-parity tests, the
+MATH-500 verifier) for `DeepSeek-R1-Distill-Llama-8B` + MATH-500, state
+explicitly that this is not a method implementation and not a GPU/inference
+authorization, and require a separate future authorization before B1B,
+B2A, B2B, or any Vast.ai activity. `CLAUDE.md` §1/§4's original Qwen-1.5B
+tables and `configs/lock.yaml` are unchanged.
+
+**Four further defects found and repaired this session:**
+
+- **Position-field naming error.** The `first_affected_logit_absolute_position`
+  field (documentation-only until this pass — never actually coded in
+  `src/`) conflated an *input* position (`t+1`) with the *logit-target*
+  position it produces (`t+2`). The freshly-implemented active schema
+  (`kvcot.discovery.schemas.SwapPairRecord`, `schema_version=
+  "b0_5_r2_2.v1"`) uses two explicit fields instead
+  (`first_affected_forward_input_absolute_position`,
+  `first_affected_logit_target_absolute_position`), with a validator
+  enforcing all four timing invariants at construction time.
+- **Layer-depth/event-time confound.** The frozen layer-selection rule
+  (`docs/B0_5_R2_1_FINAL_PROTOCOL.md` §5) assigned each selected event's
+  depth stratum directly from its chronological draw ordinal — silently
+  confounding *when* a compaction event happened with *how deep* its
+  sampled layer was. `kvcot.discovery.sampling.assign_depth_strata` now
+  independently permutes `{0, 1, 2}` via its own SHA-256-seeded
+  `random.Random` stream (suffix `"b05r22_depth_permutation"`), storing
+  `chronological_event_ordinal` and `depth_stratum` as two separate schema
+  fields, never one ambiguous `event_ordinal`.
+- **Undefined entropy/logit-margin signals.** Classified "mandatory" by
+  §8.2 of the prior protocol document but never operationally defined.
+  `kvcot.discovery.uncertainty` now freezes the exact computation (float32
+  natural-log-nats Shannon entropy over `log_softmax`; top-1-minus-top-2
+  raw-logit margin), sourced from the raw next-token-prediction logits at
+  the moment each token was originally predicted during the natural run,
+  per-candidate (never one shared value per eviction event), with source
+  values and differences both always stored.
+- **All previously-identified-but-unimplemented B1A prerequisites are now
+  actually implemented and CPU-tested**, closing the gap
+  `docs/B0_5_R2_1_FINAL_PROTOCOL.md` §11 and
+  `docs/b0_5_decision.json`'s `b0_5_r2_1_prerequisites_repaired_not_implemented`
+  had left open: architecture-aware R-KV monkeypatch dispatch
+  (`kvcot.discovery.dispatch`, verified against the pinned
+  `third_party/R-KV/HuggingFace/rkv/monkeypatch.py`'s exact three exported
+  patchers — `replace_qwen2`/`replace_llama`/`replace_qwen3` — wired into
+  `kvcot.generation.policies._PatchedPolicyBase.load` in the required
+  AutoConfig-before-AutoModelForCausalLM order), a no-offload hard
+  assertion (`kvcot.discovery.no_offload`), a MATH-500 symbolic-equivalence
+  verifier isolated per-comparison in a child OS process with a frozen
+  5.0-second timeout (`kvcot.utils.math_verifier` +
+  `kvcot.utils._math_verify_worker` — `math_verify`'s own
+  `multiprocessing`-based timeout mechanism was found to raise a real
+  `OSError: [WinError 6]` on this Windows host, so the parent enforces the
+  timeout itself via `subprocess.run(..., timeout=5.0)` against a fresh
+  child process instead), deterministic sampling utilities with
+  golden-vector tests, a per-instance read-only capture-wrapper
+  prerequisite around `R1KV.update_kv` with independent score
+  recomputation and gather-parity checks (`kvcot.discovery.capture`), a
+  fixed-shape within-head swap primitive (`kvcot.discovery.swap`), and a
+  strengthened, complete-branch-output no-op control comparing full
+  per-token logit/NLL sequences and final cache states, not just a single
+  self-assignment tensor (`kvcot.discovery.branch_eval`).
+
+New dependency: `math-verify[antlr4_13_2]==0.9.0` (plus its pure-Python
+dependencies `latex2sympy2_extended==1.11.0`,
+`antlr4-python3-runtime==4.13.2`), added to `pyproject.toml`'s `cpu-tools`
+extra, `requirements.txt`, and `requirements-lock.txt`. No other dependency
+pin changed — Torch/Transformers/FlashAttention are untouched.
+
+Full detail, verdict, and per-blocker file/test mapping:
+`docs/B0_5_R2_2_AUTHORITY_AND_IMPLEMENTATION.md`. Superseded passages in
+`docs/B0_5_R2_1_FINAL_PROTOCOL.md` are marked inline with a top-of-file
+banner, not deleted; `docs/b0_5_decision.json` retains every prior field
+and adds a `superseded_by_r2_2`/`b0_5_r2_2_*` block.
+
+**Status: B0.5-R2.2 authority reconciliation complete; B1A CPU
+prerequisites implemented and CPU-validated. B1B/B2A/B2B/GPU/Vast.ai
+remain unauthorized.** No inference ran, no GPU was used, no model weights
+or datasets were downloaded, and no discovery hypothesis result exists —
+none is claimed by this entry.
+
 ## 2026-07-19 — Phase B0.5-R2.1: final timing, sampling and discovery-control correction (documentation-only; no method or harness implemented; no GPU used, no model inference, no model weights or datasets downloaded; no MATH-500 manifest/config/evaluator/result directory created; no code under `src/`, `tests/`, `configs/`, `scripts/`, `results/`, `schemas/`, or `third_party/` touched; no frozen §1/§4/§8/§9 value changed)
 
 Run on branch `research/b0-5-r2-dense-cache-repair`, HEAD

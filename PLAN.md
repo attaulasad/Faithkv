@@ -1,6 +1,46 @@
 # Plan and status
 
-## Current status: B0.5-R2.1 final protocol correction ran — READY FOR B1A PREREQUISITE IMPLEMENTATION (CPU prerequisites only; no GPU authorized)
+## Current status: B0.5-R2.2 authority reconciliation and B1A CPU prerequisite implementation — CPU PREREQUISITES IMPLEMENTED; GPU STILL BLOCKED
+
+**Phase B0.5-R2.2 (2026-07-19, CHANGELOG.md) does two things in one
+consolidated pass.** First, it reconciles a real (if narrow) contradiction:
+`CLAUDE.md`'s original blanket "no 7B support" line technically
+contradicted the already-selected Llama-8B discovery operating point
+(`docs/b0_5_decision.json`'s `selected_operating_point`, chosen back in
+Phase B0.5) — resolved with a new, dated `CLAUDE.md` §1a/§4a exception that
+authorizes CPU-side infrastructure only for `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`
++ MATH-500, explicitly not a method, not GPU/inference authorization, and
+not general benchmark-suite expansion; the original Qwen-1.5B/GSM8K
+pipeline (`CLAUDE.md` §1/§4's original tables, `configs/lock.yaml`) is
+unchanged. Second, it implements every B1A CPU prerequisite
+`docs/B0_5_R2_1_FINAL_PROTOCOL.md` §11/§14 had named as outstanding, plus
+repairs three further defects found during this pass: the
+`first_affected_logit_absolute_position` schema field name conflated an
+input position with a logit-target position (now two explicit fields);
+depth-stratum sampling assigned each event's depth directly from its
+chronological draw order (now independently permuted, removing the
+layer-depth/event-time confound); and entropy/logit-margin were classified
+"mandatory" without ever being operationally defined (now frozen exactly,
+`kvcot.discovery.uncertainty`). Full detail:
+`docs/B0_5_R2_2_AUTHORITY_AND_IMPLEMENTATION.md`.
+
+**Status: B0.5-R2.2 authority reconciliation complete; B1A CPU
+prerequisites implemented and CPU-validated. B1B/B2A/B2B/GPU/Vast.ai
+remain unauthorized.** New code, all CPU-tested, no GPU used: architecture-
+aware R-KV monkeypatch dispatch (`kvcot.discovery.dispatch`, wired into
+`kvcot.generation.policies`), a MATH-500 symbolic-equivalence verifier
+isolated per-comparison in a child process with a frozen 5-second timeout
+(`kvcot.utils.math_verifier`), the active discovery pairwise-provenance
+schema (`kvcot.discovery.schemas`, `schema_version="b0_5_r2_2.v1"`),
+deterministic sampling utilities with golden-vector tests
+(`kvcot.discovery.sampling`), a per-instance read-only capture-wrapper
+prerequisite (`kvcot.discovery.capture`), a fixed-shape within-head swap
+primitive (`kvcot.discovery.swap`), and a strengthened complete-branch-output
+no-op control (`kvcot.discovery.branch_eval`). No discovery hypothesis
+result exists — none is claimed. `CLAUDE.md` §1/§4's original Qwen-1.5B
+freeze is unchanged; no GPU run of any kind is authorized by this phase.
+
+## Prior status: B0.5-R2.1 final protocol correction ran — READY FOR B1A PREREQUISITE IMPLEMENTATION (CPU prerequisites only; no GPU authorized)
 
 **Phase B0.5-R2.1 (2026-07-19, CHANGELOG.md) is the final B0.5 protocol
 correction.** It fixed an off-by-one timing defect in B0.5-R2's branch

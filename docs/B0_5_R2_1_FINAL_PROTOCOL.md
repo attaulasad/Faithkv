@@ -1,5 +1,21 @@
 # B0.5-R2.1 — Final timing, sampling and signal-control correction
 
+**[FURTHER SUPERSEDED IN PART — see `docs/B0_5_R2_2_AUTHORITY_AND_IMPLEMENTATION.md`
+(2026-07-19).** Three defects found and repaired there: (1) §3.4/§10's
+`first_affected_logit_absolute_position` field name conflated an *input*
+position (`t+1`) with a *logit target* position (`t+2`) — replaced by two
+explicit fields (`first_affected_forward_input_absolute_position` and
+`first_affected_logit_target_absolute_position`) in the active schema,
+`schema_version` renamed `"b0_5_r2_2.v1"`; (2) §5's layer-depth sampling
+assigned each selected event's depth stratum directly from its
+chronological draw ordinal, confounding compaction time with layer depth —
+depth strata are now independently permuted; (3) §8.2 classified
+entropy/logit-margin as mandatory signals without ever operationally
+defining them — now frozen exactly in `kvcot.discovery.uncertainty`. This
+document's branch-timing fix (§3), event/candidate/donor sampling
+algorithms (§4, §6), and gate 10 (§9) are otherwise unaffected and remain
+current. Text below is preserved verbatim as the historical record.]**
+
 Phase B0.5-R2.1 artifact (2026-07-19). Branch
 `research/b0-5-r2-dense-cache-repair`, expected and confirmed HEAD at
 session start `9d04ecd7268656894815fedb7d080f0d27c7fad3` ("Repair

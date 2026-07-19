@@ -32,9 +32,51 @@ tokens. Nothing else. Enforce this in docstrings and in every generated
 summary string (`kvcot.probes.early_answering.CLAIM_BOUNDARY_NOTICE`).
 
 **No method lives in this repository.** Do not implement faithfulness-aware
-eviction, KIVI, mistake insertion, 7B support, vLLM, SGLang, multi-GPU, an
-LLM judge, or a benchmark suite. Scope control is worth more than empty
-stub files — do not create placeholder modules for out-of-scope work.
+eviction, KIVI, mistake insertion, vLLM, SGLang, multi-GPU, an LLM judge, or
+a benchmark suite. Scope control is worth more than empty stub files — do
+not create placeholder modules for out-of-scope work. The blanket
+prohibition on additional model/architecture support (previously stated
+here as "7B support") is **narrowly superseded by §1a below**, which
+authorizes CPU-side infrastructure only for one additional architecture
+(`deepseek-ai/DeepSeek-R1-Distill-Llama-8B`) for a bounded discovery track —
+it remains true, without exception, that no *method* is implemented, no
+general benchmark-suite expansion is authorized, and no other model or
+architecture beyond that one narrow exception is in scope.
+
+### Section 1a — Discovery-only exception (dated 2026-07-19, B0.5-R2.2)
+
+Added by `docs/B0_5_R2_2_AUTHORITY_AND_IMPLEMENTATION.md`, superseding
+nothing above — the original Qwen-1.5B/GSM8K research question, claim
+boundary, and "no method lives in this repository" rule remain the frozen
+primary pipeline, unmodified. This is a narrow, dated, explicit exception,
+not a redefinition of §1:
+
+- The original pipeline remains `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B`
+  **only** — §1's research question, model line, and claim boundary are
+  unchanged by this exception.
+- A bounded **discovery track** (B1A CPU prerequisites only, as of this
+  date) may add architecture support for
+  `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` — dispatch/monkeypatch
+  plumbing, state-reset generalization, and construction-parity tests, never
+  a change to the primary pipeline's model.
+- **MATH-500** may be supported only for this bounded discovery track, never
+  substituted for GSM8K in the primary pipeline.
+- This is **infrastructure support and failure discovery, not method
+  implementation** — no faithfulness-aware eviction, no new compression
+  policy, no accuracy or faithfulness claim of any kind is authorized by
+  this exception.
+- **No model inference or GPU use is authorized by this amendment.** Every
+  line item above is CPU-side code and CPU-side tests only.
+- A **separate, explicit, future authorization is still required** before
+  B2A (GPU calibration) or any B1B/B2B discovery-pilot activity, and before
+  any Vast.ai (or other GPU host) activity of any kind.
+- This repository still contains **no final faithfulness-aware compression
+  method** — this exception does not create, imply, or move toward one.
+- Support for `DeepSeek-R1-Distill-Llama-8B` under this exception must
+  **not** be described, in any document, as general benchmark-suite
+  expansion — it is scoped exactly to the discovery track defined in
+  `docs/B0_5_R2_1_FINAL_PROTOCOL.md` and
+  `docs/B0_5_R2_2_AUTHORITY_AND_IMPLEMENTATION.md`, nothing broader.
 
 ## Section 4 — Frozen settings
 
@@ -70,6 +112,27 @@ shape specifically matters here, not just as a style rule). Per-example
 seed via SHA-256 of `(global_seed, dataset_name, problem_index)`
 (`kvcot.utils.seeding.derive_seed`) — FullKV and R-KV always receive the
 identical derived seed.
+
+### Section 4a — Discovery-only exception (dated 2026-07-19, B0.5-R2.2)
+
+**The Qwen-1.5B model row in the table above is unchanged.** This
+subsection is a separate, clearly-labeled, dated exception for the bounded
+discovery track only — it does not edit, replace, or silently override any
+row in the §4 table, and `configs/lock.yaml` is **not** changed by this
+exception (no discovery GPU configuration is authorized or executed).
+
+| Item | Discovery-track-only value |
+|---|---|
+| Additional model (discovery track only) | `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` |
+| Additional dataset (discovery track only) | MATH-500 |
+| Scope | CPU-side B1A prerequisites only (architecture dispatch, state-reset generalization, MATH-500 verifier, discovery schema, deterministic sampling, read-only capture wrapper prerequisite, fixed-shape swap primitive, no-op branch test) |
+| GPU/inference authorization | **None.** Not granted by this table or this document. |
+| Method authorization | **None.** No compression policy is implemented under this exception. |
+
+Any GPU run under this exception requires its own separate, future, dated
+authorization (B2A calibration at minimum) — this table only unblocks the
+CPU-side code listed above from contradicting §1's/§4's original blanket
+freeze.
 
 ## Section 8 — Metrics and statistics
 

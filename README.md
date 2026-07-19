@@ -2,6 +2,27 @@
 
 ## Current status (read this first)
 
+**Phase B0.5-R2.2 (2026-07-19)** reconciled a narrow contradiction between
+`CLAUDE.md`'s original blanket model freeze and the already-selected
+Llama-8B/MATH-500 discovery operating point (resolved via a new, dated
+`CLAUDE.md` §1a/§4a exception — CPU-side infrastructure only, no method, no
+GPU/inference authorization), and implemented every outstanding B1A CPU
+prerequisite: architecture-aware R-KV monkeypatch dispatch
+(`kvcot.discovery.dispatch`), a MATH-500 symbolic-equivalence verifier
+isolated in a per-comparison child process with a frozen 5-second timeout
+(`kvcot.utils.math_verifier`), the active discovery schema with corrected
+timing-field names (`kvcot.discovery.schemas`, `schema_version=
+"b0_5_r2_2.v1"`), deterministic sampling utilities that independently
+permute layer-depth stratum against event chronology
+(`kvcot.discovery.sampling`), a read-only capture-wrapper prerequisite
+(`kvcot.discovery.capture`), a fixed-shape swap primitive
+(`kvcot.discovery.swap`), and a strengthened complete-branch-output no-op
+control (`kvcot.discovery.branch_eval`). See
+`docs/B0_5_R2_2_AUTHORITY_AND_IMPLEMENTATION.md`. **Status: B0.5-R2.2
+authority reconciliation complete; B1A CPU prerequisites implemented and
+CPU-validated. B1B/B2A/B2B/GPU/Vast.ai remain unauthorized.** No inference
+ran; no discovery hypothesis result exists.
+
 **Phase B0.5 (2026-07-19) audited Phase B0 and produced a discovery-study
 feasibility gate; Phase B0.5-R (2026-07-19) repaired that protocol's
 experimental unit and KV-recovery method after direct inspection of the
