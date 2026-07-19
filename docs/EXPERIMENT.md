@@ -330,6 +330,23 @@ compaction event; all 50 diverged at or after it. The observed behavioral
 differences are thus consistent with being downstream of cache compaction,
 not of some earlier decode difference.
 
+**This "0/50 before compaction" finding is weak temporal evidence, not a
+causal one, because the pre-compaction observation window is short by
+construction (added 2026-07-19, A3 review).** Recomputed from the committed
+atlas CSV: R-KV's first compaction fires at absolute position 129 in every
+one of the 50 pairs (the schedule's `divide_length=128` checkpoint), i.e.
+after only 0–42 generated tokens (mean 15.6, median 13.5) — a mean of just
+4.0% of that pair's eventual FullKV generation length (mean 450.7 tokens).
+With such a short window in which a "before-compaction" divergence could
+even be observed, a near-universal "diverges only at-or-after compaction"
+result is close to what the schedule mechanics alone would predict, and
+must not be read as evidence that compaction *causes* every divergence —
+only that divergence is not observed to precede it in this sample. See
+`results/tables/gsm8k_v3_b128_failure_atlas.csv` columns
+`prompt_token_count` and `first_compaction_absolute_position` for the
+underlying per-pair values this recomputation is derived from (no atlas
+artifact was modified to add this caveat).
+
 **Post-hoc, diagnostic observations (not a mechanism claim).** 9 of the 50
 pairs (source rows 30, 176, 262, 271, 491, 543, 616, 1115, 1143) generated
 byte-identical tokens all the way through `</think>` under both policies,
@@ -340,6 +357,25 @@ observations only — they were collected at a catastrophically degraded
 operating point (26% R-KV accuracy) and are recorded as a diagnostic
 signpost, NOT as evidence about the §1 research question and NOT as a claim
 about any internal mechanism. The §1/§11 claim boundary is unchanged.
+
+**`</think>` is a token-format boundary, not a verified semantic
+reasoning/answer boundary (added 2026-07-19, A3 review).** The atlas's own
+committed "decoded text after `</think>`" excerpts for all three
+correct→wrong flip rows
+(`results/tables/gsm8k_v3_b128_failure_atlas.md`, "Detailed inspection"
+section) show substantial mathematical reasoning continuing past the
+closing marker on both conditions — e.g. row 30's FullKV continuation opens
+with "Let's solve the problem step by step. **Step 1: Define the
+Variables**... Let Darrell's current age be \(7x\)..." followed by an
+equation and an algebraic solve, not a bare answer restatement; row 271 and
+row 1115 show the same pattern. The `reasoning`/`post_think_answer`
+two-category split (`reasoning_region_category`) is therefore a literal
+token-position classification relative to the `</think>` tag, not a
+validated claim that everything after it is answer-only, non-reasoning
+text. The 9 identical-through-`</think>` rows, and the 3 flips among them,
+must be read as hypothesis-generating signposts about where token
+divergence is first observed, never as proof that a "post-answer-stage"
+failure occurred after reasoning had already concluded.
 
 **Retirement and next steps.** The GSM8K + `DeepSeek-R1-Distill-Qwen-1.5B` +
 b128 operating point is retired as structurally unviable: FullKV traces on

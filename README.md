@@ -19,7 +19,12 @@ cognition, or decorative. See `docs/EXPERIMENT.md` §1.
 
 **Status: GPU correctness gates passed; protocol-v2 fixed-trace screen ran
 and came back invalid; the protocol-v3 natural accuracy gate ran and
-FAILED — the GSM8K b128 operating point is retired (see below).** This
+FAILED — the GSM8K b128 operating point is retired (see below). The Phase
+A3 adversarial literature check (2026-07-19) further found the diagnostic's
+narrower novelty claim DOES NOT SURVIVE against prior art (CASK,
+arXiv:2604.10900) — PHASE B (including MATH-500) is BLOCKED pending a
+research redesign (see "Phase A3" below and `docs/RELATED_WORK_MATRIX.md`).**
+This
 repository is built/maintained on a machine with no GPU — all development
 here is CPU-only (`pytest -m "not gpu" tests/`, `--dry-run`). GPU-dependent
 work happens on a rented host and results are synced back
@@ -73,6 +78,30 @@ correct→wrong flips: rows 30, 271, 1115). See
 `results/decisions/gsm8k_v3_b128_failure_atlas_summary.json`
 (`hypothesis_status: not_tested`, `operating_point_valid: false` — this is
 hypothesis-generating, not a test of the §1 research question).
+
+**Phase A3 — adversarial literature matrix and diagnostic novelty
+kill-check (2026-07-19).** `docs/RELATED_WORK_MATRIX.md`,
+`docs/A3_SEARCH_LOG.md`, `docs/related_work_matrix.json`. An adversarial
+search (cutoff 2026-07-19) found that CASK (arXiv:2604.10900), released
+2026-04-13, independently implements this repository's fixed-generated-trace
+/ teacher-forced / cache-policy-varying replay diagnostic — confirmed by
+direct inspection of CASK's official evaluation code
+(`replay_reference_fidelity.py`), applied to reasoning models under
+decode-time KV eviction. Early answering as a chain-of-thought intervention
+was independently established by Lanham et al. (arXiv:2307.13702, 2023).
+This repository does not claim, and has never claimed, to be the first
+fixed-trace FullKV/compressed-KV diagnostic, the first teacher-forced
+KV-policy replay, or the first early-answering CoT intervention — but this
+entry records that check as literature-grounded rather than merely
+self-imposed. **DIAGNOSTIC SURVIVAL VERDICT: DOES NOT SURVIVE — PHASE B:
+BLOCKED — DIAGNOSTIC NOT NOVEL** (`docs/RELATED_WORK_MATRIX.md`, "Diagnostic
+Survival Verdict"). A specific empirical intersection — KV-cache-policy
+replay combined with an early-answering/omitted-suffix intervention, behind
+a predeclared accuracy-neutral gate, with held-out per-example mechanism
+classification — remains unstudied in the literature searched, but per the
+project's own predefined rule that gap is an application of known
+ingredients, not by itself a new method contribution, so Phase B (including
+any MATH-500 work) does not proceed on the current diagnostic combination.
 
 `logs/git_commit.txt`/`logs/git_status.txt` reflect an OLDER commit
 (`bb1917a...`) than this repository's current history — they were captured
