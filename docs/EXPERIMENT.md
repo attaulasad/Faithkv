@@ -1,5 +1,25 @@
 # Experiment design
 
+> **ARCHIVAL NOTICE (added 2026-07-19, Phase B0.5, documentation-only —
+> nothing below this notice was edited).** This document is the **frozen
+> historical protocol** for this repository's original diagnostic
+> (fixed-trace/teacher-forced replay + early answering under R-KV KV
+> compression). All historical evidence below (Stage 0-3 results, the
+> protocol-v2/v3 fixed-trace screens, the GSM8K b128 accuracy-gate
+> failure, the A2 failure atlas) remains preserved and is not superseded
+> as *historical record*. As a *research claim*, however: **Phase A3
+> (2026-07-19) found this diagnostic does not survive as a novel
+> contribution** — CASK (arXiv:2604.10900) independently implements the
+> core fixed-trace/teacher-forced replay primitive and Lanham et al.
+> (arXiv:2307.13702) independently established early answering
+> (`docs/RELATED_WORK_MATRIX.md`). **Phase B0 (2026-07-19) then found no
+> novel candidate *method*** to justify a GPU pilot either (M1/M2/M3, all
+> BLOCKED — `docs/METHOD_PIVOT_SPEC.md`). **No new run should follow this
+> protocol as written** without a separately approved redesign that clears
+> both the A3 diagnostic-novelty bar and a fresh B0-style method-novelty
+> gate. See `README.md`'s "Current status" section and `PLAN.md` for the
+> live status; this file is not it.
+
 ## 1. Research question and claim boundary
 
 > At an accuracy-preserving operating point, does decoding-time R-KV

@@ -1,5 +1,30 @@
 # kv-cot-dependence
 
+## Current status (read this first)
+
+**Phase B0.5 (2026-07-19) audited Phase B0 and produced a discovery-study
+feasibility gate; see `docs/B0_5_DISCOVERY_PROTOCOL.md`,
+`docs/B0_5_FEASIBILITY_AUDIT.md`, `docs/b0_5_decision.json` for the
+verdict.** This sits on top of, and does not reverse, the prior chain:
+Phase A3 found the original diagnostic (below) does not survive as a novel
+contribution against prior art (CASK, Lanham et al.) — **PHASE B (the
+original diagnostic path) IS BLOCKED.** Phase B0 then specified and
+adversarially checked three candidate *methods*; none survived — **METHOD
+PIVOT VERDICT: BLOCKED — NO NOVEL METHOD YET.** No GPU rental, model
+inference, MATH-500 work, or method implementation is authorized by
+anything in this repository unless a specific document says otherwise.
+Full detail: `PLAN.md` (roadmap/status), `CHANGELOG.md` (dated entries),
+`docs/METHOD_PIVOT_SPEC.md`, `docs/METHOD_NOVELTY_MATRIX.md`,
+`docs/RELATED_WORK_MATRIX.md`.
+
+## Historical research question (original framing — see status above)
+
+The paragraphs below state this repository's *original* diagnostic
+question and status narrative, preserved verbatim as the historical
+record of what was built and why. They are not the current authorization
+state — read "Current status" above first. Nothing below has been edited
+or removed; only this repository's B0.5 audit added the section above it.
+
 Does decoding-time R-KV KV-cache compression change a reasoning model's
 behavioral dependence on the omitted suffix of its own visible
 chain-of-thought, at an accuracy-preserving operating point?

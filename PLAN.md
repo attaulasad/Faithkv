@@ -1,6 +1,37 @@
 # Plan and status
 
-## Current status: B0 method-pivot gate ran and FAILED — METHOD PIVOT VERDICT: BLOCKED — NO NOVEL METHOD YET
+## Current status: B0.5 discovery-protocol feasibility gate ran — READY FOR B1 DISCOVERY-HARNESS IMPLEMENTATION (harness design only; no GPU authorized)
+
+**Phase B0.5 (2026-07-19, CHANGELOG.md) is documentation-only** — it does
+not implement a compression method, does not implement the discovery
+harness, uses no GPU, downloads no model weights or datasets, and does not
+reverse the B0 method-pivot verdict below. It audited B0 (upheld all three
+verdicts — `docs/b0_5_decision.json` `b0_audit_verdict`), defined an
+untested discovery hypothesis (`docs/B0_5_DISCOVERY_PROTOCOL.md` §0:
+"unexplained causal false negatives" — a deployed R-KV policy evicting
+blocks with high counterfactual future utility that cheap deployable
+signals miss), preregistered a full future protocol for testing it
+(`docs/B0_5_DISCOVERY_PROTOCOL.md`), and ran an operating-point feasibility
+audit (`docs/B0_5_FEASIBILITY_AUDIT.md`) that selected **Candidate A —
+`deepseek-ai/DeepSeek-R1-Distill-Llama-8B` + MATH-500 + R-KV budget 1024**
+(primary-source "lossless at 34%/1024 tokens" evidence directly from the
+pinned `third_party/R-KV` submodule's own README/paper) over a GSM8K b128
+repeat (forbidden — already retired) and two other candidates (AIME-24:
+worse population/cost tradeoff; Qwen-7B: weaker evidence tier). Projected
+GPU cost: 2.4-3.4 hours (safety-factored), under the 4-hour ceiling.
+
+**B0.5 VERDICT: READY FOR B1 DISCOVERY-HARNESS IMPLEMENTATION**
+(`docs/b0_5_decision.json`) — **this authorizes only a later,
+user-requested, CPU-developed B1 harness. It does NOT authorize any GPU
+use, model inference, or method implementation.** A real blocker remains
+even for that harness's eventual GPU run: `CLAUDE.md` §4 freezes the model
+as `DeepSeek-R1-Distill-Qwen-1.5B` only, and Candidate A uses a different
+model — a dated `CHANGELOG.md`/`CLAUDE.md` amendment is required **before**
+any such run and is not granted by B0.5. See
+`docs/B0_5_DISCOVERY_PROTOCOL.md`, `docs/B0_5_FEASIBILITY_AUDIT.md`,
+`docs/B0_5_SEARCH_LOG.md`, `docs/b0_5_decision.json`.
+
+## Prior status: B0 method-pivot gate ran and FAILED — METHOD PIVOT VERDICT: BLOCKED — NO NOVEL METHOD YET
 
 **Phase B0 (2026-07-19, CHANGELOG.md) ran the method-pivot specification
 and adversarial method-novelty gate** on three candidate methods targeting
@@ -159,16 +190,24 @@ early answering + KV compression) is not, by itself, that new technique
 
 That design phase has now run once: **Phase B0 (2026-07-19) evaluated
 three candidate methods and returned BLOCKED — NO NOVEL METHOD YET** (see
-Current status above). **B1 is not permitted, even in principle, under
-this B0 result** — it would have required at least one SURVIVES
-PROVISIONALLY candidate, and there is none. B1 has not started. The next
-activity remains further method design (CPU/paper-only), targeting a cache
-operation absent as a class from `docs/METHOD_NOVELTY_MATRIX.md` §5,
-followed by a fresh novelty gate. **No GPU experiment is authorized**, and
-no MATH-500 manifest, config, evaluator, or script may be created until a
-redesigned candidate passes such a gate and is separately approved. The §10
-f=1 stability control remains UNRESOLVED and was not a B0 task; the GSM8K
-b128 operating point remains retired.
+Prior status above). **B1-as-a-method-implementation is still not
+permitted under that B0 result** — it would have required at least one
+SURVIVES PROVISIONALLY candidate, and there is none.
+
+Separately, **Phase B0.5 (2026-07-19) evaluated a narrower, non-method
+*discovery* question** (see Current status above) and returned **READY FOR
+B1 DISCOVERY-HARNESS IMPLEMENTATION** — this permits only a future,
+user-requested, CPU-developed discovery-harness *implementation* (code
+living in `src/kvcot`, testable via `--dry-run` exactly like every other
+stage in this repository, per `docs/B0_5_DISCOVERY_PROTOCOL.md` and
+`docs/B0_5_FEASIBILITY_AUDIT.md` §6). **It still does not authorize any
+GPU run, model inference, or method implementation** — those each require
+their own separate authorization, and the model-freeze amendment
+(`CLAUDE.md` §4) that a GPU run of this harness would additionally need has
+not been granted. No MATH-500 manifest, config, evaluator, or result
+directory has been created by either B0 or B0.5. The §10 f=1 stability
+control remains UNRESOLVED (not a B0 or B0.5 task); the GSM8K b128
+operating point remains retired.
 
 3. **Phase C — GPU rental.** No new GPU host is rented until a redesigned,
    non-retired, genuinely-novel experiment is specified and approved. The

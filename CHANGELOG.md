@@ -5,6 +5,126 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-19 — Phase B0.5: causal false-negative discovery protocol and operating-point feasibility gate (documentation-only; no method or harness implemented; no GPU used, no model inference, no model weights or datasets downloaded; no MATH-500 manifest/config/evaluator/result directory created; no code under `src/`, `tests/`, `configs/`, `scripts/`, `results/`, `schemas/`, or `third_party/` touched; no frozen §1/§4/§8/§9 value changed)
+
+Run on branch `research/b0-5-discovery-protocol`, created from
+`research/phase-b0-method-pivot` at commit `68b56f1` (itself created for
+this same session's separate B0-doc additions below), which sits on `main`
+at the B0-merge tip `f7e9dcc` (parent `8d5aa21`, confirmed a pure
+fast-forward, zero content diff). Purpose: decide whether a narrower,
+non-method *discovery* question — do deployed R-KV compressors evict
+blocks with high counterfactual future utility that cheap deployable
+signals miss ("unexplained causal false negatives") — justifies requesting
+a later, CPU-developed B1 harness. This does not reverse B0's method-pivot
+verdict (M1/M2/M3 all still non-survives) and makes no method-novelty
+claim of its own.
+
+**B0 audit:** all three verdicts upheld on review (`docs/b0_5_decision.json`
+`b0_audit_verdict`) — M1's kill rests on three independent full-text-quoted
+overlaps (ArborKV, IntentKV, ThinKV), not snippet-tier evidence; M2's kill
+rests on directly quoted MDP-state definitions (ForesightKV) plus this
+repository's own locally-audited R-KV rescoring behavior; M3's verdict is a
+self-consistency argument (new constraint metric insufficient by this
+project's own predeclared standard) independent of any single paper's
+evidence tier.
+
+**Documentation corrections:** `README.md` gained a "Current status" section
+ahead of the original diagnostic framing, which is now explicitly labeled
+"Historical research question" — no historical sentence removed or edited.
+`docs/EXPERIMENT.md` gained a top-of-file ARCHIVAL NOTICE banner (frozen
+historical protocol; A3 killed diagnostic novelty; B0 found no novel
+method; no new run without a separately approved redesign) — no body
+content below it was edited.
+
+**Discovery protocol** (`docs/B0_5_DISCOVERY_PROTOCOL.md`): experimental
+unit is a fixed 128-token block (aligned to R-KV's own audited compaction
+schedule, `docs/UPSTREAM_AUDIT.md` H4); intervention is a single-block
+rescue (evicted candidates, recovered via a shadow-FullKV teacher-forced
+replay of the R-KV run's own tokens) or single-block ablation (retained
+controls), always relative to the real deployed R-KV cache at a sampled
+compaction event — never a full-cache ablation, never a natural-eviction
+substitute. Primary metric: reference-token NLL increase over a fixed
+48-token horizon (continuous, not final-answer correctness). Baseline-signal
+controls are mandatory, including the entropy/logit-margin/branching-marker
+confound identified below. Sample size (12 examples × 3 events × 4 blocks =
+144 labeled blocks) is feasibility-bounded, not power-bounded, and stated as
+such.
+
+**Feasibility audit** (`docs/B0_5_FEASIBILITY_AUDIT.md`): three candidate
+operating points compared on primary evidence — **Candidate A (selected)**
+`deepseek-ai/DeepSeek-R1-Distill-Llama-8B` + MATH-500 + R-KV budget 1024,
+backed by a primary-source "lossless at 34%/1024 tokens" claim directly
+from the pinned `third_party/R-KV` submodule's own README/paper
+(arXiv:2505.24133) — the first candidate operating point in this project's
+history with real prior public evidence of viability, unlike the retired
+GSM8K b128 point. Candidate B (same model, AIME-24, budget 1536, "lossless
+at 10%/1536") rejected as secondary due to small competition-year
+population and ~5× longer traces. Candidate C (`DeepSeek-R1-Distill-Qwen-7B`
++ MATH-500) rejected as weaker-evidence-tier (no primary-source
+R-KV-specific lossless-budget number found this session). GPU cost model:
+144,240 core forward-token-equivalents × 3 safety factor = 432,720; at an
+estimated 35-50 tok/s on a single RTX 3090, projects to 2.4-3.4 GPU-hours,
+under the 4-hour ceiling with a stated margin — an estimate, not a
+measurement; the protocol's own stopping rules require empirical
+re-projection after the first example before any future run continues.
+
+**Literature** (`docs/B0_5_SEARCH_LOG.md`): 13 of 16 mandatory-list papers
+reused from B0/A3's already-fetched, evidence-graded records (saturation
+argument reviewed and endorsed, not merely repeated); 3 new fetches this
+session (Runtime-Certified Bounded-Error Quantized Attention
+arXiv:2605.20868, Near-Oracle KV Selection via Pre-hoc Sparsity
+arXiv:2602.08329, EntmaxKV arXiv:2605.21649) — none is a KV-eviction-rescue
+method, none overlaps this protocol's methodology or operating point. One
+open, non-load-bearing attribution gap logged: a "counterfactual occlusion"
+32-token-window importance-labeling precedent surfaced by search, source
+paper not conclusively identified this session.
+
+**Overall: B0.5 VERDICT: READY FOR B1 DISCOVERY-HARNESS IMPLEMENTATION**
+(`docs/b0_5_decision.json`). This authorizes only a later, user-requested,
+CPU-developed B1 harness — **it does not authorize any GPU use, model
+inference, model/dataset download, or method implementation.** A real
+blocker remains even for that harness's eventual GPU run: `CLAUDE.md` §4's
+model freeze names only `DeepSeek-R1-Distill-Qwen-1.5B`; using Candidate A
+requires a separate, dated `CHANGELOG.md`/`CLAUDE.md` amendment **before**
+any such run, not granted by this entry. B0's method-pivot verdict is
+unchanged; PSS/CPSS/EAS/Delta_EAS are unchanged and were not reused as
+B0.5's primary quantity.
+
+Files created: `docs/B0_5_DISCOVERY_PROTOCOL.md`,
+`docs/B0_5_FEASIBILITY_AUDIT.md`, `docs/B0_5_SEARCH_LOG.md`,
+`docs/b0_5_decision.json` (`python -m json.tool` passes). Files updated:
+`PLAN.md` (status + roadmap), `CHANGELOG.md` (this entry), `README.md`
+(status section reorder + historical label), `docs/EXPERIMENT.md`
+(archival banner).
+
+## 2026-07-19 — Phase B0 addendum: quantization-overthinking confound and pilot measurement checklist (documentation-only; same non-modification guarantees as the B0 entry below)
+
+Added, on branch `research/phase-b0-method-pivot` (commit `68b56f1`, before
+the B0.5 branch above was cut): a new `docs/METHOD_NOVELTY_MATRIX.md` §3a
+and `docs/method_novelty_matrix.json` record for "Quantized Reasoning
+Models Think They Need to Think Longer, but They Do Not" (arXiv:2606.00206,
+verified by direct fetch — DeepSeek-R1-Distill-Qwen 1.5B/7B/14B,
+DeepSeek-R1-Distill-Llama 8B, QwQ-32B; GPTQ/AWQ weight-only vs. FlatQuant
+W4A4KV4/W8A8KV8 end-to-end quantization; same-prefix matched-generation
+control; token-level KL/entropy/logit-margin diagnostic; up to 52% of
+failures are a correct intermediate answer abandoned). Not a KV-eviction
+method and credited with no M1/M2/M3 overlap change — its role is a
+required measurement-validity confound, recorded as new
+`docs/METHOD_PIVOT_SPEC.md` §5a: any future causal-false-negative claim
+must be shown to survive conditioning on entropy, logit margin, and
+branching-marker frequency, since quantization noise alone is already known
+to produce behavior changes correlated with next-token entropy
+(Spearman ρ=0.92), independent of any specific information being destroyed.
+Also added `docs/PIVOT_PILOT_PROTOCOL.md`, a measurement checklist (natural-run
+counts/ratios/termination/overthinking-marker/gold-appearance/abandonment/
+compaction statistics, plus controlled fixed-trace-replay entropy/KL/
+logit-margin/branching-mass measurements) for a future, still-unauthorized
+method pilot — not authorized to run under the still-BLOCKED B0 verdict.
+
+Files created: `docs/PIVOT_PILOT_PROTOCOL.md`. Files updated:
+`docs/METHOD_NOVELTY_MATRIX.md`, `docs/METHOD_PIVOT_SPEC.md`,
+`docs/method_novelty_matrix.json` (`python -m json.tool` passes).
+
 ## 2026-07-19 — Phase B0: method pivot specification and adversarial method-novelty gate (documentation-only; no frozen §1/§4/§8/§9 value changed; no code/config/test/schema/result/manifest modified; no GPU used, no model inference, no model weights downloaded; no MATH-500 file created; R-KV submodule untouched; A1/A2/A3 artifacts untouched)
 
 Run on branch `research/phase-b0-method-pivot`, created from `main` at the
