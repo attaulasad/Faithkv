@@ -5,6 +5,57 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-19 — Phase A2: deterministic GSM8K protocol-v3 failure atlas (CPU-only, post-hoc diagnostic; no frozen §1/§4/§8/§9 value changed; no GPU used, no model/tokenizer loaded, no generation rerun, no historical `results/raw/`, `results/gate_artifacts/`, or `results/decisions/*_accuracy_gate.json` file modified)
+
+New `src/kvcot/failure_atlas.py` + `kvcot failure-atlas` CLI command build a
+deterministic, tested atlas over the 50 committed protocol-v3
+FullKV/R-KV-B128 GSM8K pairs from the immediately preceding entry, pairing
+records by `(source_row_index, global_seed)` (never file order), verifying
+both `.jsonl.gz` gate artifacts against their committed `.sha256` first, and
+never mutating any committed artifact. `tests/unit/test_failure_atlas.py`
+(55 tests) and `tests/unit/test_cli_failure_atlas.py` (5 tests) cover the
+prompt-offset coordinate arithmetic (mandatory regression: prompt=200,
+generated-index=40, first-compaction-absolute=230 → absolute divergence 240,
+classified `after_first_compaction`, not `before`), the `</think>`-relative
+divergence classification, and pairing/integrity failure modes (duplicate
+keys, missing counterparts, mismatched question hashes/prompts,
+count!=50, cross-condition provenance mismatch, tampered/missing checksum
+sidecars). Full CPU suite: 418 passed (`pytest -m "not gpu" tests/`), up
+from 358 before this entry. The command was run twice against the committed
+`.gz` artifacts and produced byte-identical output hashes both times.
+
+Committed outputs: `results/tables/gsm8k_v3_b128_failure_atlas.csv` (50
+rows), `results/tables/gsm8k_v3_b128_failure_atlas.md`,
+`results/decisions/gsm8k_v3_b128_failure_atlas_summary.json`
+(`diagnostic_label: post_hoc_diagnostic`, `operating_point_valid: false`,
+`hypothesis_status: not_tested`).
+
+Every headline number was independently recomputed from the atlas and
+matches the previous entry's manually-derived figures exactly: FullKV
+33/50, R-KV 13/50 (both_correct 12, full_only 21, rkv_only 1, both_wrong
+16); realized retention mean 0.360/median 0.349 (48/50 below 0.5, 50/50 at
+or below 0.7); compaction count mean 3.9/median 4.0 (range 2-7); 0/50 pairs
+diverge before their first R-KV compaction event in the shared absolute
+(prompt + generated-index) coordinate system, all 50 diverge at or after
+it; 9/50 pairs are token-identical through `</think>` (source rows 30, 176,
+262, 271, 491, 543, 616, 1115, 1143), of which exactly 3 are correct→wrong
+flips (rows 30, 271, 1115) and 6 are correct→correct. No mismatch against
+the prior manual analysis was found. New in this entry (not previously
+computed): 41/50 pairs first diverge *inside* the reasoning span itself
+(before either side's `</think>` starts), vs. 9/50 only in the post-`</think>`
+answer region — the identical-through-think flips are the minority failure
+pattern, not the typical one, at this retired operating point. Zero cap
+hits, zero malformed answers, and zero malformed/missing `</think>`
+boundaries were observed in either condition across all 50 pairs.
+
+Claim boundary (restated per §1, and embedded in every atlas output):
+this is a post-hoc diagnostic over a RETIRED operating point (0.40 accuracy
+drop against the 0.10 pilot ceiling) and cannot establish that any observed
+failure pattern occurs at an accuracy-preserving operating point. It
+generates hypotheses for later held-out testing only — it does not test,
+pass, or fail the §1 research question, and none of its correlations are
+causal claims.
+
 ## 2026-07-19 — Documentation-only status update: protocol-v3 natural accuracy gate failed; GSM8K b128 operating point retired (no frozen §1/§4/§8/§9 value changed; no code/config/test/schema modified; no raw or gate result file touched)
 
 Documentation-only change recording the outcome of the protocol-v3 natural

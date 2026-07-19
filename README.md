@@ -61,6 +61,19 @@ accuracy 10/10 by construction instead of the true 33/50) — fixed in the
 same entry; no completed raw GPU record was modified. See
 `docs/GPU_VALIDATION_PLAN.md`.
 
+**Phase A2 — failure atlas (post-hoc diagnostic, CPU-only).** A deterministic,
+tested atlas over the 50 committed protocol-v3 GSM8K pairs above
+(`kvcot failure-atlas`, `src/kvcot/failure_atlas.py`) independently
+recomputes and extends the numbers in this section: all 50 pairs diverge
+strictly after their first R-KV compaction event (never before, in the same
+absolute prompt+generated coordinate system); 41/50 diverge inside the
+reasoning span itself and 9/50 only after `</think>` (3 of those 9 are
+correct→wrong flips: rows 30, 271, 1115). See
+`results/tables/gsm8k_v3_b128_failure_atlas.md` and
+`results/decisions/gsm8k_v3_b128_failure_atlas_summary.json`
+(`hypothesis_status: not_tested`, `operating_point_valid: false` — this is
+hypothesis-generating, not a test of the §1 research question).
+
 `logs/git_commit.txt`/`logs/git_status.txt` reflect an OLDER commit
 (`bb1917a...`) than this repository's current history — they were captured
 during the GPU run that produced the protocol-v2 result above and were
