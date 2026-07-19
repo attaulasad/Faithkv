@@ -5,6 +5,83 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-19 — Phase B0.5-R2.1: final timing, sampling and discovery-control correction (documentation-only; no method or harness implemented; no GPU used, no model inference, no model weights or datasets downloaded; no MATH-500 manifest/config/evaluator/result directory created; no code under `src/`, `tests/`, `configs/`, `scripts/`, `results/`, `schemas/`, or `third_party/` touched; no frozen §1/§4/§8/§9 value changed)
+
+Run on branch `research/b0-5-r2-dense-cache-repair`, HEAD
+`9d04ecd7268656894815fedb7d080f0d27c7fad3` (the B0.5-R2 commit) confirmed
+at session start. Purpose: this is the final B0.5 protocol correction,
+fixing an off-by-one timing defect and an under-specified sampling rule in
+B0.5-R2 rather than trusting its already-committed READY verdict. Three
+defects were found and repaired:
+
+- **Off-by-one branch-timing error.** B0.5-R2 §14 scored the reference
+  continuation starting immediately after the swap. But the forward call
+  that consumes the event token `x_t` (the call *during which* compaction
+  fires) already produces the logits predicting `x_{t+1}` as an ordinary
+  side effect, **before** the swap is applied to that call's cache
+  output — the swap cannot change those logits. Repaired: `x_{t+1}` (the
+  real, already-generated next token) is fed identically into both the
+  baseline and swapped branches as one unscored "bridge" token first; the
+  48-token scored window starts one token later, at `x_{t+2}` — the first
+  position whose logits are actually computed by reading from the
+  diverged (baseline-vs-swapped) cache. Frozen constants:
+  `bridge_tokens=1`, `scored_horizon=48`,
+  `minimum_future_tokens_after_event=49`. Branch evaluation is now named
+  precisely — teacher-forced NLL evaluation of fixed reference tokens,
+  never "greedy decoding" (the prior, ambiguous phrasing).
+- **Under-specified event/layer/head/candidate/donor sampling.** B0.5-R2
+  §10's layer/head rule was an unrestricted `SHA256(...) %
+  num_hidden_layers` hash, independently per event — three independent
+  uniform draws do **not** actually guarantee one early/middle/late-third
+  layer per example, despite being described that way. B0.5-R2 §9.2's
+  candidate/donor selection used a plain ascending-position tie-break,
+  systematically biased toward the lowest absolute positions in each pool.
+  Repaired: one canonical SHA-256-seed helper (pipe-joined UTF-8 parts,
+  first 8 digest bytes as a big-endian unsigned integer) feeds four
+  independent `random.Random` draws — event selection (`rng.sample` of 3
+  from the sorted eligible event list), layer selection restricted to a
+  per-selected-event-ordinal depth third (`lo=floor(k*L/3)`,
+  `hi=floor((k+1)*L/3)`, guaranteeing real coverage, not a probabilistic
+  tendency), KV-head selection over the full range, and separate
+  evicted-candidate/donor sampling with two independent seed streams.
+- **Gate 10's pooled Spearman statistic was the wrong granularity.**
+  B0.5-R2 §16(b) computed one Spearman correlation pooled across all
+  examples' pairs — capable of showing a strong apparent association
+  driven entirely by between-example variance with no real within-example
+  effect, or the reverse. Repaired: Spearman rho is computed separately
+  within each example, absolute value taken, and the **median** across
+  examples is the decision statistic (`< 0.30`, strict), for each of eight
+  named mandatory deployable signals (the six B0.5-R2 §16 controls plus
+  entropy and logit margin, both classified mandatory per
+  `docs/METHOD_PIVOT_SPEC.md` §5a's existing confound-control precedent).
+  An explicit floor (`>= 8` evaluable examples per signal) and a mandatory
+  no-op control (replacing a donor with its own captured K/V must produce
+  exactly zero change in deterministic CPU tests) are added; the outcome
+  set expands from a two-way pass/fail to three outcomes —
+  DISCOVERY-SUPPORTING / NOT DISCOVERY-SUPPORTING / **NOT ADJUDICABLE** —
+  so a data-thinness or mechanism-bug problem is never misreported as a
+  negative finding.
+
+Full correction: `docs/B0_5_R2_1_FINAL_PROTOCOL.md`. Superseded passages
+in `docs/B0_5_R2_DENSE_CACHE_REPAIR.md` (§10, §11, §14, §15, §16, §21) and
+top-of-file banners in `docs/B0_5_PROTOCOL_REPAIR.md`,
+`docs/B0_5_DISCOVERY_PROTOCOL.md`, and `docs/B0_5_FEASIBILITY_AUDIT.md`
+are marked inline, not deleted; `docs/b0_5_decision.json` retains every
+original field and adds `superseded_by_r2_1`/`b0_5_r2_1_*` fields. The
+fixed-shape within-head swap design, the capture-strategy wrapper, and the
+aggregation hierarchy from B0.5-R2 are unaffected and not reopened.
+
+**B0.5-R2.1 VERDICT: READY FOR B1A PREREQUISITE IMPLEMENTATION** —
+supersedes B0.5-R2's verdict below. Authorizes only CPU-side B1A
+prerequisite implementation (MATH-500 verifier, architecture-aware R-KV
+dispatch, the repaired pairwise provenance schema with timing fields, the
+repaired per-instance read-only capture wrapper, the frozen deterministic
+sampling algorithms, the mandatory no-op control's CPU unit test, CPU
+tests generally). Does not authorize B1B, GPU use, model inference, or any
+method implementation. The `CLAUDE.md` §4 model-freeze amendment remains
+required before any GPU run of a later phase and is not granted by this
+record.
+
 ## 2026-07-19 — Phase B0.5-R2: dense-cache representability and capture-strategy repair (documentation-only; no method or harness implemented; no GPU used, no model inference, no model weights or datasets downloaded; no MATH-500 manifest/config/evaluator/result directory created; no code under `src/`, `tests/`, `configs/`, `scripts/`, `results/`, `schemas/`, or `third_party/` touched; no frozen §1/§4/§8/§9 value changed)
 
 Run on branch `research/b0-5-r2-dense-cache-repair`, cut from `main` at

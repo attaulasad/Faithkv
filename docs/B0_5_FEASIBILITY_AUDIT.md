@@ -1,5 +1,14 @@
 # B0.5 — Operating-point feasibility audit and GPU cost model
 
+**[EVEN FURTHER SUPERSEDED — see `docs/B0_5_R2_1_FINAL_PROTOCOL.md`
+(B0.5-R2.1, 2026-07-19), the current authorized design and verdict.
+B0.5-R2.1 adds one extra unscored "bridge" token per swap-branch replay
+(144 branches total) to the cost model below, correcting an off-by-one in
+where the scored horizon starts — noted as a negligible addition to an
+already-itemized cost model, not a new GPU-hour re-estimate. No specific
+GPU-hour figure from any document in this chain is reused as a B0.5-R2.1
+estimate.]**
+
 **[FURTHER SUPERSEDED — see `docs/B0_5_R2_DENSE_CACHE_REPAIR.md` (B0.5-R2,
 2026-07-19), the current authorized design. B0.5-R2 found the B0.5-R
 intervention design not representable in a dense KV tensor and repaired the

@@ -1,5 +1,23 @@
 # B0.5-R2 — Dense-cache representability and capture-strategy repair
 
+**[FURTHER SUPERSEDED — see `docs/B0_5_R2_1_FINAL_PROTOCOL.md` (B0.5-R2.1,
+2026-07-19), the current authorized design and verdict.** B0.5-R2.1 found
+an off-by-one timing defect in §14's estimand (the first post-event
+reference token was treated as scoreable when it cannot be, since its
+logits are produced before the swap is applied), an under-specified
+sampling rule in §9.2/§10 (an unrestricted layer/head hash that does not
+actually guarantee depth coverage, and a candidate/donor tie-break that is
+systematically edge-biased rather than a genuine random sample), and a
+pooled (rather than per-example-nested) association test in §16's Gate 10.
+All three are repaired with exact, frozen algorithms and an expanded
+three-outcome decision rule (DISCOVERY-SUPPORTING / NOT
+DISCOVERY-SUPPORTING / NOT ADJUDICABLE) including a mandatory no-op
+control. This document's fixed-shape within-head swap design (§5-§6), its
+rotary/per-slot-metadata argument (§6.1), its capture-strategy wrapper
+(§8), and its aggregation hierarchy (§13) are all unaffected and remain
+current. See `docs/B0_5_R2_1_FINAL_PROTOCOL.md` §15 for the full
+cross-reference. Nothing below is deleted.]**
+
 Phase B0.5-R2 artifact (2026-07-19). Branch
 `research/b0-5-r2-dense-cache-repair`, cut from `main` at
 `d472f0514cd1396774b557dc27ec19900a11c1eb` (tip of `origin/main` at session
@@ -540,6 +558,24 @@ token position**, stated once here, matching the existing convention
 
 ## 10. Event, layer, and head sampling (frozen)
 
+**[SUPERSEDED IN PART — see `docs/B0_5_R2_1_FINAL_PROTOCOL.md` §4-§6
+(2026-07-19).** This section's layer/head hash rule (an unrestricted
+`SHA256(...) % num_hidden_layers` draw, independently per event) does
+**not** guarantee one early-, middle-, and late-third layer per example —
+three independent uniform draws over the full range can collide in the
+same third with nonzero probability; B0.5-R2.1 §5 restricts each selected
+event's draw to its own `[lo, hi)` third of the depth range to make the
+guarantee real. Candidate/donor selection (§9.2 below) used a plain
+ascending-position tie-break, which is a systematically edge-biased
+sample, not a representative one; B0.5-R2.1 §6.2 replaces it with genuine
+SHA-256-seeded `random.Random.sample` over each pool, using two
+independent seed streams (`"b05r21_evicted"`/`"b05r21_donor"`). Event
+selection itself (§2 of `docs/B0_5_DISCOVERY_PROTOCOL.md`,
+reused/unchanged in substance here) is additionally given an exact,
+frozen algorithm and UTF-8 serialization spec in B0.5-R2.1 §4.2-§4.3 that
+was previously left as prose. Text below preserved as the historical
+(under-specified) proposal.]**
+
 Bounded design, reusing the original protocol's total-cost envelope
 (12 × 3 × 2 × 2 = 144 planned branches, unchanged in count from
 `docs/B0_5_DISCOVERY_PROTOCOL.md` §8 and `docs/B0_5_PROTOCOL_REPAIR.md` §12
@@ -582,6 +618,16 @@ pinned commit identity, not from an arbitrary constant.
 §13.
 
 ## 11. Two-pass capture plan (frozen)
+
+**[NOTE — see `docs/B0_5_R2_1_FINAL_PROTOCOL.md` §7 (2026-07-19).** The
+two-pass structure below is unaffected and not redesigned. B0.5-R2.1 fixes
+where the eligibility rule's future-token count is measured: the "≥48
+future reference tokens" clause a few lines below is corrected to "≥49" —
+one bridge token plus 48 scored tokens, `docs/B0_5_R2_1_FINAL_PROTOCOL.md`
+§3.2 — and clarifies that the bridge-token/scored-window mechanics (§14
+below) attach to a third step, branch evaluation, strictly after Pass 2
+completes for a given target — never inside Pass 1 or Pass 2
+themselves.]**
 
 **The protocol cannot truthfully claim to capture only preselected events
 during a single natural-generation pass.** Event eligibility (not first,
@@ -707,6 +753,20 @@ independent samples at any stage above.
 
 ## 14. Corrected pairwise causal estimand and claim boundary
 
+**[SUPERSEDED — see `docs/B0_5_R2_1_FINAL_PROTOCOL.md` §3 (2026-07-19).**
+The estimand below has an off-by-one timing defect: it treats the first
+post-event reference token as already scoreable, but that token's logits
+are produced by the very forward call during which the swap fires and
+therefore cannot be affected by the swap. B0.5-R2.1 §3.1 corrects this: one
+unscored "bridge" token (the real, already-generated next token) must be
+fed identically into both branches first; the 48-token scored window
+starts one token later than stated below. The "under greedy decoding"
+phrase is also corrected — no decoding decision is ever made during branch
+evaluation; this is teacher-forced NLL evaluation of fixed reference
+tokens, restated precisely in B0.5-R2.1 §3.3. The sign convention
+(`swap_gain > 0` = pairwise ranking reversal, not standalone utility) is
+unaffected. Text below preserved as the historical (off-by-one) proposal.]**
+
 Replacing B0.5-R §7.3's `u_state` (defined over the now-superseded
 add-back/ablation pair) with the swap estimand:
 
@@ -739,6 +799,15 @@ reversal diagnostic, at exactly the memory cost R-KV's own deployed policy
 already pays, nothing more and nothing less.
 
 ## 15. Repaired schema (supersedes `docs/B0_5_PROTOCOL_REPAIR.md` §9)
+
+**[SUPERSEDED — see `docs/B0_5_R2_1_FINAL_PROTOCOL.md` §10 (2026-07-19),
+the current schema.** Every field below is retained there; four new fields
+are added for the §14 timing correction (`bridge_token_absolute_position`,
+`first_scored_absolute_position`, `first_affected_logit_absolute_position`,
+`reference_horizon_sha256`), plus per-signal difference fields for the
+final Gate 10's mandatory-signal set and an `is_noop_control` flag for the
+new §9.C control. Text below preserved as the historical (pre-timing-fix)
+schema.]**
 
 One JSON-lines record per swap-branch (pair):
 
@@ -787,6 +856,22 @@ is asserted `== 0` for every valid record — any nonzero value is itself a
 hard bug signal, not a reportable finding.
 
 ## 16. Controls and decision rule (repairs gate 10)
+
+**[SUPERSEDED — see `docs/B0_5_R2_1_FINAL_PROTOCOL.md` §9 (2026-07-19),
+the current, final Gate 10.** The rule below (part (b)) pools Spearman
+correlation across all examples' pairs into one statistic — the task
+brief's own adversarial review flags this as the wrong-granularity
+decision statistic, since it can show a strong apparent association driven
+entirely by between-example variance even with no real within-example
+association, or the reverse. B0.5-R2.1 §9.B replaces it with a
+per-example-nested statistic (Spearman rho computed separately within each
+example, absolute value, median across examples), an explicit 8-evaluable-
+example floor per mandatory signal (below which the whole gate is NOT
+ADJUDICABLE, not silently passed or failed), and a mandatory no-op control
+(§9.C) that must pass before either (a) or (b) is interpreted at all. The
+possible-outcomes set is also expanded from a two-way pass/fail to three
+outcomes: DISCOVERY-SUPPORTING, NOT DISCOVERY-SUPPORTING, NOT ADJUDICABLE.
+Text below preserved as the historical (pooled, two-outcome) proposal.]**
 
 Controls (reused from B0.5-R §11, restated per-pair rather than per-block):
 `score_margin_e_minus_r`, recency-position difference, key-norm difference,
@@ -949,6 +1034,15 @@ READY verdict; every open item is either fully repaired in this document
 or explicitly scoped to B1A/B1B/B2A (§17-§19), never silently assumed.
 
 ## 21. Final B0.5-R2 verdict
+
+**[SUPERSEDED — see `docs/B0_5_R2_1_FINAL_PROTOCOL.md` §14 for the
+current authorized verdict. This section's verdict was carried forward
+from a timing definition (§14), sampling specification (§9.2, §10), and
+Gate 10 (§16) since found to contain an off-by-one defect, an
+under-specified (edge-biased/unrestricted-hash) sampling rule, and a
+pooled rather than per-example-nested association test, respectively; all
+three are repaired in `docs/B0_5_R2_1_FINAL_PROTOCOL.md`. Preserved here as
+the historical record, not as an active authorization.]**
 
 **B0.5-R2 VERDICT: READY FOR B1A PREREQUISITE IMPLEMENTATION**
 

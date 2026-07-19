@@ -15,13 +15,24 @@ added or removed for one KV head only while leaving every other head at
 that layer unchanged — and repaired it to a fixed-shape **within-head
 swap**, plus repaired B0.5-R's capture-hook claim (no wrapper can read a
 function's internal locals) to an implementable before/after wrapper with
-independent score recomputation. See `docs/B0_5_R2_DENSE_CACHE_REPAIR.md`
-for the current, authorized design and verdict (**READY FOR B1A
-PREREQUISITE IMPLEMENTATION**, CPU-side prerequisites only, no GPU
-authorized). `docs/B0_5_PROTOCOL_REPAIR.md`, `docs/B0_5_DISCOVERY_PROTOCOL.md`,
-`docs/B0_5_FEASIBILITY_AUDIT.md`, and `docs/b0_5_decision.json` remain as
-the historical record with inline superseded-passage markers.** This sits
-on top of, and does not reverse, the prior chain:
+independent score recomputation. **Phase B0.5-R2.1 (2026-07-19)** then
+found B0.5-R2's branch-timing definition had an off-by-one error (the
+forward call that consumes the event token already produces the *next*
+token's logits before the swap is applied, so that token cannot be
+scored — a one-token "bridge" must be fed identically into both branches
+first), replaced B0.5-R2's under-specified sampling rule with exact
+SHA-256-seeded `random.Random` algorithms that actually guarantee
+early/middle/late layer-depth coverage, and repaired gate 10 to a
+per-example-nested association test with a mandatory no-op control and a
+three-way DISCOVERY-SUPPORTING/NOT DISCOVERY-SUPPORTING/**NOT
+ADJUDICABLE** outcome. See `docs/B0_5_R2_1_FINAL_PROTOCOL.md` for the
+current, authorized design and verdict (**READY FOR B1A PREREQUISITE
+IMPLEMENTATION**, CPU-side prerequisites only, no GPU authorized).
+`docs/B0_5_R2_DENSE_CACHE_REPAIR.md`, `docs/B0_5_PROTOCOL_REPAIR.md`,
+`docs/B0_5_DISCOVERY_PROTOCOL.md`, `docs/B0_5_FEASIBILITY_AUDIT.md`, and
+`docs/b0_5_decision.json` remain as the historical record with inline
+superseded-passage markers.** This sits on top of, and does not reverse,
+the prior chain:
 Phase A3 found the original diagnostic (below) does not survive as a novel
 contribution against prior art (CASK, Lanham et al.) — **PHASE B (the
 original diagnostic path) IS BLOCKED.** Phase B0 then specified and

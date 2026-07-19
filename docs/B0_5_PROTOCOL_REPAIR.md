@@ -1,5 +1,13 @@
 # B0.5-R — Protocol repair: causal false-negative discovery protocol and readiness gate
 
+**[FURTHER SUPERSEDED — see `docs/B0_5_R2_1_FINAL_PROTOCOL.md` (B0.5-R2.1,
+2026-07-19), the current authorized design and verdict. B0.5-R2.1 fixed an
+off-by-one timing defect, an under-specified event/layer/head/candidate/
+donor sampling rule, and a pooled-rather-than-nested Gate 10 association
+test — all found in `docs/B0_5_R2_DENSE_CACHE_REPAIR.md`, itself already a
+repair of this document. See `docs/B0_5_R2_1_FINAL_PROTOCOL.md` §15 for the
+full cross-reference.]**
+
 **[SUPERSEDED IN PART — see `docs/B0_5_R2_DENSE_CACHE_REPAIR.md` (B0.5-R2,
 2026-07-19).** This document's selected intervention (§7-§8: "equal-byte
 add-back" / "retained-only physical ablation") is **not representable** in
