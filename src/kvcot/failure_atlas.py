@@ -507,13 +507,24 @@ def build_failure_atlas(
 
 def _describe(values: list[float]) -> dict[str, float | int | None]:
     if not values:
-        return {"count": 0, "mean": None, "median": None, "min": None, "max": None}
+        return {"count": 0, "mean": None, "median": None, "min": None, "max": None, "q1": None, "q3": None, "iqr": None}
+    q1 = q3 = None
+    if len(values) >= 4:
+        # exclusive (Tukey-hinge-style) quartiles via statistics.quantiles'
+        # default method -- only meaningful with a handful of points on each
+        # side, hence the len>=4 floor rather than reporting a degenerate
+        # quartile pair on tiny groups (§ Statistical requirements: "do not
+        # overinterpret ... very small categories").
+        q1, _, q3 = statistics.quantiles(values, n=4)
     return {
         "count": len(values),
         "mean": statistics.mean(values),
         "median": statistics.median(values),
         "min": min(values),
         "max": max(values),
+        "q1": q1,
+        "q3": q3,
+        "iqr": (q3 - q1) if (q1 is not None and q3 is not None) else None,
     }
 
 
