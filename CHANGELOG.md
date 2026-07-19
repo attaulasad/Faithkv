@@ -5,6 +5,73 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-19 — Phase B0.5-R2: dense-cache representability and capture-strategy repair (documentation-only; no method or harness implemented; no GPU used, no model inference, no model weights or datasets downloaded; no MATH-500 manifest/config/evaluator/result directory created; no code under `src/`, `tests/`, `configs/`, `scripts/`, `results/`, `schemas/`, or `third_party/` touched; no frozen §1/§4/§8/§9 value changed)
+
+Run on branch `research/b0-5-r2-dense-cache-repair`, cut from `main` at
+`d472f0514cd1396774b557dc27ec19900a11c1eb` (tip of `origin/main`, containing
+the B0.5-R merge). Purpose: verify B0.5-R's selected intervention and
+capture-strategy claim directly against the pinned R-KV source
+(`third_party/R-KV` @ `45eaa7d69d20b7388321f077020a610d9afb65bd`) and the
+installed `transformers==4.55.4` cache implementation, rather than trust
+B0.5-R's already-committed READY verdict. Two load-bearing assumptions were
+found false:
+
+- **B0.5-R §7-§8's "equal-byte add-back" / "retained-only physical
+  ablation" intervention is not representable.** `transformers.DynamicLayer`
+  stores K/V as one dense `(batch_size, num_heads, seq_len, head_dim)`
+  tensor per layer (`cache_utils.py:68-104`, read directly from the
+  installed package); R-KV's own `topk(budget - window_size, dim=-1)`
+  (`r1_kv.py:82`) always selects the *same count* per head, so every head
+  always has exactly `budget` slots after compaction. A slot cannot be
+  added or removed "at one (layer, kv_head) pair only" while leaving every
+  other head at that layer unchanged — the tensor has one shared `seq_len`
+  dimension across every head. Repaired intervention: a fixed-shape
+  **within-head swap** — `key_cache[L][0,h,r_slot,:] = captured_key_e`,
+  `value_cache[L][0,h,r_slot,:] = captured_value_e` — net physical cache
+  bytes always exactly 0, no dimension ever resized.
+- **B0.5-R §6's capture-hook claim does not hold.** No supported Python
+  wrapper can read a function's internal local variables
+  (`final_score`, `indices`) at an arbitrary line inside `R1KV.update_kv`
+  from outside the function. Repaired to a per-instance before/after
+  wrapper (bound to each layer's own `R1KV` instance, never a class-level
+  or global patch) that clones pre-call inputs, calls the original
+  unmodified `update_kv`, and independently recomputes the real windowed
+  score formula (`r1_kv.py:49-77`) — verified for parity against R-KV's
+  own real `kept_token_indices` bookkeeping and a bit-exact
+  gather-reproduction check, never fed back into R-KV.
+
+Also discovered and repaired: R-KV's own persisted `kept_final_scores`
+bookkeeping (`r1_kv.py:88-165`) is computed by a **different, unwindowed
+formula** than the one that actually drives the real eviction decision
+(`r1_kv.py:49-77`) — a schema field naively sourced from
+`kept_final_scores` would silently log the wrong quantity. Also repaired:
+a mandatory two-pass capture plan (event eligibility depends on the
+complete natural-generation trajectory, so it can only be known after
+Pass 1 finishes — a second, token-identical instrumented replay pass is
+required to capture at preselected targets, a real cost previously absent
+from the B0.5-R/B0.5 cost models); gate 10 (previously did not require any
+actual positive ranking reversal to exist — repaired to require a
+predeclared fraction of examples showing a reversal above a fixed noise
+floor); and an explicit, deterministic (layer, KV-head) sampling rule
+(previously left implicit).
+
+Full repair: `docs/B0_5_R2_DENSE_CACHE_REPAIR.md`. Superseded passages in
+`docs/B0_5_PROTOCOL_REPAIR.md`, `docs/B0_5_DISCOVERY_PROTOCOL.md`, and
+`docs/B0_5_FEASIBILITY_AUDIT.md` are marked inline, not deleted;
+`docs/b0_5_decision.json` retains every original field and adds
+`superseded_by_r2`/`b0_5_r2_*` fields pointing to the repair. B0.5-R's
+corrected decision unit (§4), B1A-1/B1A-2 prerequisite findings, and B0's
+method-pivot verdict are unaffected and not reopened.
+
+**B0.5-R2 VERDICT: READY FOR B1A PREREQUISITE IMPLEMENTATION** —
+supersedes B0.5-R's verdict below. Authorizes only CPU-side B1A
+prerequisite implementation (MATH-500 verifier, architecture-aware R-KV
+dispatch, the repaired pairwise provenance schema, the repaired
+per-instance read-only capture wrapper, CPU tests). Does not authorize
+B1B, GPU use, model inference, or any method implementation. The
+`CLAUDE.md` §4 model-freeze amendment remains required before any GPU run
+of a later phase and is not granted by this record.
+
 ## 2026-07-19 — Phase B0.5-R: causal discovery protocol repair (documentation-only; no method or harness implemented; no GPU used, no model inference, no model weights or datasets downloaded; no MATH-500 manifest/config/evaluator/result directory created; no code under `src/`, `tests/`, `configs/`, `scripts/`, `results/`, `schemas/`, or `third_party/` touched; no frozen §1/§4/§8/§9 value changed)
 
 Run on branch `research/b0-5-protocol-repair`, cut from `main` at

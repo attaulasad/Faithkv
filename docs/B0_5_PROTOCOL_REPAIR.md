@@ -1,5 +1,24 @@
 # B0.5-R — Protocol repair: causal false-negative discovery protocol and readiness gate
 
+**[SUPERSEDED IN PART — see `docs/B0_5_R2_DENSE_CACHE_REPAIR.md` (B0.5-R2,
+2026-07-19).** This document's selected intervention (§7-§8: "equal-byte
+add-back" / "retained-only physical ablation") is **not representable** in
+the dense KV-cache tensor `transformers.DynamicCache` and the pinned R-KV
+source actually use — a slot cannot be added or removed "at one (layer,
+kv_head) pair only" while leaving every other head at that layer unchanged,
+because every head at a layer shares one physical `seq_len` dimension. This
+document's capture-hook claim (§6: a hook "right after `topk` and before
+the gather") is also not implementable as literally described — no
+supported Python mechanism exposes a function's internal local variables to
+an external wrapper. B0.5-R2 repairs both into a fixed-shape **within-head
+swap** captured via a before/after wrapper plus independent score
+recomputation, and repairs gate 10 (§12) to require actual positive ranking
+reversals. This document's corrected decision unit (§4), its "mask/zero is
+not removal" argument (§7.1), its B1A-1/B1A-2 prerequisite findings (§13,
+§14), and B0's own method-pivot verdict (§3) are all unaffected and remain
+current. The verdict below is superseded; `docs/B0_5_R2_DENSE_CACHE_REPAIR.md`
+§21 is the current authorized verdict. Nothing below is deleted.]**
+
 Phase B0.5-R artifact (2026-07-19). Branch `research/b0-5-protocol-repair`,
 cut from `main` at `48fdf7f5020cbac6501fa45a7d1ffc38e668d4f1`. Roles applied:
 strict senior research engineer; causal-inference reviewer; adversarial
@@ -248,6 +267,26 @@ happened uniformly across a layer, let alone across the model. **Section
 
 ## 6. Failure of FullKV-shadow restoration
 
+**[SUPERSEDED IN PART — see `docs/B0_5_R2_DENSE_CACHE_REPAIR.md` §8.** The
+"Required fix" paragraph below claims a read-only hook can be attached
+"right after `indices = final_score.topk(...)` and before the gather" —
+i.e., that a wrapper can observe `final_score`/`indices` as internal local
+variables at a specific line inside `R1KV.update_kv`. No supported Python
+wrapper mechanism provides this without editing `third_party/R-KV`
+(prohibited) or a fragile frame-inspection hook (never proposed). B0.5-R2
+§8 repairs this to an implementable before/after instance-level wrapper
+plus independent, exact recomputation of the real per-decision score
+formula, verified for parity against R-KV's own real `kept_token_indices`
+bookkeeping and a bit-exact gather-reproduction check — never against an
+invented internal hook. B0.5-R2 §7 additionally found that R-KV's own
+persisted `kept_final_scores` bookkeeping is computed by a *different*
+formula than the real decision score, a defect this document did not
+anticipate. The core finding below — that a shadow-FullKV replay does not
+recover a token's true pre-eviction state — is unaffected and still
+holds; it motivated capturing from the real live run, which B0.5-R2's
+repaired wrapper still does. Text below preserved as the historical
+(partially non-implementable) proposal.]**
+
 `docs/B0_5_DISCOVERY_PROTOCOL.md` §5 proposed recovering an evicted
 block's "true KV entries" by replaying the R-KV run's own generated token
 IDs, teacher-forced, through a **fresh FullKV cache from position 0**, and
@@ -313,6 +352,23 @@ must never be silently substituted with a shadow-FullKV reconstruction
 again. This is a hard requirement, not a preference.
 
 ## 7. Intervention design
+
+**[SUPERSEDED IN PART — see `docs/B0_5_R2_DENSE_CACHE_REPAIR.md` (B0.5-R2,
+2026-07-19), §5.** Direct inspection of the pinned `transformers.DynamicLayer`
+cache implementation and the pinned R-KV `topk`/`gather` call found that
+§7.2's "Design A — equal-byte add-back" and "Design C — retained-only
+physical ablation" are **not representable**: a dense `(batch, num_kv_heads,
+seq_len, head_dim)` tensor has one shared `seq_len` across every head at a
+layer, so a slot cannot be added or removed "at that layer and kv_head
+only" while leaving every other head unchanged, as both designs claimed. Do
+not implement either design as described below. B0.5-R2 §6 replaces both
+with a single fixed-shape **within-head swap** (replace one retained
+donor's post-compaction slot content with one evicted candidate's captured
+pre-compaction content — net physical bytes unchanged, no dimension
+resized). §7.1's "mask/zero is not removal" argument is unaffected and
+still applies to the swap design (a swap is a content substitution, never
+a zeroing). Text below preserved as the historical (technically
+non-representable) proposal.]**
 
 ### 7.1 Why "mask/zero" cannot stand in for "removed"
 
@@ -415,6 +471,15 @@ forced decoding.
 
 ## 8. Memory/byte accounting
 
+**[SUPERSEDED — see `docs/B0_5_R2_DENSE_CACHE_REPAIR.md` §5-§6.** The
+"±1 slot at one (layer, kv_head) pair" accounting below describes a
+resize that cannot be scoped to a single head in a dense tensor (§5 of
+the repair) — changing `seq_len` at all necessarily changes it for every
+head at that layer, not just the sampled one. B0.5-R2's within-head swap
+makes this whole accounting moot: net physical bytes are exactly zero for
+every valid swap, because no dimension is ever resized. Text below
+preserved as the historical (technically inaccurate) accounting.]**
+
 Every single-slot intervention changes physical cache memory at exactly
 one `(layer_index, kv_head_index)` pair by exactly `±1 × head_dim × 2`
 (K and V) `× dtype_bytes` (BF16 = 2 bytes), i.e. one KV slot. This is
@@ -427,6 +492,14 @@ directly answers attack §17.6 ("your total cache bytes changed") — yes, by
 a fixed, declared, population-uniform amount, never an undeclared one.
 
 ## 9. Provenance schema
+
+**[SUPERSEDED — see `docs/B0_5_R2_DENSE_CACHE_REPAIR.md` §15.** This
+schema is keyed to the now-superseded add-back/ablation design (§7, §8
+above) and its `rkv_final_score` field is ambiguous about which of R-KV's
+two internal score formulas it names — B0.5-R2 §7 found these are not the
+same quantity. The repaired schema is pairwise (candidate **and** donor
+per record) and names the recomputation formula explicitly. Text below
+preserved as the historical schema.]**
 
 Replaces `docs/B0_5_DISCOVERY_PROTOCOL.md` §12's block-level schema. One
 JSON-lines record per **labeled slot** (not per 128-token block):
@@ -596,7 +669,7 @@ it is fixed now, before any inference.
 | 7 | Missing/failed branch handling | any slot with a failed capture, cap-hit inside horizon, or failed identity check is marked `valid_flag=false` with non-null `invalid_reason`, excluded from all statistics | n/a — always excluded, always counted | per labeled slot | Never silently imputed or dropped without a count (§9 schema). |
 | 8 | Runtime feasibility (B2A hard stop) | projected total wall-clock, recomputed from B2A's own measured throughput, `≤ 4.00` GPU-hours | exactly 4.00 passes | whole pilot | Reuses the 4-GPU-hour ceiling already used throughout `docs/B0_5_FEASIBILITY_AUDIT.md`; now a hard stop tied to a *measured*, not assumed, rate (§14). |
 | 9 | Memory feasibility (B2A hard stop) | peak allocated CUDA memory `≤ 22 GiB` (of 24 GiB available) **and** all model parameters report `device.type == "cuda"` (no CPU/disk offload) | 22.00 GiB passes; any non-CUDA parameter fails regardless of memory | single B2A run | `22 GiB` is a new threshold: ~8% headroom below the 24 GiB card for allocator fragmentation and transient branch-copy buffers, chosen before any measurement exists. The device-placement check is boolean, not a threshold. |
-| 10 | Discovery-pattern decision rule (B2B analysis, not a runnable gate in this phase) | Evicted population: discovery-supporting iff every deployable baseline signal has `\|Spearman ρ\| < 0.30` against `u_i` **and** `IQR(u_i) > 0.01` nats (a fixed noise floor, not zero, to distinguish genuine spread from float32 noise); Retained population: reported separately, same numeric rule, never combined with the evicted-population statistic into one correlation | `ρ = 0.30` exactly or `IQR = 0.01` exactly both count as **not** meeting the discovery-supporting criterion (strict `<`/`>` as stated) | per population (evicted n, retained n reported separately) | Replaces "low or near-zero," "non-trivial variance," "strong correlation," "notably above" with the exact predeclared cutoffs task-brief-required; `0.30` is the conventional weak-correlation threshold, stated as this pilot's frozen choice, not derived from these data. |
+| 10 | Discovery-pattern decision rule (B2B analysis, not a runnable gate in this phase) — **[SUPERSEDED, see `docs/B0_5_R2_DENSE_CACHE_REPAIR.md` §16: this rule does not require any actual positive ranking reversal to exist, which the repaired rule fixes]** | Evicted population: discovery-supporting iff every deployable baseline signal has `\|Spearman ρ\| < 0.30` against `u_i` **and** `IQR(u_i) > 0.01` nats (a fixed noise floor, not zero, to distinguish genuine spread from float32 noise); Retained population: reported separately, same numeric rule, never combined with the evicted-population statistic into one correlation | `ρ = 0.30` exactly or `IQR = 0.01` exactly both count as **not** meeting the discovery-supporting criterion (strict `<`/`>` as stated) | per population (evicted n, retained n reported separately) | Replaces "low or near-zero," "non-trivial variance," "strong correlation," "notably above" with the exact predeclared cutoffs task-brief-required; `0.30` is the conventional weak-correlation threshold, stated as this pilot's frozen choice, not derived from these data. |
 
 **No criterion above is marked true in any JSON record unless its exact
 threshold and evaluation procedure, as stated in this table, is what was
@@ -784,6 +857,11 @@ authorizes B1A only.
   estimate in §15 remains a planning estimate until B2A actually runs.
 
 ## 19. Final B0.5-R verdict
+
+**[SUPERSEDED — see `docs/B0_5_R2_DENSE_CACHE_REPAIR.md` §21 for the
+current authorized verdict. This section's verdict was carried forward
+from an intervention design (§7-§8) since found not representable; it is
+preserved here as the historical record, not as an active authorization.]**
 
 **B0.5-R VERDICT: READY FOR B1A PREREQUISITE IMPLEMENTATION**
 

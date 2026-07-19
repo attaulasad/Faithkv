@@ -1,5 +1,13 @@
 # B0.5 — Operating-point feasibility audit and GPU cost model
 
+**[FURTHER SUPERSEDED — see `docs/B0_5_R2_DENSE_CACHE_REPAIR.md` (B0.5-R2,
+2026-07-19), the current authorized design. B0.5-R2 found the B0.5-R
+intervention design not representable in a dense KV tensor and repaired the
+cost model to add a mandatory second (instrumented replay) pass and
+per-branch full-cache clone/restore cost, neither present in the cost model
+below or in B0.5-R's §15. No specific GPU-hour figure from either document
+is reused as a B0.5-R2 estimate.]**
+
 **[SUPERSEDED IN PART — see `docs/B0_5_PROTOCOL_REPAIR.md` (B0.5-R,
 2026-07-19)].** §7's gate wording below uses non-exact qualifiers ("e.g.
 0.10-0.15", "meaningful fraction", "dramatically", "say 8 of 12") that the

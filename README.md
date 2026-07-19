@@ -3,13 +3,22 @@
 ## Current status (read this first)
 
 **Phase B0.5 (2026-07-19) audited Phase B0 and produced a discovery-study
-feasibility gate; Phase B0.5-R (2026-07-19) then repaired that protocol's
-technical design after direct inspection of the pinned R-KV source found
-two of its load-bearing assumptions false (the "fixed 128-token block"
-eviction unit, and a shadow-FullKV method for recovering evicted KV
-tensors) — see `docs/B0_5_PROTOCOL_REPAIR.md` for the current, authorized
-design and verdict (**READY FOR B1A PREREQUISITE IMPLEMENTATION**,
-CPU-side prerequisites only, no GPU authorized). `docs/B0_5_DISCOVERY_PROTOCOL.md`,
+feasibility gate; Phase B0.5-R (2026-07-19) repaired that protocol's
+experimental unit and KV-recovery method after direct inspection of the
+pinned R-KV source found two load-bearing assumptions false (the "fixed
+128-token block" eviction unit, and a shadow-FullKV method for recovering
+evicted KV tensors); Phase B0.5-R2 (2026-07-19) then found B0.5-R's own
+selected intervention ("equal-byte add-back" / "retained-only physical
+ablation") **not representable** in the dense KV-cache tensor
+`transformers.DynamicCache` and R-KV actually use — a slot cannot be
+added or removed for one KV head only while leaving every other head at
+that layer unchanged — and repaired it to a fixed-shape **within-head
+swap**, plus repaired B0.5-R's capture-hook claim (no wrapper can read a
+function's internal locals) to an implementable before/after wrapper with
+independent score recomputation. See `docs/B0_5_R2_DENSE_CACHE_REPAIR.md`
+for the current, authorized design and verdict (**READY FOR B1A
+PREREQUISITE IMPLEMENTATION**, CPU-side prerequisites only, no GPU
+authorized). `docs/B0_5_PROTOCOL_REPAIR.md`, `docs/B0_5_DISCOVERY_PROTOCOL.md`,
 `docs/B0_5_FEASIBILITY_AUDIT.md`, and `docs/b0_5_decision.json` remain as
 the historical record with inline superseded-passage markers.** This sits
 on top of, and does not reverse, the prior chain:

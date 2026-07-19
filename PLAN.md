@@ -1,6 +1,48 @@
 # Plan and status
 
-## Current status: B0.5-R protocol repair ran — READY FOR B1A PREREQUISITE IMPLEMENTATION (CPU prerequisites only; no GPU authorized)
+## Current status: B0.5-R2 dense-cache repair ran — READY FOR B1A PREREQUISITE IMPLEMENTATION (CPU prerequisites only; no GPU authorized)
+
+**Phase B0.5-R2 (2026-07-19, CHANGELOG.md) audited B0.5-R's selected
+intervention against the pinned R-KV source and the installed
+`transformers==4.55.4` cache implementation and found it not
+representable: "equal-byte add-back" and "retained-only physical
+ablation" both required changing cache size "at one (layer, kv_head) pair
+only," but a dense `(batch, num_kv_heads, seq_len, head_dim)` tensor has
+one `seq_len` shared by every head at a layer — a slot cannot be
+added/removed for one head while leaving the others unchanged. B0.5-R's
+capture-hook claim (a hook reading `final_score`/`indices` as internal
+locals inside `R1KV.update_kv`) was also found not implementable as
+described. Both are repaired: a fixed-shape **within-head swap**
+(`key_cache[L][0,h,r_slot,:] = captured_key_e`, net physical bytes always
+exactly 0) captured via a per-instance before/after wrapper plus
+independent, exact recomputation of R-KV's real windowed score formula
+(a previously unflagged defect was also found here: R-KV's own persisted
+`kept_final_scores` uses a *different*, unwindowed formula than the one
+that actually drives eviction — recomputation must replicate the real
+formula, not the persisted one). Also repaired: a mandatory two-pass
+capture plan (event eligibility is only knowable after natural generation
+completes, so a second, token-identical instrumented replay pass is
+required — a real cost previously absent from the cost model), and gate
+10 (previously did not require any actual positive ranking reversal to
+exist). Full repair: `docs/B0_5_R2_DENSE_CACHE_REPAIR.md`. B0.5-R's
+corrected decision unit, B1A-1/B1A-2 prerequisites, and B0's method-pivot
+verdict are unaffected.**
+
+**B0.5-R2 VERDICT: READY FOR B1A PREREQUISITE IMPLEMENTATION**
+(`docs/B0_5_R2_DENSE_CACHE_REPAIR.md` §21, `docs/b0_5_decision.json`
+`b0_5_r2_verdict`) — **this authorizes only B1A: CPU-side prerequisite
+implementation (MATH-500 verifier, architecture-aware dispatch, the
+repaired pairwise provenance schema, the repaired per-instance capture
+wrapper, CPU tests). It does NOT authorize B1B, GPU use, model inference,
+or any method implementation.** `CLAUDE.md` §4's model freeze
+(`DeepSeek-R1-Distill-Qwen-1.5B` only) still requires a separate dated
+amendment before any GPU run of a later phase.
+
+## Prior status: B0.5-R protocol repair ran — READY FOR B1A PREREQUISITE IMPLEMENTATION (superseded — see B0.5-R2 above)
+
+**[Superseded by B0.5-R2 above — the selected intervention design and the
+capture-hook claim described just below were found not representable/not
+implementable. Preserved verbatim as the historical record.]**
 
 **Phase B0.5-R (2026-07-19, CHANGELOG.md) audited B0.5 against the pinned
 R-KV source and found two load-bearing assumptions false: the "fixed
@@ -231,24 +273,28 @@ permitted under that B0 result** — it would have required at least one
 SURVIVES PROVISIONALLY candidate, and there is none.
 
 Separately, **Phase B0.5 (2026-07-19) evaluated a narrower, non-method
-*discovery* question**, and Phase B0.5-R (2026-07-19) then repaired that
-protocol's technical design against the pinned R-KV source (see Current
-status above) — the current authorized verdict is **READY FOR B1A
-PREREQUISITE IMPLEMENTATION** (`docs/B0_5_PROTOCOL_REPAIR.md`), which
-supersedes B0.5's original "READY FOR B1 DISCOVERY-HARNESS
-IMPLEMENTATION." This permits only B1A: CPU-side prerequisite
+*discovery* question**, Phase B0.5-R (2026-07-19) repaired that protocol's
+experimental unit and capture source against the pinned R-KV source, and
+Phase B0.5-R2 (2026-07-19) then found B0.5-R's own selected intervention
+not representable in a dense KV tensor and repaired it to a fixed-shape
+within-head swap (see Current status above) — the current authorized
+verdict is **READY FOR B1A PREREQUISITE IMPLEMENTATION**
+(`docs/B0_5_R2_DENSE_CACHE_REPAIR.md`), which supersedes both B0.5-R's and
+B0.5's prior verdicts. This permits only B1A: CPU-side prerequisite
 implementation (MATH-500 symbolic-equivalence verifier, architecture-aware
-R-KV monkeypatch dispatch, decision/provenance schema, read-only
-pre-compaction instrumentation hook, CPU unit/integration tests — code
-living in `src/kvcot`, testable via `--dry-run` exactly like every other
-stage in this repository). **It still does not authorize any GPU run,
-model inference, or method implementation** — those each require their
-own separate authorization (B1B/B2A/B2B/C0, `docs/B0_5_PROTOCOL_REPAIR.md`
-§17), and the model-freeze amendment (`CLAUDE.md` §4) that a GPU run of a
-later phase would additionally need has not been granted. No MATH-500
-manifest, config, evaluator, or result directory has been created by B0,
-B0.5, or B0.5-R. The §10 f=1 stability control remains UNRESOLVED (not a
-B0/B0.5/B0.5-R task); the GSM8K b128 operating point remains retired.
+R-KV monkeypatch dispatch, the repaired pairwise provenance schema, the
+repaired per-instance read-only capture wrapper with exact score
+recomputation, CPU unit/integration tests — code living in `src/kvcot`,
+testable via `--dry-run` exactly like every other stage in this
+repository). **It still does not authorize any GPU run, model inference,
+or method implementation** — those each require their own separate
+authorization (B1B/B2A/B2B/C0, `docs/B0_5_R2_DENSE_CACHE_REPAIR.md` §17),
+and the model-freeze amendment (`CLAUDE.md` §4) that a GPU run of a later
+phase would additionally need has not been granted. No MATH-500 manifest,
+config, evaluator, or result directory has been created by B0, B0.5,
+B0.5-R, or B0.5-R2. The §10 f=1 stability control remains UNRESOLVED (not
+a B0/B0.5/B0.5-R/B0.5-R2 task); the GSM8K b128 operating point remains
+retired.
 
 3. **Phase C — GPU rental.** No new GPU host is rented until a redesigned,
    non-retired, genuinely-novel experiment is specified and approved. The
