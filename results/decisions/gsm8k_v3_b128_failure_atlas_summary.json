@@ -1,0 +1,117 @@
+{
+  "analysis_code_commit": "5e05d9c99345d71be56f5dffdfbb6972c1d2f4b0",
+  "atlas_claim_boundary": "This atlas analyzes a retired operating point where natural R-KV accuracy fell from 33/50 to 13/50. It is a post-hoc diagnostic analysis and cannot establish that any observed failure pattern occurs at an accuracy-preserving operating point. It generates hypotheses for later held-out testing only.",
+  "cap_hit": {
+    "n_full": 0,
+    "n_rkv": 0
+  },
+  "claim_boundary_notice": "This measures counterfactual behavioral dependence on the visible, generated chain-of-thought under truncation — NOT internal faithfulness, NOT whether reasoning is 'real', and NOT a claim about the model's internal cognition. See docs/EXPERIMENT.md and build brief §1.",
+  "compaction_count": {
+    "count": 50,
+    "iqr": 2.0,
+    "max": 7,
+    "mean": 3.9,
+    "median": 4.0,
+    "min": 2,
+    "q1": 3.0,
+    "q3": 5.0
+  },
+  "correctness": {
+    "both_correct": 12,
+    "both_wrong": 16,
+    "distribution": {
+      "correct_correct": 12,
+      "correct_wrong": 21,
+      "wrong_correct": 1,
+      "wrong_wrong": 16
+    },
+    "full_correct_total": 33,
+    "full_only_correct": 21,
+    "rkv_correct_total": 13,
+    "rkv_only_correct": 1
+  },
+  "diagnostic_label": "post_hoc_diagnostic",
+  "divergence": {
+    "n_divergence": 50,
+    "n_no_divergence": 0,
+    "relation_to_first_compaction": {
+      "after_first_compaction": 50
+    }
+  },
+  "hypothesis_status": "not_tested",
+  "identical_through_think": {
+    "by_correctness_pair": {
+      "correct_correct": 6,
+      "correct_wrong": 3
+    },
+    "count": 9,
+    "n_correct_to_wrong_flips": 3,
+    "source_rows": [
+      30,
+      176,
+      262,
+      271,
+      491,
+      543,
+      616,
+      1115,
+      1143
+    ]
+  },
+  "input_artifacts": {
+    "full": {
+      "path": "results\\gate_artifacts\\early_gap_v3_b128_full.jsonl.gz",
+      "sha256": "e50e55c8f072a09dbd9cadadc86df5b6606303d22967dbaf1f527dfe4a622948"
+    },
+    "rkv": {
+      "path": "results\\gate_artifacts\\early_gap_v3_b128_rkv_b128.jsonl.gz",
+      "sha256": "7cfd5a2b18fc8391c31b129c78d7439dbaea59d088a82e6332cc540bbe7985ec"
+    }
+  },
+  "invariant_checks": {
+    "compaction_relation_counts_sum_to_n": true,
+    "four_way_correctness_sums_to_n": true,
+    "no_divergence_before_first_compaction": true,
+    "no_duplicate_source_row_index": true,
+    "reasoning_region_counts_sum_to_n": true,
+    "row_count_is_50": true
+  },
+  "length_delta": {
+    "count": 50,
+    "iqr": 120.5,
+    "max": 374,
+    "mean": -0.72,
+    "median": -13.5,
+    "min": -293,
+    "q1": -75.25,
+    "q3": 45.25
+  },
+  "malformed_answer": {
+    "n_full": 0,
+    "n_rkv": 0
+  },
+  "malformed_think_boundary": {
+    "n_full": 0,
+    "n_rkv": 0
+  },
+  "n_pairs": 50,
+  "operating_point_valid": false,
+  "reasoning_region": {
+    "post_think_answer": 9,
+    "reasoning": 41
+  },
+  "retention": {
+    "count": 50,
+    "iqr": 0.13704213776652402,
+    "max": 0.6550802139037433,
+    "mean": 0.3595886085451352,
+    "median": 0.34854497354497355,
+    "min": 0.14555555555555555,
+    "n_at_or_below_0.70": 50,
+    "n_below_0.50": 48,
+    "q1": 0.288972030764423,
+    "q3": 0.42601416853094703
+  },
+  "schema_version": "1.0.0",
+  "warnings": []
+}

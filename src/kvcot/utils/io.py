@@ -6,6 +6,7 @@ matching config/model/upstream hashes") are implemented in exactly one place.
 """
 from __future__ import annotations
 
+import gzip
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,29 @@ def read_jsonl(path: str | Path) -> Iterator[dict[str, Any]]:
     if not p.exists():
         return
     with open(p, "r", encoding="utf-8") as f:
+        for line_no, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"{p}:{line_no}: malformed JSONL: {e}") from e
+
+
+def read_jsonl_auto(path: str | Path) -> Iterator[dict[str, Any]]:
+    """Like `read_jsonl`, but transparently reads gzip-compressed JSONL when
+    `path` ends in `.gz` (the committed convention for large per-record
+    artifacts under `results/gate_artifacts/` — see README.md's "Expected
+    artifacts"). Plain `.jsonl` still goes through the exact same line-by-
+    line parsing as `read_jsonl` for non-gz paths, so behavior for existing
+    callers is unchanged.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(str(p))
+    opener = gzip.open if p.suffix == ".gz" else open
+    with opener(p, "rt", encoding="utf-8") as f:
         for line_no, line in enumerate(f, start=1):
             line = line.strip()
             if not line:

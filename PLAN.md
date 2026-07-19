@@ -55,6 +55,18 @@ obsolete.
 - Pilot screens run on GPU: protocol-v2 fixed-trace screen
   (`screen_valid=false`, `hypothesis_status=not_tested` — a valid negative
   screening outcome) and the protocol-v3 natural accuracy gate (FAILED, above).
+- **Phase A2 — failure atlas (2026-07-19, CHANGELOG.md).** Deterministic,
+  tested, CPU-only atlas over the 50 committed protocol-v3 gate pairs
+  (`kvcot failure-atlas`, `src/kvcot/failure_atlas.py`):
+  `results/tables/gsm8k_v3_b128_failure_atlas.{csv,md}`,
+  `results/decisions/gsm8k_v3_b128_failure_atlas_summary.json`. Headline
+  recomputation matches the prior manual analysis exactly (0/50 diverge
+  before first compaction; 9/50 identical through `</think>`, 3 of those
+  flip correct→wrong: rows 30, 271, 1115) and adds a new finding: 41/50
+  pairs first diverge *inside* the reasoning span itself, so the
+  identical-through-think flip is the minority pattern, not the typical
+  one, at this retired operating point. Still `post_hoc_diagnostic` /
+  `hypothesis_status: not_tested` — this does not test the §1 hypothesis.
 - All docs: `UPSTREAM_AUDIT.md`, `REPLAY_DESIGN.md`, `EXPERIMENT.md`,
   `PROBE_PROTOCOL.md` (real tokenizer output), `SCHEMA.md`,
   `REPRODUCIBILITY.md`, `GPU_VALIDATION_PLAN.md`.
@@ -64,9 +76,8 @@ obsolete.
 The immediate next work is **CPU-only** and uses only the committed gate
 artifacts — no new GPU generation:
 
-1. **Failure atlas** over the existing 50 gate pairs (per-pair divergence,
-   compaction, retention, and correct→wrong flips), built from the committed
-   `results/gate_artifacts/early_gap_v3_b128_*.jsonl.gz`.
+1. ~~**Failure atlas** over the existing 50 gate pairs~~ — **done, 2026-07-19**
+   (Phase A2 above).
 2. **Literature matrix** situating this negative pilot result against prior
    faithfulness / KV-compression work.
 
