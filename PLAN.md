@@ -1,6 +1,35 @@
 # Plan and status
 
-## Current status: A3 diagnostic novelty kill-check DOES NOT SURVIVE; PHASE B BLOCKED
+## Current status: B0 method-pivot gate ran and FAILED — METHOD PIVOT VERDICT: BLOCKED — NO NOVEL METHOD YET
+
+**Phase B0 (2026-07-19, CHANGELOG.md) ran the method-pivot specification
+and adversarial method-novelty gate** on three candidate methods targeting
+a prospective causal-false-negative failure mode (`docs/METHOD_PIVOT_SPEC.md`
+§5 — an untested hypothesis, not a finding): M1 residual causal-utility
+protection, M2 interaction-aware dynamic rescue, M3
+faithfulness-constrained memory allocation. Against a 2026-07-19-cutoff
+adversarial search (`docs/METHOD_NOVELTY_MATRIX.md`,
+`docs/B0_SEARCH_LOG.md`, `docs/method_novelty_matrix.json`):
+
+- **M1: PARTIAL — INSUFFICIENT METHOD NOVELTY** (ablation supervision →
+  ArborKV arXiv:2605.22106; residual-correction architecture → IntentKV
+  arXiv:2606.09916; counterfactual-ablation-to-policy pipeline → ThinKV
+  arXiv:2510.01290v2; protected partition → CASK/VaSE/arXiv:2605.18053);
+- **M2: KILLED** (cache-state-conditional sequential eviction is
+  ForesightKV arXiv:2602.03203's MDP and Neural Garbage Collection
+  arXiv:2604.18002; R-KV itself already rescores per compaction);
+- **M3: PARTIAL — INSUFFICIENT METHOD NOVELTY** (allocation machinery →
+  ReasonAlloc arXiv:2606.11164 and the Ada-KV/LKV lineage; a new
+  constraint metric is insufficient by the predeclared standard).
+
+**METHOD PIVOT VERDICT: BLOCKED — NO NOVEL METHOD YET. B1 is not
+permitted; no GPU, no MATH-500 work, no method implementation is
+authorized.** The only permitted next activity remains method design: a
+future candidate must contain a cache operation absent as an operation
+class from `docs/METHOD_NOVELTY_MATRIX.md` §5, then re-clear a fresh
+B0-style gate.
+
+## Prior status: A3 diagnostic novelty kill-check DOES NOT SURVIVE; PHASE B BLOCKED
 
 **Phase A3 (2026-07-19, CHANGELOG.md) found that CASK (arXiv:2604.10900),
 released 2026-04-13, independently implements the fixed-generated-trace /
@@ -102,6 +131,13 @@ obsolete.
   NOVEL.** A specific empirical intersection (KV-cache replay + early
   answering + accuracy gate + held-out per-example classification) remains
   unstudied but is not, by itself, a new method.
+- **Phase B0 — method pivot specification and adversarial method-novelty
+  gate (2026-07-19, CHANGELOG.md).** `docs/METHOD_PIVOT_SPEC.md`,
+  `docs/METHOD_NOVELTY_MATRIX.md`, `docs/B0_SEARCH_LOG.md`,
+  `docs/method_novelty_matrix.json` (25 records, schema-validated).
+  Documentation-only; no code/config/test/schema/result touched, no GPU,
+  no inference. Outcome: M1 PARTIAL, M2 KILLED, M3 PARTIAL — **METHOD
+  PIVOT VERDICT: BLOCKED — NO NOVEL METHOD YET** (see Current status).
 - All docs: `UPSTREAM_AUDIT.md`, `REPLAY_DESIGN.md`, `EXPERIMENT.md`,
   `PROBE_PROTOCOL.md` (real tokenizer output), `SCHEMA.md`,
   `REPRODUCIBILITY.md`, `GPU_VALIDATION_PLAN.md`.
@@ -121,14 +157,18 @@ and approved; the current diagnostic combination (fixed-trace replay +
 early answering + KV compression) is not, by itself, that new technique
 (`docs/RELATED_WORK_MATRIX.md` §16).
 
-The only currently-permitted next activity is an **evidence-grounded
-research pivot/design phase**: using the A3 matrix's identified gap (§12 of
-`docs/RELATED_WORK_MATRIX.md`) and threat memos as the starting point for
-designing a technique that is not simply an application of CASK-style
-replay + Lanham-style early answering to a new dataset. This design phase
-is itself still CPU/paper-only — **no GPU experiment is authorized by this
-entry**, and no MATH-500 manifest, config, evaluator, or script may be
-created until that redesign is specified and separately approved.
+That design phase has now run once: **Phase B0 (2026-07-19) evaluated
+three candidate methods and returned BLOCKED — NO NOVEL METHOD YET** (see
+Current status above). **B1 is not permitted, even in principle, under
+this B0 result** — it would have required at least one SURVIVES
+PROVISIONALLY candidate, and there is none. B1 has not started. The next
+activity remains further method design (CPU/paper-only), targeting a cache
+operation absent as a class from `docs/METHOD_NOVELTY_MATRIX.md` §5,
+followed by a fresh novelty gate. **No GPU experiment is authorized**, and
+no MATH-500 manifest, config, evaluator, or script may be created until a
+redesigned candidate passes such a gate and is separately approved. The §10
+f=1 stability control remains UNRESOLVED and was not a B0 task; the GSM8K
+b128 operating point remains retired.
 
 3. **Phase C — GPU rental.** No new GPU host is rented until a redesigned,
    non-retired, genuinely-novel experiment is specified and approved. The
@@ -149,9 +189,13 @@ created until that redesign is specified and separately approved.
 - **§10 f=1 stability control.** UNRESOLVED, and a separate Stage-0
   prerequisite that any future non-retired stage must clear on its own terms
   (`docs/GPU_VALIDATION_PLAN.md`, 2026-07-19).
-- **What the genuinely new technique should be.** Not designed or
-  implemented in this entry, per its own scope boundary — this is now the
-  single open question blocking Phase B.
+- **What the genuinely new technique should be.** Still open. Phase B0
+  (2026-07-19) tested three candidates against the literature and none
+  survived (M1 PARTIAL, M2 KILLED, M3 PARTIAL —
+  `docs/METHOD_PIVOT_SPEC.md`). This remains the single open question
+  blocking any Phase B successor; the B0 matrix's operation tables
+  (`docs/METHOD_NOVELTY_MATRIX.md` §5–§7) are the map of what is already
+  taken.
 
 ## Changes to frozen settings
 
