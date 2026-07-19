@@ -1,11 +1,38 @@
 # Plan and status
 
-## Current status: implementation complete; GPU validation pending
+## Current status: protocol-v3 GSM8K b128 gate FAILED; GSM8K b128 retired; hypothesis `not_tested`
 
-This repository was built end-to-end on a CPU-only, no-GPU machine per the
-original build brief. Every module, test, config, and doc listed in that
-brief's repository layout exists and (where CPU-runnable) passes. No GPU
-code has been executed; no model weights were downloaded.
+The implementation is complete and its GPU correctness gates have passed, but
+the pilot has **not** reached the §1 research question. The protocol-v3
+natural R-KV accuracy gate ran on the full 50-pair GSM8K calibration manifest
+and failed: FullKV answered 33/50 (66%) correctly, natural R-KV b128 13/50
+(26%) — a 40pp drop past the 0.10 pilot ceiling
+(`results/decisions/early_gap_v3_b128_accuracy_gate.json`: `gate_passed:
+false`). The fixed-trace analysis path exited before computing any PSS/CPSS,
+so **no protocol-v3 PSS/CPSS decision exists and `hypothesis_status` remains
+`not_tested`** — the research hypothesis is neither supported nor refuted; it
+has not been tested.
+
+The GSM8K + `DeepSeek-R1-Distill-Qwen-1.5B` + b128 operating point is
+**retired** as structurally unviable — FullKV traces on this manifest run
+276–847 generated tokens (median ~440), leaving no fixed budget that is both
+accuracy-plausible and meaningfully compressing. No further GSM8K b128/b160
+runs are planned.
+
+Full detail and provenance live in the docs updated alongside this entry:
+`README.md`, `CHANGELOG.md` (2026-07-19), `docs/EXPERIMENT.md` §11, and
+`docs/GPU_VALIDATION_PLAN.md` (2026-07-19 note). This file is the roadmap
+summary; those are the source of truth for the numbers.
+
+## Development model
+
+This repository is developed and maintained on a CPU-only, no-GPU machine
+(`pytest -m "not gpu" tests/`, `--dry-run`). GPU-dependent work runs on a
+rented host and is synced back as committed artifacts. GPU code *has* now been
+executed on such a host — the correctness gates, the protocol-v2 fixed-trace
+screen (returned `screen_valid=false`), and the failed protocol-v3 natural
+accuracy gate above — so the earlier "no GPU code has been executed" status is
+obsolete.
 
 ## What's done
 
@@ -19,40 +46,55 @@ code has been executed; no model weights were downloaded.
   provenance, replay), analysis (summaries, plots), CLI, runtime.
 - CPU test suite: passes in full (see the build report for the exact
   count).
-- GPU test suite (`tests/integration/*_gpu.py`): implemented in full,
-  marked `@pytest.mark.gpu`, verified to auto-skip cleanly on this machine.
-  Never run.
+- GPU correctness gates: **passed** on a rented host — `test_replay_gpu.py`
+  (all seven cases), `test_patched_noop_parity_gpu.py`,
+  `test_no_state_leak_gpu.py`, determinism and compaction
+  (`logs/gpu_validation/*.log`). The §10 f=1 probe-stability control
+  (`test_probe_stability_gpu.py`) is the exception — it remains **UNRESOLVED**
+  under the corrected validity definition (`docs/GPU_VALIDATION_PLAN.md`).
+- Pilot screens run on GPU: protocol-v2 fixed-trace screen
+  (`screen_valid=false`, `hypothesis_status=not_tested` — a valid negative
+  screening outcome) and the protocol-v3 natural accuracy gate (FAILED, above).
 - All docs: `UPSTREAM_AUDIT.md`, `REPLAY_DESIGN.md`, `EXPERIMENT.md`,
   `PROBE_PROTOCOL.md` (real tokenizer output), `SCHEMA.md`,
   `REPRODUCIBILITY.md`, `GPU_VALIDATION_PLAN.md`.
-- `--dry-run` exercised for every stage config against every relevant
-  condition — the only end-to-end check possible without a GPU.
 
-## What's next (in order — see docs/GPU_VALIDATION_PLAN.md for exact commands)
+## What's next (CPU-only; no new GPU rental until Phase C)
 
-1. Rent a GPU host, run `scripts/setup_vast.sh` + `verify_environment.sh`.
-2. Run the four `@pytest.mark.gpu` test files, in the order listed in
-   `docs/GPU_VALIDATION_PLAN.md`. Do not skip ahead of replay identity
-   (`test_replay_gpu.py`) — nothing downstream is meaningful until it
-   passes, per `docs/REPLAY_DESIGN.md` §5's assumption list.
-3. Stage 0 (smoke) → read its throughput extrapolation before continuing.
-4. Stage 1A (measurability) → read `recommendation` before continuing.
-5. Stage 1B (calibration) → manually review and fill in
-   `configs/selected_operating_point.yaml` from the real decision JSON.
-6. Stage 2 (main pilot, n=200, 3 seeds) → the actual result.
+The immediate next work is **CPU-only** and uses only the committed gate
+artifacts — no new GPU generation:
+
+1. **Failure atlas** over the existing 50 gate pairs (per-pair divergence,
+   compaction, retention, and correct→wrong flips), built from the committed
+   `results/gate_artifacts/early_gap_v3_b128_*.jsonl.gz`.
+2. **Literature matrix** situating this negative pilot result against prior
+   faithfulness / KV-compression work.
+
+Only after those, and still on paper / CPU:
+
+3. A MATH-500 longer-trace feasibility **design**, with separate calibration
+   and held-out manifests — a redesign, not the current frozen config re-run.
+
+4. **Phase C — GPU rental.** No new GPU host is rented until a redesigned,
+   non-retired experiment is specified and approved. The retired GSM8K b128
+   operating point is not re-run, and Phase C does not begin before steps 1–3
+   are complete.
 
 ## Open decisions needing human input
 
 - **License.** Not chosen. See `README.md`.
-- **Stage 1A outcome** determines whether Stage 2 runs on GSM8K or the
-  frozen MATH-500 backup — this cannot be known before Stage 1A actually
-  runs on GPU.
-- **Stage 1B outcome** determines the Stage 2 operating point, or may
-  determine that no accuracy-plausible, compression-active budget exists
-  for this pilot on GSM8K at all — in which case Stage 2 does not run as
-  currently configured, and that itself is a reportable finding.
+- **Whether to pursue MATH-500 at all.** The old "Stage 1A decides GSM8K vs
+  MATH-500" decision is now moot — the failed natural gate retired GSM8K b128
+  outright. MATH-500, if pursued, needs the fresh feasibility design in step 3
+  above, not the current frozen configuration.
+- **§10 f=1 stability control.** UNRESOLVED, and a separate Stage-0
+  prerequisite that any future non-retired stage must clear on its own terms
+  (`docs/GPU_VALIDATION_PLAN.md`, 2026-07-19).
 
 ## Changes to frozen settings
 
-None yet. Any future change to `configs/lock.yaml`'s frozen values requires
-a dated entry in `CHANGELOG.md` first, per the build brief.
+None. Retiring an operating point changes no frozen §1/§4/§8/§9 value in
+`configs/lock.yaml`; the retirement is recorded in `CHANGELOG.md`
+(2026-07-19) as a documentation-only status update. Any future change to
+frozen values still requires a dated `CHANGELOG.md` entry first, per the
+build brief.
