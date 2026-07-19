@@ -35,6 +35,11 @@ cpu-tools = [
     "huggingface_hub>=0.24",
     "transformers>=4.48.1,<4.56",
     "jinja2>=3.1",
+    # kvcot.utils.math_verifier (B1A-2, discovery track only -- CLAUDE.md
+    # §1a/§4a) -- exact pin, not a range: math-verify's symbolic-comparison
+    # behavior (e.g. what counts as an equivalent boxed answer) is a
+    # correctness-relevant contract, not just an API surface.
+    "math-verify[antlr4_13_2]==0.9.0",
 ]
 # Needed only for kvcot.analysis.plots; analysis/metrics/stats do not require it.
 plots = [

@@ -1,5 +1,21 @@
 # B0.5 — Causal false-negative discovery protocol (preregistration, not authorized to run)
 
+**[EVEN FURTHER SUPERSEDED — see `docs/B0_5_R2_1_FINAL_PROTOCOL.md`
+(B0.5-R2.1, 2026-07-19), the current authorized design and verdict.
+B0.5-R2.1 fixed an off-by-one branch-timing defect, froze the exact
+event/layer/head/candidate/donor sampling algorithms, and repaired Gate 10
+to a per-example-nested association test with a mandatory no-op control —
+all found in `docs/B0_5_R2_DENSE_CACHE_REPAIR.md` below, itself already a
+repair of this document.]**
+
+**[FURTHER SUPERSEDED — see `docs/B0_5_R2_DENSE_CACHE_REPAIR.md` (B0.5-R2,
+2026-07-19), which is now the current authorized design. B0.5-R2 found that
+even the repaired B0.5-R intervention (equal-byte add-back / retained-only
+ablation) is not representable in a dense KV tensor, and replaced it with a
+fixed-shape within-head swap; it also repaired B0.5-R's capture-hook claim
+and its gate 10. See `docs/B0_5_R2_DENSE_CACHE_REPAIR.md` §22 for the full
+cross-reference.]**
+
 **[SUPERSEDED IN PART — see `docs/B0_5_PROTOCOL_REPAIR.md` (B0.5-R,
 2026-07-19)].** Direct inspection of the pinned R-KV source found two
 load-bearing assumptions below to be false: §1's "fixed 128-token block"

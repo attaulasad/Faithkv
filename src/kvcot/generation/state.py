@@ -60,6 +60,18 @@ def reset_patched_state(model: Any, fresh_cache_factory: Callable[[], Any]) -> A
     generation or a fresh replay (§3.1). Must run immediately before every
     independent base generation and every fresh replay.
 
+    Architecture-generic by construction, not Qwen2-specific: verified
+    directly against `third_party/R-KV/HuggingFace/rkv/modeling.py`'s three
+    `*Attention_init` functions (Llama/Qwen2/Qwen3, dispatched by
+    `kvcot.discovery.dispatch`) — all three attach state under the
+    identical attribute names this function reads/resets
+    (`self_attn.config.compression`, `self_attn.kv_cluster`, and the
+    CausalLM-level `self.length`/`self.after_think`, set by the one shared
+    `CausalLM_forward` all three patchers install). No architecture defines
+    any additional mutable state beyond what is reset here — confirmed by
+    inspection, not assumed; re-check this comment against the pinned
+    submodule if a new architecture is ever added to the dispatch table.
+
     `fresh_cache_factory` is a zero-arg callable returning a brand-new
     transformers Cache instance (e.g. `lambda: DynamicCache()`) — a *new*
     instance is required, not a cleared one, since `query_cache`
@@ -93,8 +105,10 @@ def reset_patched_state(model: Any, fresh_cache_factory: Callable[[], Any]) -> A
         layer.self_attn.config.compression = None
 
         # kv_cluster bookkeeping (r1_kv.py:29-35) — one R1KV instance per
-        # layer (constructed inside Qwen2Attention_init, modeling.py:230-234
-        # — one call per layer, so one instance per layer); only
+        # layer (constructed inside the dispatched *Attention_init function
+        # — Qwen2Attention_init, LlamaAttention_init, or Qwen3Attention_init,
+        # modeling.py — one call per layer, so one instance per layer,
+        # identically across all three architectures); only
         # present/meaningful when record_kept_token_indices=True.
         kv_cluster = getattr(layer.self_attn, "kv_cluster", None)
         if kv_cluster is not None and getattr(kv_cluster, "record_kept_token_indices", False):

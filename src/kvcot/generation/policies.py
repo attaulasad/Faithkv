@@ -119,10 +119,19 @@ class _PatchedPolicyBase(Policy):
         declare_process_mode("patched")
         # `rkv` is the pinned submodule package (third_party/R-KV/HuggingFace),
         # installed editable on the GPU host only (scripts/setup_vast.sh).
-        from rkv.monkeypatch import replace_qwen2
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-        replace_qwen2(self._compression_config())
+        from kvcot.discovery.dispatch import resolve_patcher
+
+        # Required order (docs/B0_5_R2_2_AUTHORITY_AND_IMPLEMENTATION.md
+        # Part V.9): (1) load/read AutoConfig, (2) determine model_type,
+        # (3) resolve and invoke the correct R-KV patcher, (4) only then
+        # construct AutoModelForCausalLM. No single architecture's patcher
+        # (e.g. Qwen2's) is ever invoked unconditionally -- an
+        # unrecognized model_type raises here, before any model weight is
+        # touched, rather than silently running unpatched.
+        config = AutoConfig.from_pretrained(model_name, revision=revision)
+        resolve_patcher(config.model_type, self._compression_config())
 
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
@@ -144,6 +153,17 @@ class _PatchedPolicyBase(Policy):
 
         tokenizer = AutoTokenizer.from_pretrained(model_name, revision=revision, use_fast=True)
         _set_static_token_id_attrs(model, tokenizer)
+
+        if model.device.type == "cuda":
+            # Only meaningful once real weights are actually placed on a
+            # GPU (device_map="auto" on a CPU-only host resolves to "cpu" --
+            # this assertion is inert here and exercised for real only on
+            # the GPU host, per docs/B0_5_R2_2_AUTHORITY_AND_IMPLEMENTATION.md
+            # Part V.12; it is unit-tested separately with fake parameters).
+            from kvcot.discovery.no_offload import assert_no_offloaded_parameters
+
+            assert_no_offloaded_parameters(model)
+
         return model
 
 

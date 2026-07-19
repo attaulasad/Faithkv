@@ -2,17 +2,58 @@
 
 ## Current status (read this first)
 
+**Phase B0.5-R2.2 (2026-07-19)** reconciled a narrow contradiction between
+`CLAUDE.md`'s original blanket model freeze and the already-selected
+Llama-8B/MATH-500 discovery operating point (resolved via a new, dated
+`CLAUDE.md` §1a/§4a exception — CPU-side infrastructure only, no method, no
+GPU/inference authorization), and implemented every outstanding B1A CPU
+prerequisite: architecture-aware R-KV monkeypatch dispatch
+(`kvcot.discovery.dispatch`), a MATH-500 symbolic-equivalence verifier
+isolated in a per-comparison child process with a frozen 5-second timeout
+(`kvcot.utils.math_verifier`), the active discovery schema with corrected
+timing-field names (`kvcot.discovery.schemas`, `schema_version=
+"b0_5_r2_2.v1"`), deterministic sampling utilities that independently
+permute layer-depth stratum against event chronology
+(`kvcot.discovery.sampling`), a read-only capture-wrapper prerequisite
+(`kvcot.discovery.capture`), a fixed-shape swap primitive
+(`kvcot.discovery.swap`), and a strengthened complete-branch-output no-op
+control (`kvcot.discovery.branch_eval`). See
+`docs/B0_5_R2_2_AUTHORITY_AND_IMPLEMENTATION.md`. **Status: B0.5-R2.2
+authority reconciliation complete; B1A CPU prerequisites implemented and
+CPU-validated. B1B/B2A/B2B/GPU/Vast.ai remain unauthorized.** No inference
+ran; no discovery hypothesis result exists.
+
 **Phase B0.5 (2026-07-19) audited Phase B0 and produced a discovery-study
-feasibility gate; Phase B0.5-R (2026-07-19) then repaired that protocol's
-technical design after direct inspection of the pinned R-KV source found
-two of its load-bearing assumptions false (the "fixed 128-token block"
-eviction unit, and a shadow-FullKV method for recovering evicted KV
-tensors) — see `docs/B0_5_PROTOCOL_REPAIR.md` for the current, authorized
-design and verdict (**READY FOR B1A PREREQUISITE IMPLEMENTATION**,
-CPU-side prerequisites only, no GPU authorized). `docs/B0_5_DISCOVERY_PROTOCOL.md`,
-`docs/B0_5_FEASIBILITY_AUDIT.md`, and `docs/b0_5_decision.json` remain as
-the historical record with inline superseded-passage markers.** This sits
-on top of, and does not reverse, the prior chain:
+feasibility gate; Phase B0.5-R (2026-07-19) repaired that protocol's
+experimental unit and KV-recovery method after direct inspection of the
+pinned R-KV source found two load-bearing assumptions false (the "fixed
+128-token block" eviction unit, and a shadow-FullKV method for recovering
+evicted KV tensors); Phase B0.5-R2 (2026-07-19) then found B0.5-R's own
+selected intervention ("equal-byte add-back" / "retained-only physical
+ablation") **not representable** in the dense KV-cache tensor
+`transformers.DynamicCache` and R-KV actually use — a slot cannot be
+added or removed for one KV head only while leaving every other head at
+that layer unchanged — and repaired it to a fixed-shape **within-head
+swap**, plus repaired B0.5-R's capture-hook claim (no wrapper can read a
+function's internal locals) to an implementable before/after wrapper with
+independent score recomputation. **Phase B0.5-R2.1 (2026-07-19)** then
+found B0.5-R2's branch-timing definition had an off-by-one error (the
+forward call that consumes the event token already produces the *next*
+token's logits before the swap is applied, so that token cannot be
+scored — a one-token "bridge" must be fed identically into both branches
+first), replaced B0.5-R2's under-specified sampling rule with exact
+SHA-256-seeded `random.Random` algorithms that actually guarantee
+early/middle/late layer-depth coverage, and repaired gate 10 to a
+per-example-nested association test with a mandatory no-op control and a
+three-way DISCOVERY-SUPPORTING/NOT DISCOVERY-SUPPORTING/**NOT
+ADJUDICABLE** outcome. See `docs/B0_5_R2_1_FINAL_PROTOCOL.md` for the
+current, authorized design and verdict (**READY FOR B1A PREREQUISITE
+IMPLEMENTATION**, CPU-side prerequisites only, no GPU authorized).
+`docs/B0_5_R2_DENSE_CACHE_REPAIR.md`, `docs/B0_5_PROTOCOL_REPAIR.md`,
+`docs/B0_5_DISCOVERY_PROTOCOL.md`, `docs/B0_5_FEASIBILITY_AUDIT.md`, and
+`docs/b0_5_decision.json` remain as the historical record with inline
+superseded-passage markers.** This sits on top of, and does not reverse,
+the prior chain:
 Phase A3 found the original diagnostic (below) does not survive as a novel
 contribution against prior art (CASK, Lanham et al.) — **PHASE B (the
 original diagnostic path) IS BLOCKED.** Phase B0 then specified and

@@ -32,6 +32,12 @@ huggingface_hub>=0.24
 jinja2>=3.1
 matplotlib>=3.8
 
+# kvcot.utils.math_verifier (B1A-2, discovery track only -- CLAUDE.md
+# §1a/§4a). The eventual GPU discovery environment also grades MATH-500, so
+# this belongs alongside the rest of this file's runtime deps, not only in
+# pyproject.toml's cpu-tools extra. Exact pin, matching pyproject.toml.
+math-verify[antlr4_13_2]==0.9.0
+
 # --- dev/test ---
 pytest>=8.0
 pytest-cov>=5.0

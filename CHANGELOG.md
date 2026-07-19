@@ -5,6 +5,242 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-19 — Phase B0.5-R2.2: authority reconciliation and B1A CPU prerequisite implementation (no GPU used, no model inference, no model weights or datasets downloaded, no MATH-500 manifest/result directory created; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged)
+
+Run on branch `research/b1a-cpu-prerequisites-r2-2`, cut from
+`research/b0-5-r2-dense-cache-repair` at commit
+`ac3e7d545d13e4b663fe575430ba13e6e4b9bdc5` ("Finalize B0.5 timing sampling
+and discovery controls"). Two things in one consolidated pass:
+
+**Authority reconciliation.** `CLAUDE.md` §1's original "no 7B support"
+blanket line technically contradicted the already-selected
+`deepseek-ai/DeepSeek-R1-Distill-Llama-8B` discovery operating point
+(`docs/b0_5_decision.json`'s `selected_operating_point`, chosen in Phase
+B0.5). Resolved with two new, dated `CLAUDE.md` subsections — §1a and §4a —
+that narrowly authorize CPU-side infrastructure only (architecture
+dispatch, state-reset generalization, construction-parity tests, the
+MATH-500 verifier) for `DeepSeek-R1-Distill-Llama-8B` + MATH-500, state
+explicitly that this is not a method implementation and not a GPU/inference
+authorization, and require a separate future authorization before B1B,
+B2A, B2B, or any Vast.ai activity. `CLAUDE.md` §1/§4's original Qwen-1.5B
+tables and `configs/lock.yaml` are unchanged.
+
+**Four further defects found and repaired this session:**
+
+- **Position-field naming error.** The `first_affected_logit_absolute_position`
+  field (documentation-only until this pass — never actually coded in
+  `src/`) conflated an *input* position (`t+1`) with the *logit-target*
+  position it produces (`t+2`). The freshly-implemented active schema
+  (`kvcot.discovery.schemas.SwapPairRecord`, `schema_version=
+  "b0_5_r2_2.v1"`) uses two explicit fields instead
+  (`first_affected_forward_input_absolute_position`,
+  `first_affected_logit_target_absolute_position`), with a validator
+  enforcing all four timing invariants at construction time.
+- **Layer-depth/event-time confound.** The frozen layer-selection rule
+  (`docs/B0_5_R2_1_FINAL_PROTOCOL.md` §5) assigned each selected event's
+  depth stratum directly from its chronological draw ordinal — silently
+  confounding *when* a compaction event happened with *how deep* its
+  sampled layer was. `kvcot.discovery.sampling.assign_depth_strata` now
+  independently permutes `{0, 1, 2}` via its own SHA-256-seeded
+  `random.Random` stream (suffix `"b05r22_depth_permutation"`), storing
+  `chronological_event_ordinal` and `depth_stratum` as two separate schema
+  fields, never one ambiguous `event_ordinal`.
+- **Undefined entropy/logit-margin signals.** Classified "mandatory" by
+  §8.2 of the prior protocol document but never operationally defined.
+  `kvcot.discovery.uncertainty` now freezes the exact computation (float32
+  natural-log-nats Shannon entropy over `log_softmax`; top-1-minus-top-2
+  raw-logit margin), sourced from the raw next-token-prediction logits at
+  the moment each token was originally predicted during the natural run,
+  per-candidate (never one shared value per eviction event), with source
+  values and differences both always stored.
+- **All previously-identified-but-unimplemented B1A prerequisites are now
+  actually implemented and CPU-tested**, closing the gap
+  `docs/B0_5_R2_1_FINAL_PROTOCOL.md` §11 and
+  `docs/b0_5_decision.json`'s `b0_5_r2_1_prerequisites_repaired_not_implemented`
+  had left open: architecture-aware R-KV monkeypatch dispatch
+  (`kvcot.discovery.dispatch`, verified against the pinned
+  `third_party/R-KV/HuggingFace/rkv/monkeypatch.py`'s exact three exported
+  patchers — `replace_qwen2`/`replace_llama`/`replace_qwen3` — wired into
+  `kvcot.generation.policies._PatchedPolicyBase.load` in the required
+  AutoConfig-before-AutoModelForCausalLM order), a no-offload hard
+  assertion (`kvcot.discovery.no_offload`), a MATH-500 symbolic-equivalence
+  verifier isolated per-comparison in a child OS process with a frozen
+  5.0-second timeout (`kvcot.utils.math_verifier` +
+  `kvcot.utils._math_verify_worker` — `math_verify`'s own
+  `multiprocessing`-based timeout mechanism was found to raise a real
+  `OSError: [WinError 6]` on this Windows host, so the parent enforces the
+  timeout itself via `subprocess.run(..., timeout=5.0)` against a fresh
+  child process instead), deterministic sampling utilities with
+  golden-vector tests, a per-instance read-only capture-wrapper
+  prerequisite around `R1KV.update_kv` with independent score
+  recomputation and gather-parity checks (`kvcot.discovery.capture`), a
+  fixed-shape within-head swap primitive (`kvcot.discovery.swap`), and a
+  strengthened, complete-branch-output no-op control comparing full
+  per-token logit/NLL sequences and final cache states, not just a single
+  self-assignment tensor (`kvcot.discovery.branch_eval`).
+
+New dependency: `math-verify[antlr4_13_2]==0.9.0` (plus its pure-Python
+dependencies `latex2sympy2_extended==1.11.0`,
+`antlr4-python3-runtime==4.13.2`), added to `pyproject.toml`'s `cpu-tools`
+extra, `requirements.txt`, and `requirements-lock.txt`. No other dependency
+pin changed — Torch/Transformers/FlashAttention are untouched.
+
+Full detail, verdict, and per-blocker file/test mapping:
+`docs/B0_5_R2_2_AUTHORITY_AND_IMPLEMENTATION.md`. Superseded passages in
+`docs/B0_5_R2_1_FINAL_PROTOCOL.md` are marked inline with a top-of-file
+banner, not deleted; `docs/b0_5_decision.json` retains every prior field
+and adds a `superseded_by_r2_2`/`b0_5_r2_2_*` block.
+
+**Status: B0.5-R2.2 authority reconciliation complete; B1A CPU
+prerequisites implemented and CPU-validated. B1B/B2A/B2B/GPU/Vast.ai
+remain unauthorized.** No inference ran, no GPU was used, no model weights
+or datasets were downloaded, and no discovery hypothesis result exists —
+none is claimed by this entry.
+
+## 2026-07-19 — Phase B0.5-R2.1: final timing, sampling and discovery-control correction (documentation-only; no method or harness implemented; no GPU used, no model inference, no model weights or datasets downloaded; no MATH-500 manifest/config/evaluator/result directory created; no code under `src/`, `tests/`, `configs/`, `scripts/`, `results/`, `schemas/`, or `third_party/` touched; no frozen §1/§4/§8/§9 value changed)
+
+Run on branch `research/b0-5-r2-dense-cache-repair`, HEAD
+`9d04ecd7268656894815fedb7d080f0d27c7fad3` (the B0.5-R2 commit) confirmed
+at session start. Purpose: this is the final B0.5 protocol correction,
+fixing an off-by-one timing defect and an under-specified sampling rule in
+B0.5-R2 rather than trusting its already-committed READY verdict. Three
+defects were found and repaired:
+
+- **Off-by-one branch-timing error.** B0.5-R2 §14 scored the reference
+  continuation starting immediately after the swap. But the forward call
+  that consumes the event token `x_t` (the call *during which* compaction
+  fires) already produces the logits predicting `x_{t+1}` as an ordinary
+  side effect, **before** the swap is applied to that call's cache
+  output — the swap cannot change those logits. Repaired: `x_{t+1}` (the
+  real, already-generated next token) is fed identically into both the
+  baseline and swapped branches as one unscored "bridge" token first; the
+  48-token scored window starts one token later, at `x_{t+2}` — the first
+  position whose logits are actually computed by reading from the
+  diverged (baseline-vs-swapped) cache. Frozen constants:
+  `bridge_tokens=1`, `scored_horizon=48`,
+  `minimum_future_tokens_after_event=49`. Branch evaluation is now named
+  precisely — teacher-forced NLL evaluation of fixed reference tokens,
+  never "greedy decoding" (the prior, ambiguous phrasing).
+- **Under-specified event/layer/head/candidate/donor sampling.** B0.5-R2
+  §10's layer/head rule was an unrestricted `SHA256(...) %
+  num_hidden_layers` hash, independently per event — three independent
+  uniform draws do **not** actually guarantee one early/middle/late-third
+  layer per example, despite being described that way. B0.5-R2 §9.2's
+  candidate/donor selection used a plain ascending-position tie-break,
+  systematically biased toward the lowest absolute positions in each pool.
+  Repaired: one canonical SHA-256-seed helper (pipe-joined UTF-8 parts,
+  first 8 digest bytes as a big-endian unsigned integer) feeds four
+  independent `random.Random` draws — event selection (`rng.sample` of 3
+  from the sorted eligible event list), layer selection restricted to a
+  per-selected-event-ordinal depth third (`lo=floor(k*L/3)`,
+  `hi=floor((k+1)*L/3)`, guaranteeing real coverage, not a probabilistic
+  tendency), KV-head selection over the full range, and separate
+  evicted-candidate/donor sampling with two independent seed streams.
+- **Gate 10's pooled Spearman statistic was the wrong granularity.**
+  B0.5-R2 §16(b) computed one Spearman correlation pooled across all
+  examples' pairs — capable of showing a strong apparent association
+  driven entirely by between-example variance with no real within-example
+  effect, or the reverse. Repaired: Spearman rho is computed separately
+  within each example, absolute value taken, and the **median** across
+  examples is the decision statistic (`< 0.30`, strict), for each of eight
+  named mandatory deployable signals (the six B0.5-R2 §16 controls plus
+  entropy and logit margin, both classified mandatory per
+  `docs/METHOD_PIVOT_SPEC.md` §5a's existing confound-control precedent).
+  An explicit floor (`>= 8` evaluable examples per signal) and a mandatory
+  no-op control (replacing a donor with its own captured K/V must produce
+  exactly zero change in deterministic CPU tests) are added; the outcome
+  set expands from a two-way pass/fail to three outcomes —
+  DISCOVERY-SUPPORTING / NOT DISCOVERY-SUPPORTING / **NOT ADJUDICABLE** —
+  so a data-thinness or mechanism-bug problem is never misreported as a
+  negative finding.
+
+Full correction: `docs/B0_5_R2_1_FINAL_PROTOCOL.md`. Superseded passages
+in `docs/B0_5_R2_DENSE_CACHE_REPAIR.md` (§10, §11, §14, §15, §16, §21) and
+top-of-file banners in `docs/B0_5_PROTOCOL_REPAIR.md`,
+`docs/B0_5_DISCOVERY_PROTOCOL.md`, and `docs/B0_5_FEASIBILITY_AUDIT.md`
+are marked inline, not deleted; `docs/b0_5_decision.json` retains every
+original field and adds `superseded_by_r2_1`/`b0_5_r2_1_*` fields. The
+fixed-shape within-head swap design, the capture-strategy wrapper, and the
+aggregation hierarchy from B0.5-R2 are unaffected and not reopened.
+
+**B0.5-R2.1 VERDICT: READY FOR B1A PREREQUISITE IMPLEMENTATION** —
+supersedes B0.5-R2's verdict below. Authorizes only CPU-side B1A
+prerequisite implementation (MATH-500 verifier, architecture-aware R-KV
+dispatch, the repaired pairwise provenance schema with timing fields, the
+repaired per-instance read-only capture wrapper, the frozen deterministic
+sampling algorithms, the mandatory no-op control's CPU unit test, CPU
+tests generally). Does not authorize B1B, GPU use, model inference, or any
+method implementation. The `CLAUDE.md` §4 model-freeze amendment remains
+required before any GPU run of a later phase and is not granted by this
+record.
+
+## 2026-07-19 — Phase B0.5-R2: dense-cache representability and capture-strategy repair (documentation-only; no method or harness implemented; no GPU used, no model inference, no model weights or datasets downloaded; no MATH-500 manifest/config/evaluator/result directory created; no code under `src/`, `tests/`, `configs/`, `scripts/`, `results/`, `schemas/`, or `third_party/` touched; no frozen §1/§4/§8/§9 value changed)
+
+Run on branch `research/b0-5-r2-dense-cache-repair`, cut from `main` at
+`d472f0514cd1396774b557dc27ec19900a11c1eb` (tip of `origin/main`, containing
+the B0.5-R merge). Purpose: verify B0.5-R's selected intervention and
+capture-strategy claim directly against the pinned R-KV source
+(`third_party/R-KV` @ `45eaa7d69d20b7388321f077020a610d9afb65bd`) and the
+installed `transformers==4.55.4` cache implementation, rather than trust
+B0.5-R's already-committed READY verdict. Two load-bearing assumptions were
+found false:
+
+- **B0.5-R §7-§8's "equal-byte add-back" / "retained-only physical
+  ablation" intervention is not representable.** `transformers.DynamicLayer`
+  stores K/V as one dense `(batch_size, num_heads, seq_len, head_dim)`
+  tensor per layer (`cache_utils.py:68-104`, read directly from the
+  installed package); R-KV's own `topk(budget - window_size, dim=-1)`
+  (`r1_kv.py:82`) always selects the *same count* per head, so every head
+  always has exactly `budget` slots after compaction. A slot cannot be
+  added or removed "at one (layer, kv_head) pair only" while leaving every
+  other head at that layer unchanged — the tensor has one shared `seq_len`
+  dimension across every head. Repaired intervention: a fixed-shape
+  **within-head swap** — `key_cache[L][0,h,r_slot,:] = captured_key_e`,
+  `value_cache[L][0,h,r_slot,:] = captured_value_e` — net physical cache
+  bytes always exactly 0, no dimension ever resized.
+- **B0.5-R §6's capture-hook claim does not hold.** No supported Python
+  wrapper can read a function's internal local variables
+  (`final_score`, `indices`) at an arbitrary line inside `R1KV.update_kv`
+  from outside the function. Repaired to a per-instance before/after
+  wrapper (bound to each layer's own `R1KV` instance, never a class-level
+  or global patch) that clones pre-call inputs, calls the original
+  unmodified `update_kv`, and independently recomputes the real windowed
+  score formula (`r1_kv.py:49-77`) — verified for parity against R-KV's
+  own real `kept_token_indices` bookkeeping and a bit-exact
+  gather-reproduction check, never fed back into R-KV.
+
+Also discovered and repaired: R-KV's own persisted `kept_final_scores`
+bookkeeping (`r1_kv.py:88-165`) is computed by a **different, unwindowed
+formula** than the one that actually drives the real eviction decision
+(`r1_kv.py:49-77`) — a schema field naively sourced from
+`kept_final_scores` would silently log the wrong quantity. Also repaired:
+a mandatory two-pass capture plan (event eligibility depends on the
+complete natural-generation trajectory, so it can only be known after
+Pass 1 finishes — a second, token-identical instrumented replay pass is
+required to capture at preselected targets, a real cost previously absent
+from the B0.5-R/B0.5 cost models); gate 10 (previously did not require any
+actual positive ranking reversal to exist — repaired to require a
+predeclared fraction of examples showing a reversal above a fixed noise
+floor); and an explicit, deterministic (layer, KV-head) sampling rule
+(previously left implicit).
+
+Full repair: `docs/B0_5_R2_DENSE_CACHE_REPAIR.md`. Superseded passages in
+`docs/B0_5_PROTOCOL_REPAIR.md`, `docs/B0_5_DISCOVERY_PROTOCOL.md`, and
+`docs/B0_5_FEASIBILITY_AUDIT.md` are marked inline, not deleted;
+`docs/b0_5_decision.json` retains every original field and adds
+`superseded_by_r2`/`b0_5_r2_*` fields pointing to the repair. B0.5-R's
+corrected decision unit (§4), B1A-1/B1A-2 prerequisite findings, and B0's
+method-pivot verdict are unaffected and not reopened.
+
+**B0.5-R2 VERDICT: READY FOR B1A PREREQUISITE IMPLEMENTATION** —
+supersedes B0.5-R's verdict below. Authorizes only CPU-side B1A
+prerequisite implementation (MATH-500 verifier, architecture-aware R-KV
+dispatch, the repaired pairwise provenance schema, the repaired
+per-instance read-only capture wrapper, CPU tests). Does not authorize
+B1B, GPU use, model inference, or any method implementation. The
+`CLAUDE.md` §4 model-freeze amendment remains required before any GPU run
+of a later phase and is not granted by this record.
+
 ## 2026-07-19 — Phase B0.5-R: causal discovery protocol repair (documentation-only; no method or harness implemented; no GPU used, no model inference, no model weights or datasets downloaded; no MATH-500 manifest/config/evaluator/result directory created; no code under `src/`, `tests/`, `configs/`, `scripts/`, `results/`, `schemas/`, or `third_party/` touched; no frozen §1/§4/§8/§9 value changed)
 
 Run on branch `research/b0-5-protocol-repair`, cut from `main` at
