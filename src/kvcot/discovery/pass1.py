@@ -1,16 +1,26 @@
 """Pass 1 — natural-run bookkeeping contract and deterministic, outcome-blind
-selection (`docs/B1A_REPAIR_AND_B1B_CPU_INTEGRATION.md` §9, authorized by
-CLAUDE.md §1b/§4b: CPU-side harness architecture only, exercised against a
-dependency-injected `NaturalStepFn`, never a real model).
+selection (`docs/B1A_REPAIR_AND_B1B_CPU_INTEGRATION.md` §9,
+`docs/B1B_R2_REAL_MODEL_BOUNDARY_AND_B2A_PREFLIGHT.md` §6, authorized by
+CLAUDE.md §1b/§4b: CPU-side harness architecture only, exercised against
+dependency-injected `PrefillFn`/`DecodeOneFn`, never a real model).
 
 Pass 1's job, in order:
 
-1. Freeze the complete token trace (`run_natural_pass1`) by driving the
-   injected `step_fn` one token at a time (this repository's frozen
-   batch-1, token-by-token call shape, CLAUDE.md §4) and recording every
-   piece of required bookkeeping as it happens.
+1. Freeze the complete token trace (`run_natural_pass1`) by feeding the
+   COMPLETE prompt through exactly one `prefill_fn` call, then driving the
+   injected `decode_one_fn` one continuation token at a time (this
+   repository's frozen batch-1, one-shot-prefill-then-token-by-token-decode
+   call shape, CLAUDE.md §4, B1B-R2 §6 — never a prefill simulated as
+   repeated one-token calls), recording every piece of required bookkeeping
+   as it happens.
 2. Identify eligible compaction events ONLY AFTER the complete trace length
    is known (`eligible_event_ids`) — never provisionally, mid-generation.
+   Only DECODE-phase events are eligible (`absolute_event_position >=
+   prompt_length`): a real one-shot prefill call is architecturally opaque
+   from the outside (see `docs/B1B_R2_REAL_MODEL_BOUNDARY_AND_B2A_PREFLIGHT.md`
+   §5/§6) — there is no valid "immediately after this specific mid-prefill
+   position" model-state boundary to snapshot from, so an event occurring
+   during prefill can never be a branch-construction target.
 3. Deterministically select exactly 3 eligible events, independently assign
    depth strata, and select layer/head/candidates/donors
    (`build_pass1_plan`) using ONLY `kvcot.discovery.sampling`'s existing,
@@ -29,7 +39,7 @@ from typing import Any, Callable, Literal, Sequence
 import torch
 
 from kvcot.discovery.constants import MINIMUM_FUTURE_TOKENS_AFTER_EVENT
-from kvcot.discovery.harness_types import LayerStepObservation, NaturalStepFn
+from kvcot.discovery.harness_types import DecodeOneFn, LayerStepObservation, PrefillFn
 from kvcot.discovery.sampling import (
     CandidateDonorSelection,
     IdentitySeedParts,
@@ -98,42 +108,88 @@ def run_natural_pass1(
     provenance: NaturalRunProvenance,
     prompt_token_ids: Sequence[int],
     initial_state: Any,
-    step_fn: NaturalStepFn,
+    prefill_fn: PrefillFn,
+    decode_one_fn: DecodeOneFn,
     max_new_tokens: int,
     eos_token_id: int | None,
     answer_fn: AnswerFn,
 ) -> NaturalRunTrace:
-    """Drive `step_fn` one token at a time over the prompt, then greedily
+    """Feed the COMPLETE prompt through exactly one `prefill_fn` call, then
+    drive `decode_one_fn` one continuation token at a time, greedily
     (argmax, deterministic -- no sampling, since Pass 1 has no seed/
     temperature concept of its own) over up to `max_new_tokens` generated
     tokens, freezing the complete trace before any eligibility decision is
-    made anywhere else in this module.
+    made anywhere else in this module. `prefill_fn` is never called more
+    than once (B1B-R2 §6: "Do not simulate a full prefill through repeated
+    one-token calls").
     """
     if max_new_tokens <= 0:
         raise ValueError(f"max_new_tokens must be positive, got {max_new_tokens}")
 
-    full_token_ids: list[int] = list(prompt_token_ids)
-    prompt_length = len(full_token_ids)
+    prompt_token_ids = list(prompt_token_ids)
+    prompt_length = len(prompt_token_ids)
     if prompt_length == 0:
         raise ValueError("prompt_token_ids must be non-empty")
 
+    # --- prefill: exactly one call for the complete prompt ---
+    prefill_result = prefill_fn(initial_state, prompt_token_ids)
+    if len(prefill_result.per_position_logits) != prompt_length:
+        raise ValueError(
+            f"prefill_fn must return exactly one logits entry per prompt position "
+            f"({prompt_length}), got {len(prefill_result.per_position_logits)}"
+        )
+    if len(prefill_result.per_position_layer_observations) != prompt_length:
+        raise ValueError(
+            f"prefill_fn must return exactly one layer_observations entry per prompt position "
+            f"({prompt_length}), got {len(prefill_result.per_position_layer_observations)}"
+        )
+
+    full_token_ids: list[int] = list(prompt_token_ids)
     uncertainty_by_position: dict[int, PositionUncertainty] = {}
     compaction_events: list[CompactionEventObservation] = []
     cache_length_final_per_layer: dict[int, int] = {}
-    state = initial_state
+    state = prefill_result.new_state
     cap_hit = False
-    pos = 0
 
-    while pos < len(full_token_ids):
-        token_id = full_token_ids[pos]
-        result = step_fn(state, token_id)
+    for pos in range(prompt_length):
+        predicted_position = pos + 1
+        logits = prefill_result.per_position_logits[pos]
+        layer_observations = prefill_result.per_position_layer_observations[pos]
+        uncertainty_by_position[predicted_position] = PositionUncertainty(
+            entropy=compute_entropy_nats(logits), logit_margin=compute_logit_margin(logits)
+        )
+        for layer_index, obs in layer_observations.items():
+            cache_length_final_per_layer[layer_index] = obs.cache_length_after
+        if any(obs.had_compaction for obs in layer_observations.values()):
+            compaction_events.append(
+                CompactionEventObservation(
+                    compaction_event_id=len(compaction_events),
+                    absolute_event_position=pos,
+                    layer_observations=dict(layer_observations),
+                )
+            )
+
+    # --- decode: one single-token call per continuation token ---
+    next_logits = prefill_result.per_position_logits[-1]
+    pos = prompt_length  # absolute position of the next token to be fed/generated
+    while True:
+        generated_so_far = pos - prompt_length
+        if generated_so_far >= max_new_tokens:
+            cap_hit = True
+            break
+        next_token_id = int(torch.argmax(next_logits).item())
+        if eos_token_id is not None and next_token_id == eos_token_id:
+            break  # natural stop -- do not append or feed the EOS token itself
+        full_token_ids.append(next_token_id)
+
+        result = decode_one_fn(state, next_token_id)
         state = result.new_state
 
         predicted_position = pos + 1
-        entropy = compute_entropy_nats(result.next_token_logits)
-        margin = compute_logit_margin(result.next_token_logits)
-        uncertainty_by_position[predicted_position] = PositionUncertainty(entropy=entropy, logit_margin=margin)
-
+        uncertainty_by_position[predicted_position] = PositionUncertainty(
+            entropy=compute_entropy_nats(result.next_token_logits),
+            logit_margin=compute_logit_margin(result.next_token_logits),
+        )
         for layer_index, obs in result.layer_observations.items():
             cache_length_final_per_layer[layer_index] = obs.cache_length_after
         if any(obs.had_compaction for obs in result.layer_observations.values()):
@@ -144,18 +200,7 @@ def run_natural_pass1(
                     layer_observations=dict(result.layer_observations),
                 )
             )
-
-        is_last_known_position = predicted_position == len(full_token_ids)
-        generated_so_far = len(full_token_ids) - prompt_length
-        if is_last_known_position and pos >= prompt_length - 1:
-            if generated_so_far >= max_new_tokens:
-                cap_hit = True
-            else:
-                next_token_id = int(torch.argmax(result.next_token_logits).item())
-                if eos_token_id is not None and next_token_id == eos_token_id:
-                    pass  # natural stop -- do not append the EOS token itself
-                else:
-                    full_token_ids.append(next_token_id)
+        next_logits = result.next_token_logits
         pos += 1
 
     generated_token_ids = tuple(full_token_ids[prompt_length:])
@@ -178,7 +223,9 @@ def run_natural_pass1(
 
 def eligible_event_ids(trace: NaturalRunTrace) -> list[int]:
     """Compaction events eligible for selection: NEVER the first or last
-    compaction event of the run, and at least
+    compaction event of the run, NEVER a prefill-phase event (B1B-R2 §6:
+    a one-shot prefill call has no valid mid-prefill snapshot boundary to
+    branch from — see this module's docstring), and at least
     `MINIMUM_FUTURE_TOKENS_AFTER_EVENT` (49) real future tokens must exist
     after the event's absolute position. Evaluated only against the
     COMPLETE frozen trace (`len(trace.full_token_ids)`), never a
@@ -190,6 +237,8 @@ def eligible_event_ids(trace: NaturalRunTrace) -> list[int]:
     eligible = []
     for i, ev in enumerate(events):
         if i == 0 or i == len(events) - 1:
+            continue
+        if ev.absolute_event_position < trace.prompt_length:
             continue
         future_tokens = (total_len - 1) - ev.absolute_event_position
         if future_tokens >= MINIMUM_FUTURE_TOKENS_AFTER_EVENT:

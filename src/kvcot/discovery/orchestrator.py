@@ -26,14 +26,16 @@ from kvcot.discovery.attrition import (
     STAGE_COMPACTION_EVENT_MISMATCH,
     STAGE_FEWER_THAN_THREE_ELIGIBLE_EVENTS,
     STAGE_INVALID_CANDIDATE_DONOR_POOL,
+    STAGE_MISSING_TARGET_SNAPSHOT,
     STAGE_NATURAL_RUN_INVALID,
     STAGE_OBSERVED_SURVIVOR_MISMATCH,
     STAGE_PASS2_TOKEN_MISMATCH,
+    STAGE_PREFILL_CONTRACT_VIOLATION,
     STAGE_SCHEMA_VALIDATION_FAILURE,
     STAGE_UNCERTAINTY_MISSING,
     AttritionCounters,
 )
-from kvcot.discovery.harness_types import NaturalStepFn
+from kvcot.discovery.harness_types import DecodeOneFn, PrefillFn, SnapshotFn
 from kvcot.discovery.pass1 import (
     PLAN_FAILURE_TOO_FEW_ELIGIBLE_EVENTS,
     AnswerFn,
@@ -45,6 +47,8 @@ from kvcot.discovery.pass1 import (
 from kvcot.discovery.pass2 import (
     INVALID_COMPACTION_POSITION_MISMATCH,
     INVALID_MISSING_TARGET_CAPTURE,
+    INVALID_MISSING_TARGET_SNAPSHOT,
+    INVALID_PREFILL_SHAPE_MISMATCH,
     INVALID_SURVIVOR_MISMATCH_ACROSS_PASSES,
     INVALID_SURVIVOR_MISMATCH_WITHIN_PASS2,
     INVALID_TOKEN_MISMATCH,
@@ -62,8 +66,10 @@ from kvcot.discovery.schemas import SwapPairRecord
 
 _PASS2_REASON_TO_STAGE = {
     INVALID_TOKEN_MISMATCH: STAGE_PASS2_TOKEN_MISMATCH,
+    INVALID_PREFILL_SHAPE_MISMATCH: STAGE_PREFILL_CONTRACT_VIOLATION,
     INVALID_COMPACTION_POSITION_MISMATCH: STAGE_COMPACTION_EVENT_MISMATCH,
     INVALID_MISSING_TARGET_CAPTURE: STAGE_COMPACTION_EVENT_MISMATCH,
+    INVALID_MISSING_TARGET_SNAPSHOT: STAGE_MISSING_TARGET_SNAPSHOT,
     INVALID_SURVIVOR_MISMATCH_WITHIN_PASS2: STAGE_CAPTURE_GATHER_PARITY_FAILURE,
     INVALID_SURVIVOR_MISMATCH_ACROSS_PASSES: STAGE_OBSERVED_SURVIVOR_MISMATCH,
 }
@@ -93,7 +99,9 @@ def run_example(
     prompt_token_ids: list[int],
     pass1_initial_state: Any,
     pass2_initial_state_factory: Callable[[], Any],
-    step_fn: NaturalStepFn,
+    prefill_fn: PrefillFn,
+    decode_one_fn: DecodeOneFn,
+    snapshot_fn: SnapshotFn,
     max_new_tokens: int,
     eos_token_id: int | None,
     answer_fn: AnswerFn,
@@ -108,7 +116,8 @@ def run_example(
 
     try:
         trace = run_natural_pass1(
-            provenance, prompt_token_ids, pass1_initial_state, step_fn, max_new_tokens, eos_token_id, answer_fn
+            provenance, prompt_token_ids, pass1_initial_state, prefill_fn, decode_one_fn, max_new_tokens,
+            eos_token_id, answer_fn,
         )
     except Exception:
         example_attrition.record_dropped(STAGE_NATURAL_RUN_INVALID)
@@ -132,7 +141,9 @@ def run_example(
         example_attrition.record_dropped(stage)
         return ExampleResult(example_id, False, stage, trace, ())
 
-    pass2_result = run_pass2_capture(plan, trace.full_token_ids, pass2_initial_state_factory(), step_fn)
+    pass2_result = run_pass2_capture(
+        plan, trace.full_token_ids, pass2_initial_state_factory(), prefill_fn, decode_one_fn, snapshot_fn
+    )
     if not pass2_result.valid:
         stage = _PASS2_REASON_TO_STAGE[pass2_result.invalid_reason]
         example_attrition.record_dropped(stage)

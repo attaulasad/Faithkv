@@ -1,6 +1,9 @@
+import contextlib
+
+import pytest
 import torch
 
-from kvcot.discovery.capture import capture_update_kv
+from kvcot.discovery.capture import _recomputed_kept_physical_indices, capture_update_kv
 from kvcot.generation.provenance import LayerProvenance
 
 from _fake_rkv_fixtures import FakeR1KV, install_fake_rkv_compression_module
@@ -451,3 +454,186 @@ def test_bookkeeping_unavailable_parity_stays_none_not_a_hard_failure(monkeypatc
     assert record.had_compaction is True
     assert record.observed_kept_indices_parity_passed is None
     assert record.parity_check_passed is True
+
+
+# --------------------------------------------------------------------------
+# B1B-R2 Blocker: absolute-position device/dtype parity
+# (`docs/B1B_R2_REAL_MODEL_BOUNDARY_AND_B2A_PREFLIGHT.md`)
+# --------------------------------------------------------------------------
+
+
+def test_recomputed_kept_physical_indices_normalizes_dtype_and_device():
+    """`recomputed_topk_indices` arrives in whatever dtype `.topk()` produces
+    (int64) but this test deliberately feeds a DIFFERENT dtype (int32) than
+    the target provenance-map dtype (int64) to prove normalization actually
+    happens rather than accidentally already matching."""
+    num_heads = 2
+    kv_cache_len = 10
+    window_size = 3
+    topk_indices = torch.tensor([[[0, 2, 4], [1, 3, 5]]], dtype=torch.int32)  # shape (1, heads, k)
+
+    target_dtype = torch.int64
+    target_device = torch.device("cpu")
+    result = _recomputed_kept_physical_indices(
+        topk_indices, kv_cache_len, window_size, device=target_device, dtype=target_dtype
+    )
+
+    assert result.dtype == target_dtype
+    assert result.device == target_device
+    # order preserved: recomputed top-k first, then the protected recent window
+    expected = torch.tensor([[0, 2, 4, 7, 8, 9], [1, 3, 5, 7, 8, 9]], dtype=target_dtype)
+    assert torch.equal(result, expected)
+
+
+def test_recomputed_kept_physical_indices_preserves_shape_and_ordering_when_already_matching():
+    num_heads = 2
+    kv_cache_len = 12
+    window_size = 4
+    topk_indices = torch.tensor([[[3, 1], [0, 2]]], dtype=torch.int64)
+    result = _recomputed_kept_physical_indices(
+        topk_indices, kv_cache_len, window_size, device=torch.device("cpu"), dtype=torch.int64
+    )
+    assert tuple(result.shape) == (num_heads, 2 + window_size)
+    expected = torch.tensor([[3, 1, 8, 9, 10, 11], [0, 2, 8, 9, 10, 11]], dtype=torch.int64)
+    assert torch.equal(result, expected)
+
+
+@pytest.mark.gpu
+def test_recomputed_kept_physical_indices_cuda_topk_cpu_provenance_matches_cpu_reference():
+    """Mechanical device-placement test (§3, B1B-R2): top-k indices
+    originate on CUDA, the provenance map stays on CPU -- normalization and
+    gather must complete without a device-mismatch error, and the resulting
+    absolute positions must match a pure-CPU reference computation exactly.
+    Skips cleanly (repo's existing `gpu` marker convention,
+    `tests/conftest.py`) whenever CUDA is unavailable -- never executed on
+    this CPU-only build machine."""
+    kv_cache_len = 10
+    window_size = 3
+    topk_indices_cpu = torch.tensor([[[0, 2, 4], [1, 3, 5]]], dtype=torch.int64)
+    topk_indices_cuda = topk_indices_cpu.to("cuda")
+    provenance_map = torch.arange(kv_cache_len, dtype=torch.int64).unsqueeze(0).expand(2, -1).clone()  # CPU
+
+    result = _recomputed_kept_physical_indices(
+        topk_indices_cuda, kv_cache_len, window_size, device=provenance_map.device, dtype=provenance_map.dtype
+    )
+    assert result.device == provenance_map.device
+
+    reference = _recomputed_kept_physical_indices(
+        topk_indices_cpu, kv_cache_len, window_size, device=provenance_map.device, dtype=provenance_map.dtype
+    )
+    assert torch.equal(result, reference)
+
+    gathered = provenance_map.gather(dim=-1, index=result)
+    assert gathered.device == provenance_map.device
+
+
+# --------------------------------------------------------------------------
+# B1B-R2 §4: target-only, memory-bounded capture
+# --------------------------------------------------------------------------
+
+
+def test_should_capture_false_skips_clone_and_capture_entirely(monkeypatch):
+    install_fake_rkv_compression_module(monkeypatch)
+    kv = FakeR1KV(budget=BUDGET, window_size=WINDOW)
+    # seq_len < BUDGET -> FakeR1KV.update_kv itself takes the early-return
+    # branch and never calls .clone() internally, so any clone call
+    # observed below is attributable ONLY to the capture wrapper.
+    key_states, value_states, query_states = _make_tensors(seed=30, seq_len=BUDGET - 1)
+
+    clone_calls = {"count": 0}
+    original_clone = torch.Tensor.clone
+
+    def counting_clone(self, *args, **kwargs):
+        clone_calls["count"] += 1
+        return original_clone(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "clone", counting_clone)
+
+    sink = []
+    with capture_update_kv(
+        kv, sink, layer_idx=0, current_position_fn=lambda: 0, should_capture=lambda pos, layer: False
+    ):
+        k_out, v_out = kv.update_kv(key_states, query_states, value_states)
+
+    assert len(sink) == 0
+    assert clone_calls["count"] == 0
+    # original method's behavior is unchanged: below-budget FakeR1KV.update_kv
+    # returns its inputs verbatim (same values, no compression).
+    assert torch.equal(k_out, key_states)
+    assert torch.equal(v_out, value_states)
+
+
+def test_should_capture_true_still_captures_exactly_as_before(monkeypatch):
+    install_fake_rkv_compression_module(monkeypatch)
+    kv = FakeR1KV(budget=BUDGET, window_size=WINDOW)
+    key_states, value_states, query_states = _make_tensors(seed=31)
+
+    sink = []
+    with capture_update_kv(
+        kv, sink, layer_idx=2, current_position_fn=lambda: 7, should_capture=lambda pos, layer: (pos, layer) == (7, 2)
+    ):
+        kv.update_kv(key_states, query_states, value_states)
+
+    assert len(sink) == 1
+    assert sink[0].had_compaction is True
+
+
+def test_should_capture_selects_exactly_the_target_event_layer_pairs(monkeypatch):
+    """Drives several calls across different (position, layer) pairs and
+    proves the sink only ever grows for the exact preselected targets --
+    never for any other call, regardless of how many non-target calls
+    happen in between."""
+    install_fake_rkv_compression_module(monkeypatch)
+    targets = {(5, 0), (12, 1)}
+
+    def should_capture(pos, layer):
+        return (pos, layer) in targets
+
+    current_position = {"pos": 0}
+    kv_by_layer = {0: FakeR1KV(budget=BUDGET, window_size=WINDOW), 1: FakeR1KV(budget=BUDGET, window_size=WINDOW)}
+    sink = []
+    with contextlib.ExitStack() as stack:
+        for layer_idx, kv in kv_by_layer.items():
+            stack.enter_context(
+                capture_update_kv(
+                    kv, sink, layer_idx=layer_idx, current_position_fn=lambda: current_position["pos"],
+                    should_capture=should_capture,
+                )
+            )
+        for pos in range(15):
+            current_position["pos"] = pos
+            for layer_idx, kv in kv_by_layer.items():
+                key_states, value_states, query_states = _make_tensors(seed=100 + pos * 2 + layer_idx)
+                kv.update_kv(key_states, query_states, value_states)
+
+    # Exactly 2 records captured -- the target-count bound, never the
+    # 15 positions x 2 layers = 30 total calls that actually happened.
+    assert len(sink) == len(targets) == 2
+
+
+def test_repeated_non_target_calls_do_not_grow_retained_state(monkeypatch):
+    install_fake_rkv_compression_module(monkeypatch)
+    kv = FakeR1KV(budget=BUDGET, window_size=WINDOW)
+    sink = []
+    with capture_update_kv(
+        kv, sink, layer_idx=0, current_position_fn=lambda: 0, should_capture=lambda pos, layer: False
+    ):
+        for i in range(50):
+            key_states, value_states, query_states = _make_tensors(seed=200 + i)
+            kv.update_kv(key_states, query_states, value_states)
+    assert len(sink) == 0
+
+
+def test_should_capture_none_preserves_capture_everything_default(monkeypatch):
+    """Backward compatibility: omitting `should_capture` entirely (the
+    default `None`) must behave EXACTLY as before this section's addition
+    -- every real call captured, unconditionally."""
+    install_fake_rkv_compression_module(monkeypatch)
+    kv = FakeR1KV(budget=BUDGET, window_size=WINDOW)
+    key_states, value_states, query_states = _make_tensors(seed=32)
+
+    sink = []
+    with capture_update_kv(kv, sink):
+        kv.update_kv(key_states, query_states, value_states)
+
+    assert len(sink) == 1

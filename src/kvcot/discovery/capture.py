@@ -146,16 +146,36 @@ def _recompute_final_score_and_indices(
 
 
 def _recomputed_kept_physical_indices(
-    recomputed_topk_indices: torch.Tensor, kv_cache_len: int, window_size: int
+    recomputed_topk_indices: torch.Tensor,
+    kv_cache_len: int,
+    window_size: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
 ) -> torch.Tensor:
     """Physical-slot indices of the kept set, IN THE SAME ORDER the real
     returned compressed cache uses: recomputed top-k (non-recent pool)
     first, then the protected recent window (`r1_kv.py`'s own
     `torch.cat([k_past_compress, k_cur], dim=2)` order) — shape
-    `(num_heads, budget)`."""
+    `(num_heads, budget)`.
+
+    `device`/`dtype` are the PROVENANCE MAP's own device/dtype (the tensor
+    this result is about to be `gather`-ed against), never assumed to match
+    `recomputed_topk_indices`'s device (Blocker: on a real CUDA compaction,
+    `recomputed_topk_indices` is a CUDA tensor produced by `.topk()` on
+    CUDA score tensors, while the provenance map -- and this function's own
+    `recent_window`, previously a bare `torch.arange(...)` that silently
+    defaulted to CPU -- can legitimately live on CPU. Both operands are
+    normalized to the provenance map's device/dtype BEFORE concatenation,
+    never the other way around (the complete provenance map is never moved
+    to CUDA merely to hide the mismatch, since it is not this function's
+    tensor to relocate) -- shape and ordering are preserved exactly."""
     num_heads = recomputed_topk_indices.shape[1]
-    recent_window = torch.arange(kv_cache_len - window_size, kv_cache_len).expand(num_heads, -1)
-    return torch.cat([recomputed_topk_indices.squeeze(0), recent_window], dim=-1)
+    physical_indices = recomputed_topk_indices.squeeze(0).to(device=device, dtype=dtype)
+    recent_window = torch.arange(kv_cache_len - window_size, kv_cache_len, device=device, dtype=dtype).expand(
+        num_heads, -1
+    )
+    return torch.cat([physical_indices, recent_window], dim=-1)
 
 
 def _build_capture_record(
@@ -318,7 +338,13 @@ def _check_observed_kept_absolute_position_parity(
             f"got {tuple(pre_event_position_map.shape)}",
         )
 
-    recomputed_physical_indices = _recomputed_kept_physical_indices(recomputed_topk_indices, kv_cache_len, window_size)
+    recomputed_physical_indices = _recomputed_kept_physical_indices(
+        recomputed_topk_indices,
+        kv_cache_len,
+        window_size,
+        device=pre_event_position_map.device,
+        dtype=pre_event_position_map.dtype,
+    )
     recomputed_absolute_positions = pre_event_position_map.gather(dim=-1, index=recomputed_physical_indices)
 
     if recomputed_absolute_positions.shape != observed.shape:
@@ -339,16 +365,49 @@ def _check_observed_kept_absolute_position_parity(
     )
 
 
+CurrentPositionFn = Callable[[], "int | None"]
+ShouldCaptureFn = Callable[[int, int], bool]
+
+
 @contextlib.contextmanager
 def capture_update_kv(
     kv_cluster,
     capture_sink: list[UpdateKvCaptureRecord],
     pre_event_position_map_fn: PositionMapFn | None = None,
+    *,
+    layer_idx: int | None = None,
+    current_position_fn: CurrentPositionFn | None = None,
+    should_capture: ShouldCaptureFn | None = None,
 ):
     """Attach the wrapper to `kv_cluster.update_kv` for the lifetime of this
-    `with` block only. Appends one `UpdateKvCaptureRecord` per call to
-    `capture_sink`. Restores the exact original bound method on exit, even
-    if the body raises.
+    `with` block only. Restores the exact original bound method on exit,
+    even if the body raises.
+
+    ## Target-only, memory-bounded capture (B1B-R2 §4)
+
+    `should_capture`, when supplied together with `layer_idx` and
+    `current_position_fn`, is called as `should_capture(position, layer_idx)`
+    immediately before each real `update_kv` call (`position` comes fresh
+    from `current_position_fn()`, called every time, never cached). When it
+    returns `False` (or when `current_position_fn` returns `None`, meaning
+    "no position available"), this wrapper calls the ORIGINAL `update_kv`
+    directly and returns its result unchanged: no input tensor is cloned, no
+    capture record is built or appended, `capture_sink` is not touched.
+    Behavior for a non-target call is therefore bit-for-bit identical to the
+    unwrapped method — the wrapper is invisible on the non-target path, not
+    merely "cheaper".
+
+    `should_capture` defaults to `None`, which preserves this function's
+    original behavior exactly: every real call is captured (used by every
+    pre-existing caller/test of this function). Passing `should_capture`
+    is how a caller bounds retained state to the number of TRUE evaluations
+    across a whole run (e.g. Pass 2's 3 preselected event/layer targets) —
+    never by the total number of decode or compaction calls, which for a
+    real generation can be orders of magnitude larger.
+
+    For a call where `should_capture` returns `True` (or is not supplied at
+    all), one `UpdateKvCaptureRecord` is appended to `capture_sink`, exactly
+    as before this section's addition.
 
     `pre_event_position_map_fn`, when supplied, is called with no arguments
     IMMEDIATELY BEFORE each real `update_kv` call and must return either
@@ -377,6 +436,13 @@ def capture_update_kv(
     had_instance_override = "update_kv" in kv_cluster.__dict__
 
     def _wrapped(key_states, query_states, value_states):
+        if should_capture is not None:
+            position = current_position_fn() if current_position_fn is not None else None
+            if position is None or layer_idx is None or not should_capture(position, layer_idx):
+                # Non-target call: the ORIGINAL method, unchanged -- no
+                # clone, no capture record, capture_sink untouched.
+                return original_update_kv(key_states, query_states, value_states)
+
         pre_key = key_states.clone()
         pre_query = query_states.clone()
         pre_value = value_states.clone()

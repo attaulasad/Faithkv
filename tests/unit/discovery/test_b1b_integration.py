@@ -1,11 +1,15 @@
-"""B1B CPU harness integration tests
-(`docs/B1A_REPAIR_AND_B1B_CPU_INTEGRATION.md` §12). Synthetic Pass 1 ->
-deterministic event/depth/head/pair plan -> token-identical Pass 2 ->
-second-or-later compaction absolute parity -> candidate/donor capture ->
-fixed-shape swap -> bridge call -> 48-token teacher-forced evaluation ->
-uncertainty lookup -> `SwapPairRecord` validation -> attrition output, all
-against injected synthetic/deterministic components. No real model is
-loaded anywhere in this file.
+"""B1B/B1B-R2 CPU harness integration tests
+(`docs/B1A_REPAIR_AND_B1B_CPU_INTEGRATION.md` §12,
+`docs/B1B_R2_REAL_MODEL_BOUNDARY_AND_B2A_PREFLIGHT.md` §12). Synthetic
+Pass 1 (one-shot prefill + one-token decode) -> deterministic event/depth/
+head/pair plan -> token-identical Pass 2 (same call-boundary split) ->
+second-or-later compaction absolute parity -> targeted, memory-bounded
+capture -> complete multi-layer `ModelStateSnapshot` per target -> candidate/
+donor capture -> fixed-shape swap on an independent snapshot clone ->
+bridge call -> 48-token teacher-forced evaluation -> uncertainty lookup ->
+`SwapPairRecord` validation -> attrition output, all against injected
+synthetic/deterministic components. No real model is loaded anywhere in
+this file.
 """
 from __future__ import annotations
 
@@ -23,11 +27,12 @@ from _synthetic_harness import (
     WINDOW,
     HarnessState,
     branch_step_fn,
+    build_snapshot_from_state,
     fresh_state_factory,
     install_fake_rkv_compression_module,
-    make_natural_step_fn,
+    make_step_fns,
 )
-from _synthetic_harness_variants import make_query_salt_step_fn, make_schedule_shifted_step_fn
+from _synthetic_harness_variants import make_query_salt_step_fns, make_schedule_shifted_step_fns
 
 from kvcot.discovery.attrition import STAGE_UNCERTAINTY_MISSING, AttritionCounters
 from kvcot.discovery.orchestrator import ExampleResult, _has_no_recorded_uncertainty_anywhere, run_example
@@ -41,6 +46,7 @@ from kvcot.discovery.pass2 import (
 from kvcot.discovery.pipeline import build_swap_pair_record
 from kvcot.discovery.sampling import IdentitySeedParts
 from kvcot.discovery.swap import SwapIndexError, apply_within_head_swap
+from kvcot.generation.state import ModelStateSnapshot
 
 PROMPT_LENGTH = 10
 DESIRED_GENERATED_LENGTH = 290
@@ -70,10 +76,11 @@ def _new_attrition_pair() -> tuple[AttritionCounters, AttritionCounters]:
     return AttritionCounters(), AttritionCounters()
 
 
-def _run_example(monkeypatch, step_fn=None, example_id="ex-1"):
+def _run_example(monkeypatch, step_fns=None, example_id="ex-1"):
     install_fake_rkv_compression_module(monkeypatch)
-    if step_fn is None:
-        step_fn = make_natural_step_fn(stop_at_predicted_position=STOP_AT)
+    if step_fns is None:
+        step_fns = make_step_fns(stop_at_predicted_position=STOP_AT)
+    prefill_fn, decode_one_fn = step_fns
     example_attrition, pair_attrition = _new_attrition_pair()
     result = run_example(
         example_id=example_id,
@@ -83,7 +90,9 @@ def _run_example(monkeypatch, step_fn=None, example_id="ex-1"):
         prompt_token_ids=PROMPT_TOKEN_IDS,
         pass1_initial_state=HarnessState(),
         pass2_initial_state_factory=fresh_state_factory(),
-        step_fn=step_fn,
+        prefill_fn=prefill_fn,
+        decode_one_fn=decode_one_fn,
+        snapshot_fn=build_snapshot_from_state,
         max_new_tokens=MAX_NEW_TOKENS,
         eos_token_id=EOS_TOKEN_ID,
         answer_fn=_always_correct,
@@ -109,7 +118,7 @@ def test_complete_valid_example_end_to_end(monkeypatch):
     assert result.invalid_stage is None
     assert result.trace.cap_hit is False
     assert result.trace.natural_answer_status == "correct"
-    assert len(result.pair_records) == 3 * 5  # 3 events x (4 cross-product + 1 mandatory no-op)
+    assert len(result.pair_records) == 3 * 5  # 3 events x (4 real cross-product swaps + 1 mandatory no-op)
 
     example_attrition.assert_consistent()
     pair_attrition.assert_consistent()
@@ -131,10 +140,11 @@ def test_complete_valid_example_end_to_end(monkeypatch):
 
 def test_multi_event_plan_has_non_identity_pre_event_map_on_a_later_event(monkeypatch):
     install_fake_rkv_compression_module(monkeypatch)
-    step_fn = make_natural_step_fn(stop_at_predicted_position=STOP_AT)
+    prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
 
     trace = run_natural_pass1(
-        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), step_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID, _always_correct
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, decode_one_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID,
+        _always_correct,
     )
     assert len(trace.compaction_events) >= 5  # plenty of events at DIVIDE_LENGTH spacing
 
@@ -143,7 +153,9 @@ def test_multi_event_plan_has_non_identity_pre_event_map_on_a_later_event(monkey
     assert plan is not None
     assert len(plan.events) == 3
 
-    pass2_result = run_pass2_capture(plan, trace.full_token_ids, HarnessState(), step_fn)
+    pass2_result = run_pass2_capture(
+        plan, trace.full_token_ids, HarnessState(), prefill_fn, decode_one_fn, build_snapshot_from_state
+    )
     assert pass2_result.valid is True
 
     non_identity_found = False
@@ -158,6 +170,8 @@ def test_multi_event_plan_has_non_identity_pre_event_map_on_a_later_event(monkey
         # being used.
         if not torch.equal(pre_map, identity_map):
             non_identity_found = True
+        assert isinstance(target_capture.pristine_snapshot, ModelStateSnapshot)
+        assert len(target_capture.pristine_snapshot.key_cache) == NUM_LAYERS
     assert non_identity_found, "expected at least one selected event's pre-event map to be non-identity"
 
 
@@ -168,9 +182,10 @@ def test_multi_event_plan_has_non_identity_pre_event_map_on_a_later_event(monkey
 
 def test_pass2_token_mismatch_invalidates_example(monkeypatch):
     install_fake_rkv_compression_module(monkeypatch)
-    step_fn = make_natural_step_fn(stop_at_predicted_position=STOP_AT)
+    prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
     trace = run_natural_pass1(
-        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), step_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID, _always_correct
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, decode_one_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID,
+        _always_correct,
     )
     plan, failure = build_pass1_plan(trace, NUM_LAYERS, NUM_HEADS, IDENTITY)
     assert plan is not None
@@ -178,7 +193,9 @@ def test_pass2_token_mismatch_invalidates_example(monkeypatch):
     corrupted_tokens = list(trace.full_token_ids)
     corrupted_tokens[50] = (corrupted_tokens[50] + 1) % 64
 
-    result = run_pass2_capture(plan, corrupted_tokens, HarnessState(), step_fn)
+    result = run_pass2_capture(
+        plan, corrupted_tokens, HarnessState(), prefill_fn, decode_one_fn, build_snapshot_from_state
+    )
     assert result.valid is False
     assert result.invalid_reason == INVALID_TOKEN_MISMATCH
     assert result.target_captures == ()
@@ -191,15 +208,21 @@ def test_pass2_token_mismatch_invalidates_example(monkeypatch):
 
 def test_compaction_position_mismatch_invalidates_example(monkeypatch):
     install_fake_rkv_compression_module(monkeypatch)
-    natural_step_fn = make_natural_step_fn(stop_at_predicted_position=STOP_AT)
+    natural_prefill_fn, natural_decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
     trace = run_natural_pass1(
-        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), natural_step_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID, _always_correct
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), natural_prefill_fn, natural_decode_one_fn, MAX_NEW_TOKENS,
+        EOS_TOKEN_ID, _always_correct,
     )
     plan, failure = build_pass1_plan(trace, NUM_LAYERS, NUM_HEADS, IDENTITY)
     assert plan is not None
 
-    shifted_step_fn = make_schedule_shifted_step_fn(schedule_offset=3, stop_at_predicted_position=STOP_AT)
-    result = run_pass2_capture(plan, trace.full_token_ids, HarnessState(), shifted_step_fn)
+    shifted_prefill_fn, shifted_decode_one_fn = make_schedule_shifted_step_fns(
+        schedule_offset=3, stop_at_predicted_position=STOP_AT
+    )
+    result = run_pass2_capture(
+        plan, trace.full_token_ids, HarnessState(), shifted_prefill_fn, shifted_decode_one_fn,
+        build_snapshot_from_state,
+    )
     assert result.valid is False
     # Under the shifted schedule, the selected event's absolute position
     # either has no capture record at all (no update_kv call happened
@@ -216,15 +239,21 @@ def test_compaction_position_mismatch_invalidates_example(monkeypatch):
 
 def test_survivor_mismatch_invalidates_example(monkeypatch):
     install_fake_rkv_compression_module(monkeypatch)
-    natural_step_fn = make_natural_step_fn(stop_at_predicted_position=STOP_AT)
+    natural_prefill_fn, natural_decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
     trace = run_natural_pass1(
-        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), natural_step_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID, _always_correct
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), natural_prefill_fn, natural_decode_one_fn, MAX_NEW_TOKENS,
+        EOS_TOKEN_ID, _always_correct,
     )
     plan, failure = build_pass1_plan(trace, NUM_LAYERS, NUM_HEADS, IDENTITY)
     assert plan is not None
 
-    diverged_step_fn = make_query_salt_step_fn(query_salt="DIFFERENT", stop_at_predicted_position=STOP_AT)
-    result = run_pass2_capture(plan, trace.full_token_ids, HarnessState(), diverged_step_fn)
+    diverged_prefill_fn, diverged_decode_one_fn = make_query_salt_step_fns(
+        query_salt="DIFFERENT", stop_at_predicted_position=STOP_AT
+    )
+    result = run_pass2_capture(
+        plan, trace.full_token_ids, HarnessState(), diverged_prefill_fn, diverged_decode_one_fn,
+        build_snapshot_from_state,
+    )
     assert result.valid is False
     assert result.invalid_reason in (
         "pass2_observed_survivor_parity_failed",
@@ -240,15 +269,17 @@ def test_survivor_mismatch_invalidates_example(monkeypatch):
 def test_missing_uncertainty_produces_explicit_missing_reason_and_attrition_signal(monkeypatch):
     result, _, _ = _run_example(monkeypatch)
     assert result.valid is True
-    target_capture = None  # rebuild one directly to control the trace
 
     install_fake_rkv_compression_module(monkeypatch)
-    step_fn = make_natural_step_fn(stop_at_predicted_position=STOP_AT)
+    prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
     trace = run_natural_pass1(
-        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), step_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID, _always_correct
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, decode_one_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID,
+        _always_correct,
     )
     plan, _ = build_pass1_plan(trace, NUM_LAYERS, NUM_HEADS, IDENTITY)
-    pass2_result = run_pass2_capture(plan, trace.full_token_ids, HarnessState(), step_fn)
+    pass2_result = run_pass2_capture(
+        plan, trace.full_token_ids, HarnessState(), prefill_fn, decode_one_fn, build_snapshot_from_state
+    )
     assert pass2_result.valid is True
     target_capture = pass2_result.target_captures[0]
     cd = target_capture.event_plan.candidate_donor_selection
@@ -281,12 +312,15 @@ def test_missing_uncertainty_produces_explicit_missing_reason_and_attrition_sign
 
 def test_noop_produces_identical_nll_and_zero_gain(monkeypatch):
     install_fake_rkv_compression_module(monkeypatch)
-    step_fn = make_natural_step_fn(stop_at_predicted_position=STOP_AT)
+    prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
     trace = run_natural_pass1(
-        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), step_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID, _always_correct
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, decode_one_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID,
+        _always_correct,
     )
     plan, _ = build_pass1_plan(trace, NUM_LAYERS, NUM_HEADS, IDENTITY)
-    pass2_result = run_pass2_capture(plan, trace.full_token_ids, HarnessState(), step_fn)
+    pass2_result = run_pass2_capture(
+        plan, trace.full_token_ids, HarnessState(), prefill_fn, decode_one_fn, build_snapshot_from_state
+    )
     target_capture = pass2_result.target_captures[0]
     donor_pos = target_capture.event_plan.candidate_donor_selection.donor_selected[0]
 
@@ -315,12 +349,15 @@ def test_noop_produces_identical_nll_and_zero_gain(monkeypatch):
 
 def test_candidate_dtype_mismatch_rejected_using_real_captured_tensors(monkeypatch):
     install_fake_rkv_compression_module(monkeypatch)
-    step_fn = make_natural_step_fn(stop_at_predicted_position=STOP_AT)
+    prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
     trace = run_natural_pass1(
-        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), step_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID, _always_correct
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, decode_one_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID,
+        _always_correct,
     )
     plan, _ = build_pass1_plan(trace, NUM_LAYERS, NUM_HEADS, IDENTITY)
-    pass2_result = run_pass2_capture(plan, trace.full_token_ids, HarnessState(), step_fn)
+    pass2_result = run_pass2_capture(
+        plan, trace.full_token_ids, HarnessState(), prefill_fn, decode_one_fn, build_snapshot_from_state
+    )
     target_capture = pass2_result.target_captures[0]
     record = target_capture.capture_record
     head = target_capture.event_plan.kv_head_index
@@ -373,3 +410,242 @@ def test_repeated_run_same_seeds_byte_identical_planning_records(monkeypatch):
     dumps_a = [r.model_dump_json() for r in result_a.pair_records]
     dumps_b = [r.model_dump_json() for r in result_b.pair_records]
     assert dumps_a == dumps_b
+
+
+# --------------------------------------------------------------------------
+# 11. Prefill/decode call-boundary contract (B1B-R2 §6)
+# --------------------------------------------------------------------------
+
+
+def test_prefill_called_exactly_once_with_complete_prompt(monkeypatch):
+    install_fake_rkv_compression_module(monkeypatch)
+    natural_prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
+
+    prefill_calls: list[list[int]] = []
+
+    def counting_prefill_fn(state, prompt_token_ids):
+        prefill_calls.append(list(prompt_token_ids))
+        return natural_prefill_fn(state, prompt_token_ids)
+
+    run_natural_pass1(
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), counting_prefill_fn, decode_one_fn, MAX_NEW_TOKENS,
+        EOS_TOKEN_ID, _always_correct,
+    )
+
+    assert len(prefill_calls) == 1
+    assert prefill_calls[0] == PROMPT_TOKEN_IDS
+
+
+def test_every_continuation_token_uses_exactly_one_decode_one_call(monkeypatch):
+    install_fake_rkv_compression_module(monkeypatch)
+    prefill_fn, natural_decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
+
+    decode_calls: list[int] = []
+
+    def counting_decode_one_fn(state, token_id):
+        decode_calls.append(token_id)
+        return natural_decode_one_fn(state, token_id)
+
+    trace = run_natural_pass1(
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, counting_decode_one_fn, MAX_NEW_TOKENS,
+        EOS_TOKEN_ID, _always_correct,
+    )
+
+    assert len(decode_calls) == len(trace.generated_token_ids)
+    assert decode_calls == list(trace.generated_token_ids)
+
+
+def test_pass1_and_pass2_have_identical_call_boundary_traces(monkeypatch):
+    install_fake_rkv_compression_module(monkeypatch)
+    prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
+
+    pass1_prefill_calls: list[list[int]] = []
+    pass1_decode_calls: list[int] = []
+
+    def pass1_prefill(state, prompt_token_ids):
+        pass1_prefill_calls.append(list(prompt_token_ids))
+        return prefill_fn(state, prompt_token_ids)
+
+    def pass1_decode(state, token_id):
+        pass1_decode_calls.append(token_id)
+        return decode_one_fn(state, token_id)
+
+    trace = run_natural_pass1(
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), pass1_prefill, pass1_decode, MAX_NEW_TOKENS, EOS_TOKEN_ID,
+        _always_correct,
+    )
+    plan, _ = build_pass1_plan(trace, NUM_LAYERS, NUM_HEADS, IDENTITY)
+
+    pass2_prefill_calls: list[list[int]] = []
+    pass2_decode_calls: list[int] = []
+
+    def pass2_prefill(state, prompt_token_ids):
+        pass2_prefill_calls.append(list(prompt_token_ids))
+        return prefill_fn(state, prompt_token_ids)
+
+    def pass2_decode(state, token_id):
+        pass2_decode_calls.append(token_id)
+        return decode_one_fn(state, token_id)
+
+    pass2_result = run_pass2_capture(
+        plan, trace.full_token_ids, HarnessState(), pass2_prefill, pass2_decode, build_snapshot_from_state
+    )
+    assert pass2_result.valid is True
+
+    assert pass1_prefill_calls == pass2_prefill_calls  # identical single-call boundary, identical content
+    assert pass1_decode_calls == pass2_decode_calls  # identical per-token call sequence
+
+
+def test_uncertainty_derived_from_prefill_logits_not_repeated_decode_calls(monkeypatch):
+    """Prompt-position uncertainty (`predicted_position` in
+    `[1, prompt_length]`) must come from `prefill_fn`'s own
+    `per_position_logits`, never from any `decode_one_fn` call -- there is
+    no `decode_one_fn` call at all for those positions."""
+    install_fake_rkv_compression_module(monkeypatch)
+    prefill_fn, natural_decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
+
+    decode_calls: list[int] = []
+
+    def counting_decode_one_fn(state, token_id):
+        decode_calls.append(token_id)
+        return natural_decode_one_fn(state, token_id)
+
+    trace = run_natural_pass1(
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, counting_decode_one_fn, MAX_NEW_TOKENS,
+        EOS_TOKEN_ID, _always_correct,
+    )
+    for predicted_position in range(1, PROMPT_LENGTH + 1):
+        assert predicted_position in trace.uncertainty_by_position
+    # None of those prompt-position entries required any decode call --
+    # the first decode call only happens for predicted_position ==
+    # prompt_length + 1 onward.
+    assert len(decode_calls) == len(trace.generated_token_ids)
+
+
+def test_replay_token_mismatch_causes_hard_failure_not_silent_repair(monkeypatch):
+    install_fake_rkv_compression_module(monkeypatch)
+    prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
+    trace = run_natural_pass1(
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, decode_one_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID,
+        _always_correct,
+    )
+    plan, _ = build_pass1_plan(trace, NUM_LAYERS, NUM_HEADS, IDENTITY)
+
+    wrong_length_tokens = list(trace.full_token_ids) + [0]
+    result = run_pass2_capture(
+        plan, wrong_length_tokens, HarnessState(), prefill_fn, decode_one_fn, build_snapshot_from_state
+    )
+    assert result.valid is False
+    assert result.invalid_reason == INVALID_TOKEN_MISMATCH
+
+
+# --------------------------------------------------------------------------
+# 12. Prefill-phase events are never eligible targets (B1B-R2 §5/§6)
+# --------------------------------------------------------------------------
+
+
+def test_prefill_phase_compaction_events_are_never_eligible(monkeypatch):
+    install_fake_rkv_compression_module(monkeypatch)
+    prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
+    trace = run_natural_pass1(
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, decode_one_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID,
+        _always_correct,
+    )
+    from kvcot.discovery.pass1 import eligible_event_ids
+
+    eligible = eligible_event_ids(trace)
+    event_by_id = {ev.compaction_event_id: ev for ev in trace.compaction_events}
+    for event_id in eligible:
+        assert event_by_id[event_id].absolute_event_position >= trace.prompt_length
+
+
+# --------------------------------------------------------------------------
+# 13. Baseline/swapped branch evaluation order cannot contaminate results
+#     (B1B-R2 §5, requirement 7)
+# --------------------------------------------------------------------------
+
+
+def test_branch_evaluation_order_does_not_change_results(monkeypatch):
+    from kvcot.discovery.branch_eval import evaluate_branch
+
+    result, _, _ = _run_example(monkeypatch)
+    assert result.valid is True
+
+    install_fake_rkv_compression_module(monkeypatch)
+    prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
+    trace = run_natural_pass1(
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, decode_one_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID,
+        _always_correct,
+    )
+    plan, _ = build_pass1_plan(trace, NUM_LAYERS, NUM_HEADS, IDENTITY)
+    pass2_result = run_pass2_capture(
+        plan, trace.full_token_ids, HarnessState(), prefill_fn, decode_one_fn, build_snapshot_from_state
+    )
+    target_capture = pass2_result.target_captures[0]
+    pristine = target_capture.pristine_snapshot
+    baseline_snapshot = pristine.clone()
+    swapped_snapshot = pristine.clone()
+    swapped_snapshot.key_cache[target_capture.event_plan.layer_index][0, 0, 0, :] = -1.0
+
+    bridge_token_id = 7
+    reference_token_ids = list(range(48))
+
+    baseline_first = evaluate_branch(branch_step_fn, baseline_snapshot.clone(), bridge_token_id, reference_token_ids)
+    swapped_first_a = evaluate_branch(branch_step_fn, swapped_snapshot.clone(), bridge_token_id, reference_token_ids)
+    # Reversed call order:
+    swapped_first_b = evaluate_branch(branch_step_fn, swapped_snapshot.clone(), bridge_token_id, reference_token_ids)
+    baseline_second = evaluate_branch(branch_step_fn, baseline_snapshot.clone(), bridge_token_id, reference_token_ids)
+
+    assert baseline_first.per_token_nll == baseline_second.per_token_nll
+    assert swapped_first_a.per_token_nll == swapped_first_b.per_token_nll
+
+
+# --------------------------------------------------------------------------
+# 14. Incomplete (one-layer) branch state is rejected (B1B-R2 §5)
+# --------------------------------------------------------------------------
+
+
+def test_incomplete_one_layer_snapshot_is_rejected(monkeypatch):
+    """A `pristine_snapshot` truncated to one layer (mimicking the
+    pre-repair bug: one layer's returned K/V standing in for the whole
+    model's state) must be rejected when the target event's layer_index
+    requires a different layer -- `apply_within_head_swap`'s own
+    out-of-range check catches this, surfaced as a branch-evaluation
+    failure rather than silently swapping the wrong layer."""
+    import dataclasses as dc
+
+    install_fake_rkv_compression_module(monkeypatch)
+    prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
+    trace = run_natural_pass1(
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, decode_one_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID,
+        _always_correct,
+    )
+    plan, _ = build_pass1_plan(trace, NUM_LAYERS, NUM_HEADS, IDENTITY)
+    pass2_result = run_pass2_capture(
+        plan, trace.full_token_ids, HarnessState(), prefill_fn, decode_one_fn, build_snapshot_from_state
+    )
+    target_capture = next(tc for tc in pass2_result.target_captures if tc.event_plan.layer_index != 0)
+
+    truncated_snapshot = dc.replace(
+        target_capture.pristine_snapshot,
+        key_cache=[target_capture.pristine_snapshot.key_cache[0]],
+        value_cache=[target_capture.pristine_snapshot.value_cache[0]],
+    )
+    truncated_capture = dc.replace(target_capture, pristine_snapshot=truncated_snapshot)
+
+    cd = truncated_capture.event_plan.candidate_donor_selection
+    evicted_pos, donor_pos = cd.cross_product[0]
+
+    pair_result = build_swap_pair_record(
+        example_id="ex-1",
+        model_revision="rev-a",
+        rkv_revision="rkv-rev",
+        target_capture=truncated_capture,
+        evicted_absolute_position=evicted_pos,
+        donor_absolute_position=donor_pos,
+        trace=trace,
+        branch_step_fn=branch_step_fn,
+    )
+    assert pair_result.record is None
+    assert pair_result.failure_stage == "branch_evaluation_failure"
+    assert "swap_failed" in pair_result.failure_detail

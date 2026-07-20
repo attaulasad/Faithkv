@@ -39,7 +39,16 @@ def test_real_config_file_loads_and_validates():
     assert config.model.name == "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
     assert config.model.revision == VALID_REVISION
     assert config.rkv.budget == 1024
-    assert config.dataset.revision_is_frozen is False
+    # B1B-R2 §8: the MATH-500 dataset revision is now independently
+    # verified and frozen -- no longer the pre-B1B-R2 unresolved gap.
+    assert config.dataset.revision_is_frozen is True
+    assert config.dataset.revision == "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be"
+    assert config.dataset.config == "default"
+    assert config.dataset.split == "test"
+    assert config.generation.generation_mode == "greedy"
+    assert config.generation.do_sample is False
+    assert config.generation.max_new_tokens == 6144
+    assert config.generation.batch_size == 1
 
 
 @pytest.mark.parametrize("field_path", [("model", "revision"), ("model", "tokenizer_revision")])
@@ -130,3 +139,70 @@ def test_validate_full_revision_helper_directly():
     for bad in ("main", "latest", None, VALID_REVISION[:10], "", "G" * 40):
         with pytest.raises(ValueError):
             validate_full_revision(bad, "x")
+
+
+@pytest.mark.parametrize("bad_revision", ["main", "latest", "G" * 40, "short"])
+def test_dataset_revision_rejects_non_full_hash_when_present(bad_revision):
+    kwargs = copy.deepcopy(_base_kwargs())
+    kwargs["dataset"]["revision"] = bad_revision
+    with pytest.raises(ValidationError):
+        DiscoveryConfig(**kwargs)
+
+
+def test_generation_lock_defaults_are_frozen_and_deterministic():
+    from kvcot.discovery.discovery_config import DiscoveryGenerationLock
+
+    generation = DiscoveryGenerationLock()
+    assert generation.generation_mode == "greedy"
+    assert generation.do_sample is False
+    assert generation.temperature is None
+    assert generation.top_p is None
+    assert generation.batch_size == 1
+    assert generation.max_new_tokens == 6144
+    assert generation.framework_seed == 13
+    assert generation.no_offload_required is True
+
+
+def test_generation_config_hash_is_stable_and_sensitive_to_changes():
+    from kvcot.discovery.discovery_config import DiscoveryGenerationLock, generation_config_hash
+
+    a = generation_config_hash(DiscoveryGenerationLock())
+    b = generation_config_hash(DiscoveryGenerationLock())
+    assert a == b
+    changed = generation_config_hash(DiscoveryGenerationLock(max_new_tokens=100))
+    assert changed != a
+
+
+def test_rkv_config_hash_is_stable_and_sensitive_to_changes():
+    from kvcot.discovery.discovery_config import rkv_config_hash
+
+    kwargs = _base_kwargs()
+    config_a = DiscoveryConfig(**kwargs)
+    config_b = DiscoveryConfig(**copy.deepcopy(kwargs))
+    assert rkv_config_hash(config_a.rkv) == rkv_config_hash(config_b.rkv)
+
+    kwargs2 = copy.deepcopy(kwargs)
+    kwargs2["rkv"]["budget"] = 2048
+    config_c = DiscoveryConfig(**kwargs2)
+    assert rkv_config_hash(config_c.rkv) != rkv_config_hash(config_a.rkv)
+
+
+def test_prompt_template_hash_is_stable_and_pure_python():
+    from kvcot.discovery.discovery_config import prompt_template_hash
+
+    assert prompt_template_hash() == prompt_template_hash()
+    assert len(prompt_template_hash()) == 64
+
+
+def test_canonical_config_hash_changes_when_any_input_changes():
+    from kvcot.discovery.discovery_config import canonical_config_hash
+
+    config = load_discovery_config("configs/discovery/llama8b_math500_b1024.yaml")
+    base_hash = canonical_config_hash(config)
+    assert canonical_config_hash(config) == base_hash  # stable across repeated calls
+
+    kwargs = copy.deepcopy(_base_kwargs())
+    kwargs["dataset"]["revision"] = "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be"
+    kwargs["rkv"]["budget"] = 2048  # actually differs from the real config's budget=1024
+    changed_config = DiscoveryConfig(**kwargs)
+    assert canonical_config_hash(changed_config) != base_hash

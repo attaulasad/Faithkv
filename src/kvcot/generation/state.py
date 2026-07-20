@@ -15,6 +15,7 @@ from `kvcot.analysis`.
 """
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
 
@@ -169,3 +170,36 @@ class ModelStateSnapshot:
     # stale list would corrupt the *next* real compaction event's absolute-
     # position remapping on the second branch.
     kv_cluster_bookkeeping_per_layer: list[dict[str, Any]] | None = None
+
+    def clone(self) -> "ModelStateSnapshot":
+        """An independent deep copy — every tensor `.clone()`d, every
+        container deep-copied, never a view/alias onto `self`'s own storage
+        (`docs/B1B_R2_REAL_MODEL_BOUNDARY_AND_B2A_PREFLIGHT.md` §5: "No
+        storage alias may exist between pristine, baseline, and swapped
+        mutable tensors"). Added for B1B-R2's discovery-harness branch
+        construction (`kvcot.discovery.pipeline.build_swap_pair_record`),
+        which needs two independently-mutable working copies (baseline,
+        swapped) from one pristine post-event snapshot without a live
+        model/cache to restore into — the pre-existing `capture_snapshot`/
+        `restore_snapshot` pair in `kvcot.generation.replay` remains the
+        only path for the PRIMARY pipeline, which always has a live model
+        and cache to restore state into; this method fills the one gap
+        that pair does not cover (a snapshot-to-snapshot clone with no live
+        model in the loop at all)."""
+        return ModelStateSnapshot(
+            key_cache=[t.clone() for t in self.key_cache],
+            value_cache=[t.clone() for t in self.value_cache],
+            query_cache={i: t.clone() for i, t in self.query_cache.items()},
+            compression_flags_per_layer=list(self.compression_flags_per_layer),
+            model_length=self.model_length,
+            after_think=self.after_think,
+            compaction_event_steps=list(self.compaction_event_steps),
+            tokens_since_last_compaction=self.tokens_since_last_compaction,
+            absolute_position=self.absolute_position,
+            provenance=self.provenance.clone() if self.provenance is not None else None,
+            kv_cluster_bookkeeping_per_layer=(
+                copy.deepcopy(self.kv_cluster_bookkeeping_per_layer)
+                if self.kv_cluster_bookkeeping_per_layer is not None
+                else None
+            ),
+        )

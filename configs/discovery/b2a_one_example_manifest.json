@@ -1,0 +1,11 @@
+{
+  "dataset_repo": "HuggingFaceH4/MATH-500",
+  "dataset_config": "default",
+  "dataset_split": "test",
+  "dataset_revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be",
+  "example_index": 0,
+  "unique_id": "test/precalculus/807.json",
+  "raw_content_hash": "0fea4410b42518afa81f3cc6458db017a4091d480b93367ba57794d194c0a991",
+  "prompt_token_ids_sha256": null,
+  "tokenizer_revision_used_for_prompt_hash": null
+}
