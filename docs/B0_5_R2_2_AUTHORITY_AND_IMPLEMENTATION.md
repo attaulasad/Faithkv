@@ -1,5 +1,17 @@
 # B0.5-R2.2 — Authority reconciliation and B1A CPU prerequisite implementation
 
+> **Superseded in part, 2026-07-20:** `docs/B1A_REPAIR_AND_B1B_CPU_INTEGRATION.md`
+> repairs six defects found in this pass's B1A implementation during
+> independent review, and adds a new, dated `CLAUDE.md` §1b/§4b exception
+> that narrowly authorizes bounded B1B CPU-harness **architecture** work
+> (still no GPU, no inference, no method). Everything below this notice
+> remains the accurate historical record of what THIS pass (B0.5-R2.2)
+> implemented and authorized — it is not rewritten. Statements below that
+> B1B "is not authorized"/"remains blocked" describe the state as of
+> 2026-07-19, before the 2026-07-20 §1b/§4b exception narrowly authorized
+> the CPU-harness-architecture subset of B1B; B2A, B2B, and Vast.ai remain
+> unauthorized by both documents.
+
 Phase B0.5-R2.2 artifact (2026-07-19). Branch
 `research/b1a-cpu-prerequisites-r2-2`, cut from
 `research/b0-5-r2-dense-cache-repair` at commit

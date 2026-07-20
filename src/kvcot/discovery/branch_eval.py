@@ -18,7 +18,8 @@ from typing import Any, Callable, Sequence
 
 import torch
 
-SCORED_HORIZON = 48
+from kvcot.discovery.constants import SCORED_HORIZON
+from kvcot.discovery.nll import mean_nll
 
 StepFn = Callable[[Any, int], tuple[torch.Tensor, Any]]
 
@@ -59,9 +60,11 @@ def evaluate_branch(step_fn: StepFn, initial_cache_state: Any, bridge_token_id: 
             # model's own prediction) to advance to the next step's logits.
             logits, cache_state = step_fn(cache_state, target_token_id)
 
-    mean_nll = sum(per_token_nll) / len(per_token_nll)
     return BranchEvalResult(
-        per_token_nll=per_token_nll, per_token_logits=per_token_logits, mean_nll=mean_nll, final_cache_state=cache_state
+        per_token_nll=per_token_nll,
+        per_token_logits=per_token_logits,
+        mean_nll=mean_nll(per_token_nll),
+        final_cache_state=cache_state,
     )
 
 

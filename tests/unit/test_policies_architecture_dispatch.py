@@ -32,15 +32,34 @@ class _FakeConfig:
         self._updates.append(dict(d))
 
 
+class _FakeParam:
+    def __init__(self, device_type: str = "cuda"):
+        # `types.SimpleNamespace(type=...)` rather than `torch.device(...)`:
+        # constructing a real `torch.device("cuda")` object does not require
+        # a CUDA-enabled build, but keeping this fake decoupled from torch's
+        # device validation entirely is simpler and matches _FakeDevice in
+        # tests/unit/discovery/test_no_offload.py.
+        self.device = types.SimpleNamespace(type=device_type)
+
+
 class _FakeModel:
     def __init__(self):
         self.eval_called = False
         self.config = _FakeConfig("irrelevant-post-construction")
         self.device = torch.device("cpu")
+        self._fake_params = {"layer0.weight": _FakeParam("cuda"), "layer1.weight": _FakeParam("cuda")}
 
     def eval(self):
         self.eval_called = True
         return self
+
+    def named_parameters(self):
+        # Blocker 1 repair: policy.load() now calls
+        # assert_no_offloaded_parameters(model) unconditionally, so every
+        # fake model used by these construction-parity tests must expose a
+        # real (all-cuda) named_parameters() iterator, matching
+        # torch.nn.Module's real interface.
+        return iter(self._fake_params.items())
 
 
 @pytest.fixture

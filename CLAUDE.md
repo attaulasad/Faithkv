@@ -78,6 +78,41 @@ not a redefinition of §1:
   `docs/B0_5_R2_1_FINAL_PROTOCOL.md` and
   `docs/B0_5_R2_2_AUTHORITY_AND_IMPLEMENTATION.md`, nothing broader.
 
+### Section 1b — Bounded B1B CPU-harness-architecture exception (dated 2026-07-20, B1B-R1)
+
+Added by `docs/B1A_REPAIR_AND_B1B_CPU_INTEGRATION.md`, superseding nothing
+above and nothing in §1a — the original Qwen-1.5B/GSM8K pipeline and the
+Llama-8B/MATH-500 B1A CPU-prerequisite exception are both unchanged. §1a
+stated that "a separate, explicit, future authorization is still required
+before B2A ... or any B1B/B2B discovery-pilot activity". This subsection is
+that separate, dated, explicit authorization — narrow, and only for what is
+listed below:
+
+- Authorizes CPU-side implementation of the **B1B harness architecture
+  only**: Pass-1 natural-run bookkeeping contracts, Pass-2 token-identical
+  replay/capture orchestration, branch construction and evaluation wiring,
+  and attrition accounting — built with **dependency-injected synthetic and
+  deterministic components exercised only in CPU tests**, never against a
+  real model, real weights, or a real dataset.
+- Authorizes a CPU-only `kvcot plan-discovery --dry-run` planning command
+  and a documentation/validation-only future one-example B2A contract
+  (schema and hard-stop-condition definitions; the contract is never
+  executed by this exception).
+- **No model inference or GPU use is authorized by this amendment.** No
+  line item above ever loads a real model, a real tokenizer, or a real
+  dataset; every path exercised by this exception's tests uses injected
+  fakes only.
+- Does **not** authorize B2A (one-example GPU calibration) or B2B (the
+  bounded discovery pilot) execution — both still require their own
+  separate, future, dated authorization, exactly as §1a already stated.
+  Does not authorize any Vast.ai or other GPU-host activity of any kind.
+- This repository still contains **no final faithfulness-aware compression
+  method** and this exception implements **no learned eviction policy** —
+  it is harness plumbing only, never a method.
+- Does not weaken, narrow, or reinterpret any prohibition in §1 or §1a
+  (vLLM, SGLang, multi-GPU, an LLM judge, a benchmark suite, KIVI, mistake
+  insertion, or any method implementation remain fully prohibited).
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.
@@ -133,6 +168,21 @@ Any GPU run under this exception requires its own separate, future, dated
 authorization (B2A calibration at minimum) — this table only unblocks the
 CPU-side code listed above from contradicting §1's/§4's original blanket
 freeze.
+
+### Section 4b — Bounded B1B CPU-harness-architecture exception (dated 2026-07-20, B1B-R1)
+
+**No row in the §4/§4a tables above is changed.** `configs/lock.yaml` is
+**not** changed by this exception; `configs/discovery/llama8b_math500_b1024.yaml`
+is a separate, discovery-track-only file this exception adds, never merged
+into `configs/lock.yaml`.
+
+| Item | B1B-harness-only value |
+|---|---|
+| Scope | CPU-side harness architecture only: Pass-1/Pass-2 orchestration, branch construction/evaluation, attrition accounting, `plan-discovery --dry-run`, future B2A contract (documentation/validation only) |
+| Component wiring | Dependency-injected synthetic/deterministic components in CPU tests only |
+| GPU/inference authorization | **None.** Not granted by this table or this document. |
+| Method authorization | **None.** No compression policy or learned eviction policy is implemented under this exception. |
+| B2A/B2B execution | **Not authorized.** Requires its own separate, future, dated authorization. |
 
 ## Section 8 — Metrics and statistics
 

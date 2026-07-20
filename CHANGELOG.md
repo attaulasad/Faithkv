@@ -5,6 +5,71 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-20 — Phase B1B-R1: B1A defect repairs and B1B CPU harness architecture integration (no GPU used, no model inference, no model weights or datasets downloaded, no manifest/result directory created; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; PR #16 merge not undone)
+
+Run on branch `research/b1b-cpu-harness-and-b1a-repairs`, cut from
+`research/b1a-cpu-prerequisites-r2-2` at commit
+`887cd0fe89486e44db973fdd1f1133d75244fb24`. Full detail:
+`docs/B1A_REPAIR_AND_B1B_CPU_INTEGRATION.md`.
+
+**Authorization.** New, dated `CLAUDE.md` §1b/§4b exception (mirroring the
+§1a/§4a pattern already used for B1A) narrowly authorizes CPU-side B1B
+**harness architecture** — Pass 1/Pass 2 orchestration, branch
+construction/evaluation, attrition accounting, `plan-discovery --dry-run`,
+and a documentation-only future B2A contract — built and exercised
+exclusively against dependency-injected synthetic/deterministic components
+in CPU tests. Grants no model inference or GPU use; does not authorize B2A/
+B2B execution or any Vast.ai activity, each still requiring its own
+separate, future, dated authorization; implements no method.
+
+**Six B1A blocker repairs** (found during independent review of PR #16):
+(1) the no-offload assertion is now called unconditionally in both
+`FullKVPolicy.load` and `_PatchedPolicyBase.load`, never gated behind
+`model.device.type == "cuda"`, and now also inspects `hf_device_map` for
+`cpu`/`disk`/`meta` entries and rejects a zero-parameter model; (2)
+absolute survivor parity in `kvcot.discovery.capture` now runs at EVERY
+compaction event (not just the first) via a caller-supplied pre-event
+absolute-position-map thunk, compared with exact shape equality and
+`torch.equal`, never set equality; (3) the active discovery schema
+(`kvcot.discovery.schemas.SwapPairRecord`) now closes every internal-
+consistency gap named in review — missing-reason fields for each
+uncertainty source, a parity-consistency biconditional, canonical
+score-margin/swap-gain derived-value validation
+(`kvcot.discovery.nll.mean_nll`, one tolerance, one helper, reused by both
+producer and validator), and a fully-strengthened no-op control; (4)
+`kvcot.discovery.swap.apply_within_head_swap` now rejects dtype/device
+mismatches before any write and detects storage overlap via
+`untyped_storage().data_ptr()` identity (catching offset views a
+starting-address-only check would miss); (5)
+`kvcot.discovery.uncertainty`'s two scalar functions now require
+`raw_logits.ndim == 1`, raising rather than silently flattening/reducing a
+malformed-rank input; (6)
+`configs/discovery/llama8b_math500_b1024.yaml` freezes the Llama-8B
+revision resolved via the HF metadata API
+(`6a6f4aa4197940add57724a7707d069478df56b1`, verified against the value
+this pass was required to freeze exactly), with the dataset revision
+deliberately left unfrozen and machine-checkably so
+(`kvcot.discovery.discovery_config`).
+
+**B1B CPU harness architecture integration:** `kvcot.discovery.pass1`
+(natural-run bookkeeping, outcome-blind eligibility/selection built
+entirely on the already-tested `kvcot.discovery.sampling` draws),
+`kvcot.discovery.pass2` (token-identical replay, targeted capture,
+cross-pass survivor-identity checking), `kvcot.discovery.pipeline` (branch
+construction/evaluation and `SwapPairRecord` assembly),
+`kvcot.discovery.attrition` (denominator-consistency-checked funnel
+accounting), `kvcot.discovery.orchestrator` (end-to-end wiring),
+`kvcot.discovery.b2a_contract` (future one-example B2A contract,
+documentation/validation only), and `kvcot plan-discovery --dry-run`. 10
+synthetic CPU integration test scenarios (`tests/unit/discovery/
+test_b1b_integration.py`) exercise the complete injected orchestration
+end to end, including a real multi-event non-identity absolute-position
+map, deliberately-diverged replay step functions proving trajectory/
+survivor mismatches are actually detected, the mandatory no-op control,
+and byte-identical repeated-run determinism. No discovery hypothesis
+result exists — none is claimed. B2A, B2B, and any Vast.ai activity remain
+unauthorized.
+
 ## 2026-07-19 — Phase B0.5-R2.2: authority reconciliation and B1A CPU prerequisite implementation (no GPU used, no model inference, no model weights or datasets downloaded, no MATH-500 manifest/result directory created; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged)
 
 Run on branch `research/b1a-cpu-prerequisites-r2-2`, cut from

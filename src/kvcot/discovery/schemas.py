@@ -31,16 +31,33 @@ from __future__ import annotations
 
 import math
 import re
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from kvcot.discovery.constants import SCORED_HORIZON
+from kvcot.discovery.nll import mean_nll
+
 DISCOVERY_SCHEMA_VERSION = "b0_5_r2_2.v1"
-SCORED_HORIZON = 48
 UNCERTAINTY_SIGNAL_SOURCE = "raw_next_token_logits_at_token_prediction_time"
 
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+
+# ONE documented absolute tolerance for every serialized-derived-float
+# comparison in this schema (Blocker 3: "use exactly one documented
+# absolute tolerance ... use the same helper everywhere, do not scatter
+# independent formulas"). Applies to entropy_diff/logit_margin_diff,
+# score_margin_e_minus_r, and swap_gain consistency checks alike.
 _FLOAT_DIFF_TOLERANCE = 1e-9
+
+
+def _close(a: float, b: float) -> bool:
+    """The one comparison helper every derived-float check in this schema
+    uses. Deliberately `False` (never a silent pass) when either side is
+    non-finite -- a NaN/inf derived value cannot be meaningfully compared
+    against a tolerance and must be judged by the finiteness checks
+    instead, never by this helper claiming a spurious match."""
+    return math.isfinite(a) and math.isfinite(b) and abs(a - b) <= _FLOAT_DIFF_TOLERANCE
 
 
 class SwapPairRecord(BaseModel):
@@ -90,11 +107,19 @@ class SwapPairRecord(BaseModel):
     value_norm_diff: float
 
     # --- entropy / logit-margin: source values AND difference (Part IV.8 — never diff-only) ---
+    # Blocker 3: each source value carries an explicit missing-reason
+    # sibling field. Exactly one of (value present, missing_reason=None) /
+    # (value=None, missing_reason non-empty) must hold for each -- a record
+    # can never claim both a value AND a reason it's missing, nor neither.
     entropy_e: float | None = None
+    entropy_e_missing_reason: str | None = None
     entropy_r: float | None = None
+    entropy_r_missing_reason: str | None = None
     entropy_diff: float | None = None
     logit_margin_e: float | None = None
+    logit_margin_e_missing_reason: str | None = None
     logit_margin_r: float | None = None
+    logit_margin_r_missing_reason: str | None = None
     logit_margin_diff: float | None = None
     uncertainty_signal_source: Literal["raw_next_token_logits_at_token_prediction_time"] = UNCERTAINTY_SIGNAL_SOURCE
 
@@ -173,17 +198,103 @@ class SwapPairRecord(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _noop_requires_matching_identity(self) -> "SwapPairRecord":
-        if self.is_noop_control and self.evicted_absolute_token_position != self.retained_absolute_token_position:
+    def _parity_consistency(self) -> "SwapPairRecord":
+        # Biconditional: parity_check_passed and parity_failure_reason must
+        # never disagree about whether parity actually failed.
+        if self.parity_check_passed and self.parity_failure_reason is not None:
+            raise ValueError("parity_check_passed=True requires parity_failure_reason=None")
+        if not self.parity_check_passed and not self.parity_failure_reason:
+            raise ValueError("parity_check_passed=False requires a non-empty parity_failure_reason")
+        # A valid record can never carry a failed parity check, and a
+        # failed parity check can never be reported on a valid record --
+        # the schema must reject either half of that contradiction outright
+        # rather than silently accepting an internally-inconsistent record.
+        if self.valid_flag and not self.parity_check_passed:
+            raise ValueError("valid_flag=True is incompatible with parity_check_passed=False")
+        if not self.parity_check_passed and "parity" not in (self.invalid_reason or "").lower():
             raise ValueError(
-                "is_noop_control=True requires candidate and donor token identity to match "
-                "(evicted_absolute_token_position == retained_absolute_token_position)"
+                "parity_check_passed=False requires invalid_reason to identify the parity failure "
+                f"(got invalid_reason={self.invalid_reason!r})"
             )
         return self
 
     @model_validator(mode="after")
+    def _score_margin_consistency(self) -> "SwapPairRecord":
+        expected = self.score_e - self.score_r
+        if not _close(self.score_margin_e_minus_r, expected):
+            raise ValueError(
+                f"score_margin_e_minus_r ({self.score_margin_e_minus_r!r}) must equal "
+                f"score_e - score_r ({expected!r})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _swap_gain_consistency(self) -> "SwapPairRecord":
+        # Canonical mean-NLL helper (kvcot.discovery.nll.mean_nll) -- the
+        # SAME function kvcot.discovery.branch_eval's producer path uses --
+        # never a second, independently-written formula here. Skipped only
+        # when the NLL arrays themselves are non-finite (an invalid
+        # record's placeholder values, already governed by
+        # _nll_finiteness_for_valid_records) or swap_gain itself is
+        # non-finite -- a NaN/inf value cannot be meaningfully compared and
+        # must be judged by finiteness rules, never by this check silently
+        # accepting it as "close enough".
+        baseline_mean = mean_nll(self.baseline_per_token_nll)
+        swapped_mean = mean_nll(self.swapped_per_token_nll)
+        if math.isfinite(baseline_mean) and math.isfinite(swapped_mean) and math.isfinite(self.swap_gain):
+            expected = baseline_mean - swapped_mean
+            if not _close(self.swap_gain, expected):
+                raise ValueError(f"swap_gain ({self.swap_gain!r}) must equal mean(baseline) - mean(swapped) ({expected!r})")
+        return self
+
+    @model_validator(mode="after")
+    def _noop_invariants(self) -> "SwapPairRecord":
+        if not self.is_noop_control:
+            return self
+        if self.evicted_absolute_token_position != self.retained_absolute_token_position:
+            raise ValueError(
+                "is_noop_control=True requires candidate and donor token identity to match "
+                "(evicted_absolute_token_position == retained_absolute_token_position)"
+            )
+        if self.baseline_per_token_nll != self.swapped_per_token_nll:
+            # Element-by-element EXACT equality (Python list `==`) --
+            # deliberately never `math.isclose`/`allclose`: a genuine no-op
+            # swap (writing back exactly what was already there) must
+            # reproduce bit-for-bit identical logits and therefore identical
+            # NLL, not merely "close" NLL.
+            raise ValueError("is_noop_control=True requires baseline_per_token_nll == swapped_per_token_nll exactly")
+        if not _close(self.swap_gain, 0.0):
+            raise ValueError(f"is_noop_control=True requires swap_gain == 0.0, got {self.swap_gain!r}")
+        if self.net_physical_bytes_changed != 0:
+            raise ValueError("is_noop_control=True requires net_physical_bytes_changed == 0")
+        if not self.parity_check_passed:
+            raise ValueError("is_noop_control=True requires parity_check_passed == True")
+        if not self.valid_flag:
+            raise ValueError("is_noop_control=True requires valid_flag == True")
+        return self
+
+    # Every mandatory (always-present, non-Optional) numeric field on a
+    # valid record must be finite -- an invalid record may legitimately
+    # carry NaN/inf placeholders for a failed computation, but a valid one
+    # never should.
+    _MANDATORY_NUMERIC_FIELDS: ClassVar[tuple[str, ...]] = (
+        "score_e",
+        "score_r",
+        "score_margin_e_minus_r",
+        "attention_component_diff",
+        "similarity_component_diff",
+        "key_norm_diff",
+        "value_norm_diff",
+        "swap_gain",
+    )
+
+    @model_validator(mode="after")
     def _nll_finiteness_for_valid_records(self) -> "SwapPairRecord":
         if self.valid_flag:
+            for name in self._MANDATORY_NUMERIC_FIELDS:
+                value = getattr(self, name)
+                if not math.isfinite(value):
+                    raise ValueError(f"{name} must be finite for a valid record, got {value!r}")
             for name in ("baseline_per_token_nll", "swapped_per_token_nll"):
                 values = getattr(self, name)
                 if not all(math.isfinite(v) for v in values):
@@ -191,13 +302,36 @@ class SwapPairRecord(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _uncertainty_source_and_missing_reason_exclusivity(self) -> "SwapPairRecord":
+        # Blocker 3: for each of the four source signals, exactly one of
+        # (value present, missing_reason=None) / (value=None, missing_reason
+        # non-empty) must hold -- never both present, never both absent.
+        for value_field, reason_field in (
+            ("entropy_e", "entropy_e_missing_reason"),
+            ("entropy_r", "entropy_r_missing_reason"),
+            ("logit_margin_e", "logit_margin_e_missing_reason"),
+            ("logit_margin_r", "logit_margin_r_missing_reason"),
+        ):
+            value = getattr(self, value_field)
+            reason = getattr(self, reason_field)
+            if value is not None and reason is not None:
+                raise ValueError(f"{value_field} and {reason_field} cannot both be set on the same record")
+            if value is None and not reason:
+                raise ValueError(f"{value_field}=None requires a non-empty {reason_field}")
+        return self
+
+    @model_validator(mode="after")
     def _uncertainty_diffs_consistent(self) -> "SwapPairRecord":
         if self.entropy_e is not None and self.entropy_r is not None:
             expected = self.entropy_e - self.entropy_r
-            if self.entropy_diff is None or abs(self.entropy_diff - expected) > _FLOAT_DIFF_TOLERANCE:
+            if self.entropy_diff is None or not _close(self.entropy_diff, expected):
                 raise ValueError("entropy_diff must equal entropy_e - entropy_r when both source values exist")
+        elif self.entropy_diff is not None:
+            raise ValueError("entropy_diff must be None unless both entropy_e and entropy_r are present")
         if self.logit_margin_e is not None and self.logit_margin_r is not None:
             expected = self.logit_margin_e - self.logit_margin_r
-            if self.logit_margin_diff is None or abs(self.logit_margin_diff - expected) > _FLOAT_DIFF_TOLERANCE:
+            if self.logit_margin_diff is None or not _close(self.logit_margin_diff, expected):
                 raise ValueError("logit_margin_diff must equal logit_margin_e - logit_margin_r when both source values exist")
+        elif self.logit_margin_diff is not None:
+            raise ValueError("logit_margin_diff must be None unless both logit_margin_e and logit_margin_r are present")
         return self

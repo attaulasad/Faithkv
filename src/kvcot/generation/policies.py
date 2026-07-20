@@ -89,6 +89,18 @@ class FullKVPolicy(Policy):
             attn_implementation=attn_implementation,
         )
         model.eval()
+
+        # Unconditional (Blocker 1 repair, docs/B1A_REPAIR_AND_B1B_CPU_INTEGRATION.md):
+        # never gate this behind `if model.device.type == "cuda":` first --
+        # that conditional is exactly what let a partially-offloaded model
+        # (some parameters on cuda, others silently on cpu/disk) skip the
+        # check entirely. This code path is never actually executed on this
+        # CPU-only build (real generation never runs here, per CLAUDE.md's
+        # session notes); it is unit-tested separately with fake parameters.
+        from kvcot.discovery.no_offload import assert_no_offloaded_parameters
+
+        assert_no_offloaded_parameters(model)
+
         return model
 
 
@@ -154,15 +166,17 @@ class _PatchedPolicyBase(Policy):
         tokenizer = AutoTokenizer.from_pretrained(model_name, revision=revision, use_fast=True)
         _set_static_token_id_attrs(model, tokenizer)
 
-        if model.device.type == "cuda":
-            # Only meaningful once real weights are actually placed on a
-            # GPU (device_map="auto" on a CPU-only host resolves to "cpu" --
-            # this assertion is inert here and exercised for real only on
-            # the GPU host, per docs/B0_5_R2_2_AUTHORITY_AND_IMPLEMENTATION.md
-            # Part V.12; it is unit-tested separately with fake parameters).
-            from kvcot.discovery.no_offload import assert_no_offloaded_parameters
+        # Unconditional (Blocker 1 repair, docs/B1A_REPAIR_AND_B1B_CPU_INTEGRATION.md):
+        # never gate this behind `if model.device.type == "cuda":` first --
+        # `model.device` is a single reported property that cannot detect a
+        # partially-offloaded `device_map="auto"` load (some parameters on
+        # cuda, others silently on cpu/disk/meta). This code path is never
+        # actually executed on this CPU-only build; it is unit-tested
+        # separately with fake parameters (Part V.12,
+        # docs/B0_5_R2_2_AUTHORITY_AND_IMPLEMENTATION.md).
+        from kvcot.discovery.no_offload import assert_no_offloaded_parameters
 
-            assert_no_offloaded_parameters(model)
+        assert_no_offloaded_parameters(model)
 
         return model
 
