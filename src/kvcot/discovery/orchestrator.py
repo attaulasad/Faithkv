@@ -150,6 +150,13 @@ class ExampleResult:
     # selected), conflating "selected by Pass 1" with "at least one pair
     # survived attrition."
     selected_event_ids: tuple[int, ...] = ()
+    # B1 execution-boundary closure §12: POSITIVE semantic-swap-check
+    # evidence, summed across every REAL pair attempt from
+    # `PairBuildResult.semantic_swap_check_attempted`/`.semantic_swap_check_passed`
+    # -- never derived from "no semantic_swap_parity_failure record exists"
+    # (vacuously true for a pair whose check was never reached at all).
+    semantic_swap_checks_attempted: int = 0
+    semantic_swap_checks_passed: int = 0
 
 
 def run_example(
@@ -256,6 +263,14 @@ def run_example(
     real_pair_wall_seconds: list[float] = []
     no_op_pair_wall_seconds: list[float] = []
     no_op_mode = pair_execution_policy.no_op_mode
+    # B1 execution-boundary closure §12: POSITIVE semantic-swap-check
+    # counts across every REAL pair attempted (no-op pairs excluded --
+    # the no-op control has its own dedicated numerical-parity check,
+    # never folded into this count) -- read directly off
+    # `PairBuildResult.semantic_swap_check_attempted`/`.semantic_swap_check_passed`,
+    # never derived after the fact from "no failure record exists".
+    semantic_swap_checks_attempted = 0
+    semantic_swap_checks_passed = 0
 
     for event_index, target_capture in enumerate(pass2_result.target_captures):
         cd = target_capture.event_plan.candidate_donor_selection
@@ -305,6 +320,11 @@ def run_example(
             )
             pair_elapsed = clock_fn() - pair_start
             ev = target_capture.event_plan
+
+            if kind == "real" and result.semantic_swap_check_attempted:
+                semantic_swap_checks_attempted += 1
+                if result.semantic_swap_check_passed:
+                    semantic_swap_checks_passed += 1
 
             def _record_pair_failure(stage: str, detail: str | None) -> None:
                 pair_attrition.record_dropped(stage)
@@ -356,6 +376,8 @@ def run_example(
         minimized_target_evidence=minimized_target_evidence,
         selected_event_ids=tuple(ev.compaction_event_id for ev in plan.events),
         pair_failure_details=tuple(pair_failure_details),
+        semantic_swap_checks_attempted=semantic_swap_checks_attempted,
+        semantic_swap_checks_passed=semantic_swap_checks_passed,
     )
 
 

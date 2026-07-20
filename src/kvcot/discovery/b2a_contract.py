@@ -160,6 +160,16 @@ MANDATORY_GATE_CONDITIONS: tuple[str, ...] = (
     "real_pair_count_exact",
     "no_op_count_exact",
     "all_required_pair_evaluations_completed",
+    # B1 execution-boundary closure §13: exact, DUPLICATE-DETECTING pair
+    # identity accounting (`kvcot.discovery.b2a_evidence.PairIdentityEvidence`)
+    # -- `real_pair_count_exact` above only ever compared a COUNT
+    # (`count >= 4` per event in the prior derivation) and could not tell
+    # four genuinely distinct pairs apart from the same pair recorded four
+    # times, or twelve total real records that were not actually twelve
+    # distinct (event, layer, head, candidate, donor) identities.
+    "unique_real_pair_count_exact",
+    "events_with_four_unique_pairs_exact",
+    "no_duplicate_pair_identity",
 )
 
 
@@ -199,6 +209,9 @@ class B2AGateEvidence(BaseModel):
     real_pair_count_exact: bool
     no_op_count_exact: bool
     all_required_pair_evaluations_completed: bool
+    unique_real_pair_count_exact: bool
+    events_with_four_unique_pairs_exact: bool
+    no_duplicate_pair_identity: bool
 
     runtime_gpu_hours: float = Field(ge=0.0)
     peak_vram_gib: float = Field(ge=0.0)
@@ -214,6 +227,9 @@ def build_gate_evidence_from_measurement(
     absolute_position_parity: bool,
     no_op_numerical_parity: bool,
     semantic_swap_parity: bool,
+    unique_real_pair_count_exact: bool,
+    events_with_four_unique_pairs_exact: bool,
+    no_duplicate_pair_identity: bool,
     dataset_revision_match: bool,
     dataset_row_identity_match: bool,
     manifest_hash_match: bool,
@@ -245,6 +261,9 @@ def build_gate_evidence_from_measurement(
         absolute_position_parity=absolute_position_parity,
         no_op_numerical_parity=no_op_numerical_parity,
         semantic_swap_parity=semantic_swap_parity,
+        unique_real_pair_count_exact=unique_real_pair_count_exact,
+        events_with_four_unique_pairs_exact=events_with_four_unique_pairs_exact,
+        no_duplicate_pair_identity=no_duplicate_pair_identity,
         dataset_revision_match=dataset_revision_match,
         dataset_row_identity_match=dataset_row_identity_match,
         manifest_hash_match=manifest_hash_match,
@@ -305,6 +324,9 @@ class B2AGateResult:
     real_pair_count_exact: bool
     no_op_count_exact: bool
     all_required_pair_evaluations_completed: bool
+    unique_real_pair_count_exact: bool
+    events_with_four_unique_pairs_exact: bool
+    no_duplicate_pair_identity: bool
     failed_conditions: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -364,6 +386,9 @@ def evaluate_b2a_gate(evidence: B2AGateEvidence) -> B2AGateResult:
         "real_pair_count_exact": evidence.real_pair_count_exact,
         "no_op_count_exact": evidence.no_op_count_exact,
         "all_required_pair_evaluations_completed": evidence.all_required_pair_evaluations_completed,
+        "unique_real_pair_count_exact": evidence.unique_real_pair_count_exact,
+        "events_with_four_unique_pairs_exact": evidence.events_with_four_unique_pairs_exact,
+        "no_duplicate_pair_identity": evidence.no_duplicate_pair_identity,
     }
     failed = tuple(name for name in MANDATORY_GATE_CONDITIONS if not values[name])
     return B2AGateResult(passed=not failed, failed_conditions=failed, **values)

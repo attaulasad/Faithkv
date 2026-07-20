@@ -174,7 +174,6 @@ def run_b2a_calibration(
         per_real_pair_projection_seconds,
         project_complete_pilot_gpu_hours,
     )
-    from kvcot.discovery.attrition import STAGE_SEMANTIC_SWAP_PARITY_FAILURE
     from kvcot.discovery.b2a_workers import WorkerFailedError, run_both_workers_via_subprocess
     from kvcot.discovery.constants import (
         B2A_NOOP_PAIR_EVALUATIONS_TOTAL,
@@ -282,8 +281,31 @@ def run_b2a_calibration(
             # `kvcot.discovery.orchestrator.run_example`) -- never allowed
             # to pass silently under the coarser
             # `all_required_pair_evaluations_completed` umbrella alone.
-            semantic_swap_parity=not any(
-                d.stage == STAGE_SEMANTIC_SWAP_PARITY_FAILURE for d in rkv.pair_failure_details
+            #
+            # B1 execution-boundary closure §12: derived from POSITIVE
+            # counts (`checks_attempted == checks_required == 12` AND
+            # `checks_failed == 0`) rather than absence-of-a-failure-record
+            # -- a worker that never actually reached the semantic-swap
+            # check for any pair (e.g. every pair failed earlier, at
+            # candidate/donor pool lookup, so `pair_failure_details` would
+            # contain zero `semantic_swap_parity_failure` entries despite
+            # the check never having run at all) must fail this condition,
+            # not vacuously pass it.
+            semantic_swap_parity=(
+                rkv.semantic_swap_checks_attempted == rkv.semantic_swap_checks_required
+                and rkv.semantic_swap_checks_passed == rkv.semantic_swap_checks_required
+                and rkv.semantic_swap_checks_failed == 0
+            ),
+            # B1 execution-boundary closure §13: exact, duplicate-detecting
+            # pair-identity conditions (`kvcot.discovery.b2a_evidence
+            # .PairIdentityEvidence`) -- distinct from `real_pair_count_exact`
+            # above, which only ever compares a raw COUNT and cannot detect
+            # the same (event, layer, head, candidate, donor) identity
+            # recorded more than once.
+            unique_real_pair_count_exact=(rkv.unique_completed_real_pair_count == B2A_REAL_PAIR_EVALUATIONS_TOTAL),
+            events_with_four_unique_pairs_exact=(rkv.events_with_exactly_four_unique_real_pairs == B2A_SELECTED_EVENTS),
+            no_duplicate_pair_identity=(
+                not rkv.has_duplicate_real_pair_identity and not rkv.has_duplicate_no_op_pair_identity
             ),
             dataset_revision_match=dataset_revision_match,
             dataset_row_identity_match=dataset_row_identity_match,

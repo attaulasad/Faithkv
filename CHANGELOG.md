@@ -5,6 +5,85 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-20 — Phase B1 execution-boundary closure: focused completion pass on B1B-R4.1 (no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; prior commit `4e45beac...` not reset/rebased/amended)
+
+Run on branch `research/b1b-r4-final-b2a-closure`, a forward completion
+commit on top of `4e45beac1912a0a7852a034420732a10d0d703e7` ("Finish B1
+final GPU boundary closure", already pushed and self-recorded INCOMPLETE).
+Full detail: `docs/B1_EXECUTION_BOUNDARY_FINAL_CLOSURE.md`.
+
+**Authorization.** No new `CLAUDE.md` exception — stays inside the
+CPU-side harness architecture already authorized by §1b/§4b. No model
+weights, no CUDA, no Vast.ai activity of any kind.
+
+An evidence-based audit (16 numbered claims, all 16 confirmed against the
+actual current code before any repair began) found and this pass repaired
+**five confirmed defects**, each with new CPU tests: (1)
+`kvcot.generation.state.reset_patched_state` no longer calls
+`torch.cuda.reset_peak_memory_stats()` itself — the R-KV worker's Pass-2
+state construction was silently wiping Pass 1's already-accumulated peak
+partway through measurement; peak-memory reset is now owned exclusively by
+each caller's own measurement boundary, with the primary pipeline
+(`kvcot.cli.cmd_generate`, `kvcot.generation.replay.replay_and_snapshot`)
+gaining an explicit, behavior-preserving replacement reset. (2) Baseline
+and swapped branch evaluation are now released down to a compact
+`kvcot.discovery.branch_eval.CompactBranchScore` (per-token NLL, mean,
+hash) the instant each branch's evaluation finishes — the prior pass
+released the snapshot clone but left `evaluate_branch`'s full returned
+result (including a real-model `_LiveBranchState`'s complete live cache)
+reachable through the swapped branch's entire construction; proven via a
+`weakref` to the exact live-cache object. (3) The semantic swap on an
+already-owned snapshot clone no longer clones the cache a second time
+(`kvcot.discovery.swap.apply_within_head_swap_owned`, dispatched via a new
+`owned=True` parameter defaulting to the prior cloning behavior for every
+other caller). (4) `semantic_swap_parity`'s gate derivation changed from
+absence-of-a-failure-record (vacuously true for a worker that never
+reached the check for any pair at all) to positive
+`checks_attempted == checks_passed == checks_required(12)` counts,
+threaded through `PairBuildResult`/`ExampleResult`/`RKVWorkerResult`. (5)
+Three new gate conditions (`unique_real_pair_count_exact`,
+`events_with_four_unique_pairs_exact`, `no_duplicate_pair_identity`)
+replace a bare per-event count (`count >= 4`) that could not distinguish
+four genuinely distinct `(event, layer, head, candidate, donor)` identities
+from the same identity recorded more than once.
+
+Hostile self-audit (`docs/B1_EXECUTION_BOUNDARY_FINAL_CLOSURE.md` §4): a
+forbidden-pattern grep over only the newly-ADDED lines found every hit
+already accounted for (the two intentional replacement CUDA resets, two
+`count >= 4` mentions inside comments describing the repaired defect, and
+one pre-existing broad `except` unchanged in kind). A full re-read of the
+reordered `build_swap_pair_record` found no leftover duplicate code from
+the reordering.
+
+`python -m pytest -m "not gpu" -q`: 970 passed, 0 failed, 14 deselected
+(gpu-marked); 984 tests collected total. Both `kvcot prepare-b2a-manifest
+--dry-run` and `kvcot b2a-calibrate --dry-run` still run to completion
+unchanged (no model loaded, no CUDA required; printed plan is
+byte-identical to the prior pass's, since none of the still-open gaps that
+would alter it were closed this pass).
+
+**This pass explicitly did NOT close everything it was given** —
+`docs/B1_EXECUTION_BOUNDARY_FINAL_CLOSURE.md` §3 lists every remaining gap
+plainly, largest first: `Pass2Result.target_captures` still retains the
+FULL capture record (complete pre-call/returned K/V tensors) through all
+12+1 pair evaluations (`MinimizedTargetEvidence` is evidence-only, never
+substituted into the actual pair-building loop) — the single largest
+remaining memory-safety gap, comparable in scope to everything fixed this
+pass combined; no CUDA-synchronized timing abstraction and no
+model-load-inclusive runtime projection; VRAM still has one reset spanning
+the whole worker, no load-vs-inference phase split, no pre-branch memory
+guard; the full 12-real+1-no-op `run_rkv_worker`-level CPU success test
+still does not exist (an already-acknowledged deferral, still open); no
+Hub snapshot resolver and no real-tokenizer network validation was run;
+batch size still derived from an independently-constructed tensor;
+`device_map="auto"` still used in the exercised path, no strict
+single-GPU load path; no immutable attempt-directory architecture, worker
+envelope still non-atomic and still never cross-referenced into the final
+artifact; no expanded provenance export; no contract-consistency test.
+**Status: B1 EXECUTION-BOUNDARY CLOSURE VERDICT: INCOMPLETE — B2A/GPU
+REMAIN BLOCKED.** No discovery result exists. No method exists. GPU, B2A,
+and B2B remain fully unauthorized by this entry.
+
 ## 2026-07-20 — Phase B1B-R4.1: focused completion amendment on B1B-R4 (no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; prior commit `4d7971b7...` not reset/rebased/amended)
 
 Run on branch `research/b1b-r4-final-b2a-closure`, a forward completion

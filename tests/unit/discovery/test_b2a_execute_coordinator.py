@@ -90,6 +90,10 @@ def _passing_payloads(manifest, config):
         events_with_all_four_real_pairs_completed=3, attempted_real_pair_count=12, completed_real_pair_count=12,
         failed_real_pair_count=0, attempted_no_op_pair_count=1, completed_no_op_pair_count=1,
         pair_failure_details=[],
+        semantic_swap_checks_required=12, semantic_swap_checks_attempted=12, semantic_swap_checks_passed=12,
+        semantic_swap_checks_failed=0,
+        unique_completed_real_pair_count=12, events_with_exactly_four_unique_real_pairs=3,
+        has_duplicate_real_pair_identity=False, has_duplicate_no_op_pair_identity=False,
         selected_event_count_exact=True, real_pair_count_exact=True, no_op_count_exact=True,
         all_required_pair_evaluations_completed=True,
         observed_retention_ratio=0.4,
@@ -189,12 +193,17 @@ def test_gate_fails_when_pair_counts_are_not_exact(config, manifest, monkeypatch
 
 
 def test_gate_fails_on_a_reported_semantic_swap_parity_failure_even_with_every_count_exact(config, manifest, monkeypatch, tmp_path):
-    """B1B-R4.1 §18/§30 regression: a worker reporting one
-    `semantic_swap_parity_failure` entry in `pair_failure_details` must fail
-    the gate's dedicated `semantic_swap_parity` condition -- proven with
-    every OTHER condition (including the exact-count ones) left passing, so
-    this is not merely riding on `all_required_pair_evaluations_completed`
-    already being false for an unrelated reason."""
+    """B1B-R4.1 §18/§30, tightened by B1 execution-boundary closure §12: a
+    worker reporting one failed semantic-swap check (`semantic_swap_checks_
+    passed < semantic_swap_checks_attempted`) must fail the gate's
+    dedicated `semantic_swap_parity` condition -- proven with every OTHER
+    condition (including the exact-count ones) left passing, so this is not
+    merely riding on `all_required_pair_evaluations_completed` already
+    being false for an unrelated reason. The gate now derives this from
+    POSITIVE counts, not from scanning `pair_failure_details` for a
+    specific stage string -- both the failure-detail record AND the
+    corresponding count are set here, matching what a real worker would
+    report together."""
     monkeypatch.setattr(b2a_execute, "_verify_resolved_prompt_identity", lambda c, m: None)
     fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
     rkv_payload["pair_failure_details"] = [
@@ -205,6 +214,8 @@ def test_gate_fails_on_a_reported_semantic_swap_parity_failure_even_with_every_c
             "detail": "semantic_swap_parity_provenance_not_updated", "elapsed_seconds": 0.1,
         }
     ]
+    rkv_payload["semantic_swap_checks_passed"] = 11
+    rkv_payload["semantic_swap_checks_failed"] = 1
     runner = _fake_runner_writing(fullkv_payload, rkv_payload)
     monkeypatch.setattr("kvcot.discovery.b2a_artifact.build_and_write_b2a_artifact", _patched_writer(tmp_path))
 
@@ -219,7 +230,63 @@ def test_gate_fails_on_a_reported_semantic_swap_parity_failure_even_with_every_c
     # proving `semantic_swap_parity` is independently derived, not a proxy
     # for a count mismatch that would already fail the gate on its own.
     assert "real_pair_count_exact" not in artifact.gate_result.failed_conditions
+
+
+def test_gate_fails_when_semantic_swap_checks_were_never_attempted_despite_no_failure_record(config, manifest, monkeypatch, tmp_path):
+    """B1 execution-boundary closure §12: a worker that reports ZERO
+    attempted semantic-swap checks (e.g. every real pair failed earlier, at
+    candidate/donor pool lookup, before the swap was ever attempted) must
+    fail `semantic_swap_parity` even though `pair_failure_details` contains
+    no `semantic_swap_parity_failure` entry at all -- the old
+    absence-of-failure derivation would have vacuously PASSED this case."""
+    monkeypatch.setattr(b2a_execute, "_verify_resolved_prompt_identity", lambda c, m: None)
+    fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
+    rkv_payload["semantic_swap_checks_attempted"] = 0
+    rkv_payload["semantic_swap_checks_passed"] = 0
+    rkv_payload["semantic_swap_checks_failed"] = 0
+    assert rkv_payload["pair_failure_details"] == []  # no failure record naming this check at all
+    runner = _fake_runner_writing(fullkv_payload, rkv_payload)
+    monkeypatch.setattr("kvcot.discovery.b2a_artifact.build_and_write_b2a_artifact", _patched_writer(tmp_path))
+
+    artifact = b2a_execute.run_b2a_calibration(
+        config, manifest, config_path=CONFIG_PATH, manifest_path=MANIFEST_PATH,
+        python_executable="fake-python", subprocess_runner=runner,
+    )
+
+    assert artifact.gate_result.passed is False
+    assert "semantic_swap_parity" in artifact.gate_result.failed_conditions
     assert "all_required_pair_evaluations_completed" not in artifact.gate_result.failed_conditions
+
+
+def test_gate_fails_on_duplicate_pair_identity_even_though_the_bare_count_is_exact(config, manifest, monkeypatch, tmp_path):
+    """B1 execution-boundary closure §13: a worker reporting
+    `has_duplicate_real_pair_identity=True` must fail the gate's dedicated
+    `unique_real_pair_count_exact`/`no_duplicate_pair_identity` conditions
+    even while every bare COUNT (`attempted_real_pair_count`,
+    `completed_real_pair_count`, `real_pair_count_exact`) stays at the
+    'passing' value of 12 -- the exact scenario the prior `count >= 4`
+    derivation could not detect (four records per event, but not four
+    DISTINCT identities)."""
+    monkeypatch.setattr(b2a_execute, "_verify_resolved_prompt_identity", lambda c, m: None)
+    fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
+    rkv_payload["unique_completed_real_pair_count"] = 11  # one duplicate among the 12 records
+    rkv_payload["events_with_exactly_four_unique_real_pairs"] = 2  # the event with the duplicate has only 3 unique
+    rkv_payload["has_duplicate_real_pair_identity"] = True
+    runner = _fake_runner_writing(fullkv_payload, rkv_payload)
+    monkeypatch.setattr("kvcot.discovery.b2a_artifact.build_and_write_b2a_artifact", _patched_writer(tmp_path))
+
+    artifact = b2a_execute.run_b2a_calibration(
+        config, manifest, config_path=CONFIG_PATH, manifest_path=MANIFEST_PATH,
+        python_executable="fake-python", subprocess_runner=runner,
+    )
+
+    assert artifact.gate_result.passed is False
+    assert "unique_real_pair_count_exact" in artifact.gate_result.failed_conditions
+    assert "events_with_four_unique_pairs_exact" in artifact.gate_result.failed_conditions
+    assert "no_duplicate_pair_identity" in artifact.gate_result.failed_conditions
+    # The bare-count condition this replaces/augments is untouched --
+    # proving the new conditions are independently derived.
+    assert "real_pair_count_exact" not in artifact.gate_result.failed_conditions
 
 
 def test_worker_failure_still_writes_a_fail_artifact(config, manifest, monkeypatch, tmp_path):

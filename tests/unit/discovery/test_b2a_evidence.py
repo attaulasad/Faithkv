@@ -12,6 +12,8 @@ from kvcot.discovery.b2a_evidence import (
     derive_no_op_numerical_parity,
     derive_observed_retention_ratio,
     derive_pair_completion_evidence,
+    derive_pair_identity_evidence,
+    derive_semantic_swap_check_evidence,
     derive_trajectory_parity_evidence,
     per_real_pair_projection_seconds,
     project_complete_pilot_gpu_hours,
@@ -20,6 +22,14 @@ from kvcot.discovery.b2a_evidence import (
 
 def _pair(event_id: int, is_noop: bool = False):
     return SimpleNamespace(compaction_event_id=event_id, is_noop_control=is_noop)
+
+
+def _identity_pair(event_id, layer, head, evicted, donor, is_noop=False):
+    return SimpleNamespace(
+        compaction_event_id=event_id, layer_index=layer, kv_head_index=head,
+        evicted_absolute_token_position=evicted, retained_absolute_token_position=donor,
+        is_noop_control=is_noop,
+    )
 
 
 def _trace(full_len: int, final_lens: dict[int, int], compaction_events=(), prompt_length=10):
@@ -200,6 +210,38 @@ def test_missing_trace_reports_zero_observed_and_eligible():
 
 
 # --------------------------------------------------------------------------
+# B1 execution-boundary closure §12: derive_semantic_swap_check_evidence --
+# POSITIVE checks_attempted/checks_passed, never absence-of-failure
+# --------------------------------------------------------------------------
+
+
+def test_semantic_swap_check_evidence_all_passed():
+    result = SimpleNamespace(semantic_swap_checks_attempted=12, semantic_swap_checks_passed=12)
+    evidence = derive_semantic_swap_check_evidence(result)
+    assert evidence.checks_required == 12
+    assert evidence.checks_attempted == 12
+    assert evidence.checks_passed == 12
+    assert evidence.checks_failed == 0
+
+
+def test_semantic_swap_check_evidence_one_failure():
+    result = SimpleNamespace(semantic_swap_checks_attempted=12, semantic_swap_checks_passed=11)
+    evidence = derive_semantic_swap_check_evidence(result)
+    assert evidence.checks_failed == 1
+
+
+def test_semantic_swap_check_evidence_none_attempted_is_not_vacuously_passing():
+    """Zero attempted must never present as zero failed with an implied
+    pass -- `checks_attempted` staying below `checks_required` is itself
+    what the gate condition checks for, precisely to catch this case."""
+    result = SimpleNamespace(semantic_swap_checks_attempted=0, semantic_swap_checks_passed=0)
+    evidence = derive_semantic_swap_check_evidence(result)
+    assert evidence.checks_attempted == 0
+    assert evidence.checks_failed == 0
+    assert evidence.checks_attempted != evidence.checks_required
+
+
+# --------------------------------------------------------------------------
 # retention / no-op / meaningful compression
 # --------------------------------------------------------------------------
 
@@ -262,3 +304,66 @@ def test_projection_never_multiplies_an_aggregate_bucket_by_144():
 
     assert correct_projection < buggy_projection
     assert correct_projection == (144 * 1.0) / 3600.0
+
+
+# --------------------------------------------------------------------------
+# B1 execution-boundary closure §13: derive_pair_identity_evidence --
+# exact, DUPLICATE-DETECTING identity accounting, never a bare count
+# --------------------------------------------------------------------------
+
+
+def test_pair_identity_evidence_twelve_distinct_real_pairs_four_per_event():
+    records = []
+    for event_id in (0, 1, 2):
+        for evicted, donor in [(10, 20), (10, 21), (11, 20), (11, 21)]:
+            records.append(_identity_pair(event_id, layer=1, head=0, evicted=evicted, donor=donor))
+    result = SimpleNamespace(pair_records=tuple(records))
+
+    evidence = derive_pair_identity_evidence(result)
+    assert evidence.unique_completed_real_pair_count == 12
+    assert evidence.events_with_exactly_four_unique_real_pairs == 3
+    assert evidence.has_duplicate_real_pair_identity is False
+
+
+def test_pair_identity_evidence_detects_a_duplicate_pair_recorded_twice():
+    """The exact scenario `count >= 4` could not distinguish: an event with
+    FOUR pair records, but only THREE of them are actually distinct
+    (event, layer, head, candidate, donor) identities -- one is a
+    duplicate. A bare count would report `4 >= 4` (pass); the identity-based
+    check must catch it."""
+    records = [
+        _identity_pair(0, layer=1, head=0, evicted=10, donor=20),
+        _identity_pair(0, layer=1, head=0, evicted=10, donor=21),
+        _identity_pair(0, layer=1, head=0, evicted=11, donor=20),
+        _identity_pair(0, layer=1, head=0, evicted=10, donor=20),  # duplicate of the first
+    ]
+    result = SimpleNamespace(pair_records=tuple(records))
+
+    evidence = derive_pair_identity_evidence(result)
+    assert evidence.has_duplicate_real_pair_identity is True
+    assert evidence.unique_completed_real_pair_count == 3  # only 3 DISTINCT identities among the 4 records
+    assert evidence.events_with_exactly_four_unique_real_pairs == 0  # this event has only 3 unique, not exactly 4
+
+
+def test_pair_identity_evidence_event_with_five_pairs_is_not_exactly_four():
+    records = [
+        _identity_pair(0, layer=1, head=0, evicted=e, donor=d)
+        for e, d in [(10, 20), (10, 21), (11, 20), (11, 21), (12, 22)]
+    ]
+    result = SimpleNamespace(pair_records=tuple(records))
+
+    evidence = derive_pair_identity_evidence(result)
+    assert evidence.events_with_exactly_four_unique_real_pairs == 0
+
+
+def test_pair_identity_evidence_no_op_duplicate_detected_separately_from_real():
+    records = [
+        _identity_pair(0, layer=1, head=0, evicted=20, donor=20, is_noop=True),
+        _identity_pair(0, layer=1, head=0, evicted=20, donor=20, is_noop=True),  # duplicate no-op
+    ]
+    result = SimpleNamespace(pair_records=tuple(records))
+
+    evidence = derive_pair_identity_evidence(result)
+    assert evidence.completed_no_op_pair_count == 2
+    assert evidence.has_duplicate_no_op_pair_identity is True
+    assert evidence.has_duplicate_real_pair_identity is False  # independent from the no-op check

@@ -165,6 +165,13 @@ def replay_and_snapshot(
     `kvcot.probes.early_answering.absolute_cut_position(...) +
     len(prompt_token_ids)`.
     """
+    # B1 execution-boundary closure: `reset_patched_state` no longer resets
+    # CUDA peak-memory stats itself (measurement ownership moved to the
+    # caller) -- this call preserves this function's own pre-existing
+    # peak-memory measurement window exactly (immediately adjacent to the
+    # state reset, as before).
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
     cache = reset_patched_state(model, fresh_cache_factory)
     num_layers = len(model.model.layers)
     num_kv_heads = model.config.num_key_value_heads

@@ -425,6 +425,13 @@ def cmd_generate(args: argparse.Namespace) -> int:
             )
             generator, derived_seed = make_generator(seed, stage.dataset_manifest, row["source_row_index"], device)
 
+            # B1 execution-boundary closure: `reset_patched_state` no longer
+            # resets CUDA peak-memory stats itself -- this call preserves
+            # this loop's pre-existing per-iteration reset exactly (the
+            # run-wide `peak_vram_bytes` reported below therefore still
+            # reflects only the most recent iteration, unchanged).
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
             cache = reset_patched_state(model, lambda: DynamicCache())
             result = generate_base(
                 model, cache, prompt_token_ids, lock.generation.base_max_new_tokens,

@@ -35,7 +35,7 @@ from dataclasses import dataclass
 
 import torch
 
-from kvcot.discovery.branch_eval import SCORED_HORIZON, StepFn as BranchStepFn, SwapBranchComparison, evaluate_branch
+from kvcot.discovery.branch_eval import SCORED_HORIZON, StepFn as BranchStepFn, compact_branch_score, evaluate_branch
 from kvcot.discovery.nll import mean_nll
 from kvcot.discovery.pass1 import NaturalRunTrace
 from kvcot.discovery.pass2 import TargetCapture
@@ -74,6 +74,19 @@ class PairBuildResult:
     record: SwapPairRecord | None
     failure_stage: str | None
     failure_detail: str | None
+    # B1 execution-boundary closure §12: POSITIVE semantic-swap-check
+    # evidence, set at every return point in `build_swap_pair_record` --
+    # never derived after the fact from "no failure record exists" (which
+    # is vacuously true for a pair that never reached the check at all).
+    # `attempted=False` for every failure that occurs BEFORE
+    # `apply_semantic_within_head_swap` is even called (candidate/donor
+    # pool lookup, insufficient future tokens, baseline branch evaluation);
+    # `attempted=True` for every outcome from the swap call onward
+    # (`passed` reflects the actual derived parity result at that point,
+    # known immediately after the swap succeeds -- independent of whatever
+    # happens later in branch evaluation or record construction).
+    semantic_swap_check_attempted: bool = False
+    semantic_swap_check_passed: bool = False
 
 
 UNCERTAINTY_POSITION_UNAVAILABLE_REASON = "uncertainty_lookup_position_not_available"
@@ -160,11 +173,32 @@ def build_swap_pair_record(
     # call), doubling peak branch-construction memory for no reason -- on a
     # real model this is a full multi-layer K/V cache clone, not a toy
     # tensor. `pristine` itself is never mutated by either clone.
+    #
+    # B1 execution-boundary closure §8 (further refinement): releasing the
+    # SNAPSHOT clone alone was not enough -- `evaluate_branch`'s returned
+    # `BranchEvalResult` (specifically `final_cache_state`, a real-model
+    # `_LiveBranchState` holding a complete live cache distinct from the
+    # snapshot that seeded it) stayed reachable as a local variable through
+    # the swapped branch's entire construction. Each branch now extracts a
+    # `kvcot.discovery.branch_eval.CompactBranchScore` (per-token NLL, mean,
+    # hash -- never logits, never a cache handle) immediately and `del`s the
+    # full result before moving on, so nothing but the small compact score
+    # survives from baseline into the swapped branch's lifetime.
     pristine = target_capture.pristine_snapshot
 
     baseline_snapshot = pristine.clone()
     try:
         baseline_result = evaluate_branch(branch_step_fn, baseline_snapshot, bridge_token_id, reference_token_ids)
+        # B1 execution-boundary closure §8: extract ONLY the compact score
+        # (per-token NLL, mean, hash) and release the full
+        # `BranchEvalResult` immediately -- its `final_cache_state` (a
+        # complete live multi-layer cache on the real-model path) and
+        # `per_token_logits` (48 full-vocabulary tensors) are never read
+        # downstream (`SwapPairRecord` only ever consumes per-token NLL and
+        # the derived swap gain) and must not still be reachable while the
+        # swapped branch is cloned and evaluated below.
+        baseline_score = compact_branch_score(baseline_result)
+        del baseline_result
     except Exception as exc:
         return PairBuildResult(None, STAGE_BRANCH_EVALUATION_FAILURE, f"branch_eval_raised: {type(exc).__name__}: {exc}")
     finally:
@@ -173,6 +207,10 @@ def build_swap_pair_record(
         # never coexist with a still-reachable baseline clone.
         del baseline_snapshot
 
+    # B1 execution-boundary closure §10: `swapped_snapshot` is already an
+    # independently-owned clone (`pristine.clone()`, just above) -- passing
+    # `owned=True` mutates its tensors in place instead of cloning the
+    # already-cloned cache a second time.
     swapped_snapshot = pristine.clone()
     try:
         semantic_swap = apply_semantic_within_head_swap(
@@ -184,54 +222,43 @@ def build_swap_pair_record(
             candidate_value=candidate_value,
             donor_absolute_position=donor_absolute_position,
             candidate_absolute_position=evicted_absolute_position,
+            owned=True,
         )
     except (SwapIndexError, SwapAliasingError) as exc:
         del swapped_snapshot
-        return PairBuildResult(None, STAGE_BRANCH_EVALUATION_FAILURE, f"swap_failed: {exc}")
+        return PairBuildResult(
+            None, STAGE_BRANCH_EVALUATION_FAILURE, f"swap_failed: {exc}",
+            semantic_swap_check_attempted=True, semantic_swap_check_passed=False,
+        )
 
-    try:
-        swapped_result = evaluate_branch(branch_step_fn, swapped_snapshot, bridge_token_id, reference_token_ids)
-    except Exception as exc:
-        return PairBuildResult(None, STAGE_BRANCH_EVALUATION_FAILURE, f"branch_eval_raised: {type(exc).__name__}: {exc}")
-    finally:
-        del swapped_snapshot
-
-    comparison = SwapBranchComparison(
-        baseline_per_token_nll=baseline_result.per_token_nll,
-        swapped_per_token_nll=swapped_result.per_token_nll,
-        baseline_mean_nll=baseline_result.mean_nll,
-        swapped_mean_nll=swapped_result.mean_nll,
-        swap_gain=baseline_result.mean_nll - swapped_result.mean_nll,
-        baseline_final_cache_state=baseline_result.final_cache_state,
-        swapped_final_cache_state=swapped_result.final_cache_state,
-        baseline_per_token_logits=baseline_result.per_token_logits,
-        swapped_per_token_logits=swapped_result.per_token_logits,
-    )
-
-    reference_horizon_sha256 = sha256_int_ids(reference_token_ids)
-    is_noop_control = evicted_absolute_position == donor_absolute_position
-
-    # B1B-R4.1 §18: derive parity_check_passed/net_physical_bytes_changed
-    # from the real mutation report instead of hard-coding True/0.
-    # `record.parity_check_passed` (this target's within-Pass-2 capture
-    # parity) is already required True for ANY target capture to have
-    # survived into `Pass2Result.target_captures` -- re-checked here
-    # defensively, never assumed silently. For a snapshot that carries full
-    # provenance (every real-model snapshot does, per
-    # `kvcot.discovery.swap.apply_semantic_within_head_swap`'s own
-    # docstring; a synthetic/CPU-test snapshot without provenance
-    # legitimately skips those updates), both the provenance update and the
-    # kept-index bookkeeping update are mandatory -- missing either is a
-    # hard parity failure, never silently ignored.
-    # Provenance and kept-index bookkeeping are independent pieces of
-    # snapshot state (`apply_semantic_within_head_swap`'s own docstring
-    # scopes each to its own presence check, never a single combined flag)
-    # -- a real-model snapshot always carries both together in practice, but
-    # the CPU synthetic harness snapshot deliberately carries bookkeeping
-    # without provenance (`tests/unit/discovery/_synthetic_harness.py
-    # .build_snapshot_from_state` sets `provenance=None`), so each mandatory
-    # update is gated on its OWN presence signal, matching the swap
-    # primitive's own logic exactly, never a shared proxy for both.
+    # B1 execution-boundary closure §12: derive parity_check_passed/
+    # net_physical_bytes_changed IMMEDIATELY after the swap succeeds --
+    # this derivation depends only on `pristine`/`ev`/`record`/
+    # `semantic_swap`, never on branch-evaluation results, so it must be
+    # known (and therefore reportable as POSITIVE evidence, not
+    # absence-of-a-later-failure) regardless of what happens to the
+    # swapped branch's evaluation afterward.
+    #
+    # B1B-R4.1 §18 (unchanged derivation logic): `record.parity_check_passed`
+    # (this target's within-Pass-2 capture parity) is already required True
+    # for ANY target capture to have survived into
+    # `Pass2Result.target_captures` -- re-checked here defensively, never
+    # assumed silently. For a snapshot that carries full provenance (every
+    # real-model snapshot does, per `kvcot.discovery.swap
+    # .apply_semantic_within_head_swap`'s own docstring; a synthetic/
+    # CPU-test snapshot without provenance legitimately skips those
+    # updates), both the provenance update and the kept-index bookkeeping
+    # update are mandatory -- missing either is a hard parity failure,
+    # never silently ignored. Provenance and kept-index bookkeeping are
+    # independent pieces of snapshot state (`apply_semantic_within_head_swap`'s
+    # own docstring scopes each to its own presence check, never a single
+    # combined flag) -- a real-model snapshot always carries both together
+    # in practice, but the CPU synthetic harness snapshot deliberately
+    # carries bookkeeping without provenance
+    # (`tests/unit/discovery/_synthetic_harness.py.build_snapshot_from_state`
+    # sets `provenance=None`), so each mandatory update is gated on its OWN
+    # presence signal, matching the swap primitive's own logic exactly,
+    # never a shared proxy for both.
     provenance_present = pristine.provenance is not None
     layer_bookkeeping = (
         pristine.kv_cluster_bookkeeping_per_layer[ev.layer_index] if pristine.kv_cluster_bookkeeping_per_layer else None
@@ -252,6 +279,23 @@ def build_swap_pair_record(
     net_physical_bytes_changed = _cache_total_bytes(
         semantic_swap.swap_result.key_cache, semantic_swap.swap_result.value_cache
     ) - _cache_total_bytes(pristine.key_cache, pristine.value_cache)
+
+    try:
+        swapped_result = evaluate_branch(branch_step_fn, swapped_snapshot, bridge_token_id, reference_token_ids)
+        swapped_score = compact_branch_score(swapped_result)
+        del swapped_result
+    except Exception as exc:
+        return PairBuildResult(
+            None, STAGE_BRANCH_EVALUATION_FAILURE, f"branch_eval_raised: {type(exc).__name__}: {exc}",
+            semantic_swap_check_attempted=True, semantic_swap_check_passed=parity_check_passed,
+        )
+    finally:
+        del swapped_snapshot
+
+    swap_gain = baseline_score.mean_nll - swapped_score.mean_nll
+
+    reference_horizon_sha256 = sha256_int_ids(reference_token_ids)
+    is_noop_control = evicted_absolute_position == donor_absolute_position
 
     uncertainty_signals = compute_pair_uncertainty_signals(
         entropy_e=_uncertainty_signal_at(trace, evicted_absolute_position, "entropy"),
@@ -306,11 +350,14 @@ def build_swap_pair_record(
             valid_flag=parity_check_passed,
             invalid_reason=parity_failure_reason,
             reference_horizon_sha256=reference_horizon_sha256,
-            swap_gain=comparison.swap_gain,
-            baseline_per_token_nll=comparison.baseline_per_token_nll,
-            swapped_per_token_nll=comparison.swapped_per_token_nll,
+            swap_gain=swap_gain,
+            baseline_per_token_nll=list(baseline_score.per_token_nll),
+            swapped_per_token_nll=list(swapped_score.per_token_nll),
         )
     except Exception as exc:  # pydantic ValidationError or a constructed invariant violation
-        return PairBuildResult(None, STAGE_SCHEMA_VALIDATION_FAILURE, str(exc))
+        return PairBuildResult(
+            None, STAGE_SCHEMA_VALIDATION_FAILURE, str(exc),
+            semantic_swap_check_attempted=True, semantic_swap_check_passed=parity_check_passed,
+        )
 
-    return PairBuildResult(pair, None, None)
+    return PairBuildResult(pair, None, None, semantic_swap_check_attempted=True, semantic_swap_check_passed=parity_check_passed)

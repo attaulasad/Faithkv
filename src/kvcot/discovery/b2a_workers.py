@@ -169,6 +169,20 @@ class RKVWorkerResult(BaseModel):
     # never an always-empty placeholder.
     pair_failure_details: list[PairFailureDetail]
 
+    # B1 execution-boundary closure §12: POSITIVE semantic-swap-check
+    # counts -- `kvcot.discovery.b2a_evidence.SemanticSwapCheckEvidence`.
+    semantic_swap_checks_required: int = Field(ge=0)
+    semantic_swap_checks_attempted: int = Field(ge=0)
+    semantic_swap_checks_passed: int = Field(ge=0)
+    semantic_swap_checks_failed: int = Field(ge=0)
+
+    # B1 execution-boundary closure §13: exact, duplicate-detecting pair
+    # IDENTITY accounting -- `kvcot.discovery.b2a_evidence.PairIdentityEvidence`.
+    unique_completed_real_pair_count: int = Field(ge=0)
+    events_with_exactly_four_unique_real_pairs: int = Field(ge=0)
+    has_duplicate_real_pair_identity: bool
+    has_duplicate_no_op_pair_identity: bool
+
     # B1B-R4 §7/§21: exact-count mandatory gate conditions, derived (never
     # hard-coded) from the counts above.
     selected_event_count_exact: bool
@@ -708,6 +722,8 @@ def run_rkv_worker(
         derive_no_op_numerical_parity,
         derive_observed_retention_ratio,
         derive_pair_completion_evidence,
+        derive_pair_identity_evidence,
+        derive_semantic_swap_check_evidence,
         derive_trajectory_parity_evidence,
     )
     from kvcot.discovery.constants import B2A_NOOP_PAIR_EVALUATIONS_TOTAL, NoOpMode
@@ -857,6 +873,8 @@ def run_rkv_worker(
         ),
     )
     pair_completion = derive_pair_completion_evidence(trace=example_result.trace, example_result=example_result)
+    semantic_swap_checks = derive_semantic_swap_check_evidence(example_result)
+    pair_identity = derive_pair_identity_evidence(example_result)
     observed_retention_ratio = derive_observed_retention_ratio(example_result)
     no_op_parity = derive_no_op_numerical_parity(example_result)
 
@@ -933,6 +951,14 @@ def run_rkv_worker(
         attempted_no_op_pair_count=pair_completion.attempted_no_op_pair_count,
         completed_no_op_pair_count=pair_completion.completed_no_op_pair_count,
         pair_failure_details=list(pair_completion.pair_failure_details),
+        semantic_swap_checks_required=semantic_swap_checks.checks_required,
+        semantic_swap_checks_attempted=semantic_swap_checks.checks_attempted,
+        semantic_swap_checks_passed=semantic_swap_checks.checks_passed,
+        semantic_swap_checks_failed=semantic_swap_checks.checks_failed,
+        unique_completed_real_pair_count=pair_identity.unique_completed_real_pair_count,
+        events_with_exactly_four_unique_real_pairs=pair_identity.events_with_exactly_four_unique_real_pairs,
+        has_duplicate_real_pair_identity=pair_identity.has_duplicate_real_pair_identity,
+        has_duplicate_no_op_pair_identity=pair_identity.has_duplicate_no_op_pair_identity,
         selected_event_count_exact=selected_event_count_exact,
         real_pair_count_exact=real_pair_count_exact,
         no_op_count_exact=no_op_count_exact,

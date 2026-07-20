@@ -6,6 +6,7 @@ from kvcot.discovery.swap import (
     SwapIndexError,
     apply_semantic_within_head_swap,
     apply_within_head_swap,
+    apply_within_head_swap_owned,
 )
 from kvcot.generation.provenance import LayerProvenance, ModelProvenance
 from kvcot.generation.state import ModelStateSnapshot
@@ -73,6 +74,129 @@ def test_swap_does_not_mutate_original_input_tensors():
     for l in range(NUM_LAYERS):
         assert torch.equal(key_cache[l], key_before[l])
         assert torch.equal(value_cache[l], value_before[l])
+
+
+# --------------------------------------------------------------------------
+# B1 execution-boundary closure §10: owned (no redundant clone) variant
+# --------------------------------------------------------------------------
+
+
+def test_owned_swap_mutates_in_place_returns_same_objects_no_second_clone():
+    key_cache, value_cache = _make_cache(seed=10)
+    layer_index, head_index, slot = 1, 2, 5
+    candidate_key = torch.full((HEAD_DIM,), 99.0)
+    candidate_value = torch.full((HEAD_DIM,), -99.0)
+    original_storage_ptrs = [t.untyped_storage().data_ptr() for t in key_cache + value_cache]
+
+    result = apply_within_head_swap_owned(
+        key_cache, value_cache, layer_index, head_index, slot, candidate_key, candidate_value
+    )
+
+    # The SAME list/tensor objects are returned -- never freshly cloned.
+    assert result.key_cache is key_cache
+    assert result.value_cache is value_cache
+    result_storage_ptrs = [t.untyped_storage().data_ptr() for t in result.key_cache + result.value_cache]
+    assert result_storage_ptrs == original_storage_ptrs, "owned mutation must never allocate a second full-cache clone"
+
+    assert torch.equal(key_cache[layer_index][0, head_index, slot, :], candidate_key)
+    assert torch.equal(value_cache[layer_index][0, head_index, slot, :], candidate_value)
+
+
+def test_owned_swap_touches_no_other_layer_head_or_slot():
+    key_cache, value_cache = _make_cache(seed=11)
+    key_before = [t.clone() for t in key_cache]
+    value_before = [t.clone() for t in value_cache]
+    layer_index, head_index, slot = 0, 1, 3
+    candidate_key = torch.zeros(HEAD_DIM)
+    candidate_value = torch.ones(HEAD_DIM)
+
+    apply_within_head_swap_owned(key_cache, value_cache, layer_index, head_index, slot, candidate_key, candidate_value)
+
+    for l in range(NUM_LAYERS):
+        expected_k = key_before[l].clone()
+        expected_v = value_before[l].clone()
+        if l == layer_index:
+            expected_k[0, head_index, slot, :] = candidate_key
+            expected_v[0, head_index, slot, :] = candidate_value
+        assert torch.equal(key_cache[l], expected_k), f"layer {l} key diverged unexpectedly"
+        assert torch.equal(value_cache[l], expected_v), f"layer {l} value diverged unexpectedly"
+
+
+def test_owned_swap_noop_detection_matches_cloning_variant():
+    key_cache, value_cache = _make_cache(seed=12)
+    layer_index, head_index, slot = 0, 0, 0
+    existing_key = key_cache[layer_index][0, head_index, slot, :].clone().contiguous()
+    existing_value = value_cache[layer_index][0, head_index, slot, :].clone().contiguous()
+
+    result = apply_within_head_swap_owned(
+        key_cache, value_cache, layer_index, head_index, slot, existing_key, existing_value
+    )
+    assert result.is_noop is True
+
+
+def test_owned_swap_still_enforces_every_validation():
+    key_cache, value_cache = _make_cache(seed=13)
+    with pytest.raises(SwapIndexError, match="candidate_key must have shape"):
+        apply_within_head_swap_owned(key_cache, value_cache, 0, 0, 0, torch.zeros(HEAD_DIM + 1), torch.ones(HEAD_DIM))
+    with pytest.raises(SwapAliasingError):
+        aliased = key_cache[0][0, 0, 0, :]
+        apply_within_head_swap_owned(key_cache, value_cache, 0, 0, 1, aliased, torch.ones(HEAD_DIM))
+
+
+def test_owned_swap_rejects_out_of_range_indices_same_as_cloning_variant():
+    key_cache, value_cache = _make_cache(seed=14)
+    with pytest.raises(SwapIndexError):
+        apply_within_head_swap_owned(key_cache, value_cache, NUM_LAYERS, 0, 0, torch.zeros(HEAD_DIM), torch.ones(HEAD_DIM))
+
+
+def test_semantic_swap_owned_true_mutates_in_place_no_second_clone(monkeypatch):
+    """`apply_semantic_within_head_swap(..., owned=True)` must dispatch to
+    the owned primitive -- proven by monkeypatching the CLONING primitive
+    to raise if it is ever called, so any accidental fallback would fail
+    loudly rather than silently double-cloning."""
+    import kvcot.discovery.swap as swap_mod
+
+    def _must_not_be_called(*args, **kwargs):
+        raise AssertionError("apply_within_head_swap (the cloning primitive) must not be called when owned=True")
+
+    monkeypatch.setattr(swap_mod, "apply_within_head_swap", _must_not_be_called)
+
+    key_cache, value_cache = _make_cache(seed=15)
+    snapshot = ModelStateSnapshot(
+        key_cache=key_cache, value_cache=value_cache, query_cache={},
+        compression_flags_per_layer=["none"] * NUM_LAYERS, model_length=SEQ_LEN, after_think=None,
+        provenance=None, kv_cluster_bookkeeping_per_layer=None,
+    )
+    original_storage_ptr = snapshot.key_cache[0].untyped_storage().data_ptr()
+
+    result = apply_semantic_within_head_swap(
+        snapshot, layer_index=0, kv_head_index=0, retained_post_storage_position=0,
+        candidate_key=torch.zeros(HEAD_DIM), candidate_value=torch.ones(HEAD_DIM),
+        donor_absolute_position=5, candidate_absolute_position=7, owned=True,
+    )
+
+    assert snapshot.key_cache[0].untyped_storage().data_ptr() == original_storage_ptr
+    assert result.swap_result.key_cache is key_cache
+
+
+def test_semantic_swap_owned_false_default_still_clones_unchanged():
+    """`owned` defaults to `False` -- every pre-existing caller (this
+    module's own other tests) gets the exact prior cloning behavior."""
+    key_cache, value_cache = _make_cache(seed=16)
+    snapshot = ModelStateSnapshot(
+        key_cache=key_cache, value_cache=value_cache, query_cache={},
+        compression_flags_per_layer=["none"] * NUM_LAYERS, model_length=SEQ_LEN, after_think=None,
+        provenance=None, kv_cluster_bookkeeping_per_layer=None,
+    )
+    original_storage_ptr = snapshot.key_cache[0].untyped_storage().data_ptr()
+
+    apply_semantic_within_head_swap(
+        snapshot, layer_index=0, kv_head_index=0, retained_post_storage_position=0,
+        candidate_key=torch.zeros(HEAD_DIM), candidate_value=torch.ones(HEAD_DIM),
+        donor_absolute_position=5, candidate_absolute_position=7,
+    )
+
+    assert snapshot.key_cache[0].untyped_storage().data_ptr() != original_storage_ptr
 
 
 def test_net_physical_bytes_unchanged():

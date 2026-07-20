@@ -26,6 +26,7 @@ import torch
 
 from kvcot.discovery.constants import SCORED_HORIZON
 from kvcot.discovery.nll import mean_nll
+from kvcot.utils.hashing import sha256_json
 
 StepFn = Callable[[Any, int], tuple[torch.Tensor, Any]]
 
@@ -36,6 +37,39 @@ class BranchEvalResult:
     per_token_logits: list[torch.Tensor]
     mean_nll: float
     final_cache_state: Any
+
+
+@dataclass(frozen=True)
+class CompactBranchScore:
+    """B1 execution-boundary closure §8: exactly what discovery scoring
+    scientifically needs from one branch's `BranchEvalResult`, and nothing
+    else -- no full-vocabulary per-token logits, no live final cache state
+    (a real-model `final_cache_state` is a `_LiveBranchState` holding a
+    complete multi-layer `DynamicCache`; a synthetic-harness one is
+    whatever the injected `step_fn` returns, potentially also large).
+    `kvcot.discovery.pipeline.build_swap_pair_record` extracts this
+    immediately after `evaluate_branch` returns and releases the full
+    `BranchEvalResult` before evaluating the OTHER branch (baseline before
+    swapped) -- the two branches' full live cache/logits must never be
+    reachable at the same time."""
+
+    per_token_nll: tuple[float, ...]
+    mean_nll: float
+    nll_sha256: str
+
+
+def compact_branch_score(result: BranchEvalResult) -> CompactBranchScore:
+    """Pure extraction -- reads `result.per_token_nll`/`.mean_nll` only;
+    never touches `.per_token_logits`/`.final_cache_state`, so a caller
+    that discards `result` immediately after calling this never actually
+    dereferences the fields it's about to release. Hashed via the
+    project's existing canonical-JSON hash (`kvcot.utils.hashing
+    .sha256_json`) -- never a second, independently-invented hashing
+    scheme."""
+    per_token_nll = tuple(result.per_token_nll)
+    return CompactBranchScore(
+        per_token_nll=per_token_nll, mean_nll=result.mean_nll, nll_sha256=sha256_json(list(per_token_nll))
+    )
 
 
 def evaluate_branch(step_fn: StepFn, initial_cache_state: Any, bridge_token_id: int, reference_token_ids: Sequence[int]) -> BranchEvalResult:

@@ -48,6 +48,7 @@ class _FakeCudaFacade:
     def __init__(self):
         self._peak_allocated = 12345
         self._peak_reserved = 23456
+        self.reset_peak_memory_stats_call_count = 0
 
     def is_available(self):
         return True
@@ -62,7 +63,7 @@ class _FakeCudaFacade:
         return 2000
 
     def reset_peak_memory_stats(self):
-        pass
+        self.reset_peak_memory_stats_call_count += 1
 
     def max_memory_allocated(self):
         return self._peak_allocated
@@ -211,11 +212,12 @@ def test_run_fullkv_worker_executes_the_real_body_end_to_end():
     config = _build_fake_discovery_config()
     manifest = _FakeManifest()
     model = _FakeModel()
+    fake_cuda = _FakeCudaFacade()
 
     result_dict = run_fullkv_worker(
         config, manifest,
         _load_model=lambda: model, _load_tokenizer=lambda: _FakeTokenizer(),
-        _fresh_cache_factory=lambda: _FakeCache(NUM_LAYERS), _cuda=_FakeCudaFacade(), _device="cpu",
+        _fresh_cache_factory=lambda: _FakeCache(NUM_LAYERS), _cuda=fake_cuda, _device="cpu",
     )
 
     result = FullKVWorkerResult.model_validate(result_dict)
@@ -231,6 +233,10 @@ def test_run_fullkv_worker_executes_the_real_body_end_to_end():
     assert result.determinism_policy["framework_seed"] == 13
     assert result.runtime_generation["generation_mode"] == "greedy"
     assert result.runtime_generation["do_sample"] is False
+    # B1 execution-boundary closure §4: `reset_patched_state` (called here
+    # to build the natural-generation state) must not add a second, hidden
+    # peak-memory reset on top of the worker's own explicit one.
+    assert fake_cuda.reset_peak_memory_stats_call_count == 1
 
 
 def test_run_fullkv_worker_requires_cuda_when_no_fake_backend_injected():
@@ -250,11 +256,12 @@ def test_run_rkv_worker_executes_the_real_body_through_pass1():
     manifest = _FakeManifest()
     rkv_lock = config.rkv
     model = _FakeModel(rkv_lock=rkv_lock)
+    fake_cuda = _FakeCudaFacade()
 
     result_dict = run_rkv_worker(
         config, manifest,
         _load_model=lambda: model, _load_tokenizer=lambda: _FakeTokenizer(),
-        _fresh_cache_factory=lambda: _FakeCache(NUM_LAYERS), _cuda=_FakeCudaFacade(), _device="cpu",
+        _fresh_cache_factory=lambda: _FakeCache(NUM_LAYERS), _cuda=fake_cuda, _device="cpu",
     )
 
     result = RKVWorkerResult.model_validate(result_dict)
@@ -273,6 +280,12 @@ def test_run_rkv_worker_executes_the_real_body_through_pass1():
     assert result.selected_event_count_exact is False
     assert result.attempted_real_pair_count == 0
     assert result.determinism_policy["framework_seed"] == 13
+    # B1 execution-boundary closure §4: the worker's own explicit reset
+    # (once, before any state construction) must be the ONLY peak-memory
+    # reset -- `reset_patched_state`, called here to build Pass 1's initial
+    # state, must not add a second, hidden one now that it owns model/cache
+    # state only.
+    assert fake_cuda.reset_peak_memory_stats_call_count == 1
 
 
 def test_run_rkv_worker_requires_cuda_when_no_fake_backend_injected():

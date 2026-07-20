@@ -2,6 +2,29 @@
 
 ## Current status (read this first)
 
+**Phase B1 execution-boundary closure (2026-07-20)** is a forward
+completion pass on top of the already-pushed, already-self-recorded-
+INCOMPLETE B1B-R4.1 commit, repairing five concrete defects a fresh
+evidence-based audit found: `reset_patched_state` no longer secretly
+resets CUDA peak-memory stats (was silently wiping Pass 1's accumulated
+peak during Pass 2's state construction); baseline/swapped branch
+evaluation now releases down to a compact score object the instant each
+branch finishes, not just the initial snapshot clone; the semantic swap on
+an already-owned clone no longer clones the cache a second time; the
+`semantic_swap_parity` gate now requires positive attempted/passed counts
+instead of absence-of-a-failure-record; three new gate conditions replace
+a bare per-event pair count with exact, duplicate-detecting identity
+accounting. 20 new CPU tests; full non-GPU suite: 970 passed, 0 failed.
+Full detail, including an HONEST itemized list of what remains — largest:
+`Pass2Result.target_captures` still retains full capture tensors through
+all 12+1 pair evaluations, no `CompactBranchTarget` conversion was built;
+plus no CUDA-synchronized timing, no VRAM phase split, no Hub snapshot
+resolver, no strict single-GPU load path, no immutable attempt-directory
+architecture, and more:
+`docs/B1_EXECUTION_BOUNDARY_FINAL_CLOSURE.md`. **Status: B1
+EXECUTION-BOUNDARY CLOSURE VERDICT: INCOMPLETE — B2A/GPU REMAIN BLOCKED.
+No discovery result exists. No method exists.**
+
 **Phase B1B-R4.1 (2026-07-20)** is a forward completion pass on top of the
 already-pushed B1B-R4 commit, repairing seven concrete defects an
 evidence-based audit of the ACTUAL current code found (not B1B-R4's own

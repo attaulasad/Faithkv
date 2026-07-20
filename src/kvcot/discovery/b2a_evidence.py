@@ -27,7 +27,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from kvcot.discovery.constants import B2B_PILOT_EXAMPLE_COUNT, B2B_PILOT_TOTAL_REAL_PAIR_EVALUATIONS
+from kvcot.discovery.constants import (
+    B2A_REAL_PAIR_EVALUATIONS_TOTAL,
+    B2B_PILOT_EXAMPLE_COUNT,
+    B2B_PILOT_TOTAL_REAL_PAIR_EVALUATIONS,
+    REAL_PAIR_EVALUATIONS_PER_EVENT,
+)
 
 
 @dataclass(frozen=True)
@@ -180,6 +185,87 @@ def derive_observed_retention_ratio(example_result) -> float:
         mean_final_len = sum(trace.cache_length_final_per_layer.values()) / len(trace.cache_length_final_per_layer)
         return mean_final_len / total_tokens if total_tokens > 0 else 0.0
     return 0.0
+
+
+PairIdentity = tuple[int, int, int, int, int, str]
+
+
+@dataclass(frozen=True)
+class PairIdentityEvidence:
+    """B1 execution-boundary closure §13: exact, DUPLICATE-DETECTING
+    identity accounting -- a stable identity tuple `(compaction_event_id,
+    layer_index, kv_head_index, evicted_absolute_position,
+    donor_absolute_position, pair_kind)` per completed pair, never a bare
+    per-event COUNT (`count >= 4`, the prior derivation) that cannot tell
+    four genuinely distinct pairs apart from the same pair counted (or
+    somehow recorded) four times. Computed entirely from
+    `example_result.pair_records` -- no new per-pair state needed beyond
+    what `kvcot.discovery.schemas.SwapPairRecord` already carries."""
+
+    unique_completed_real_pair_count: int
+    events_with_exactly_four_unique_real_pairs: int
+    has_duplicate_real_pair_identity: bool
+    completed_no_op_pair_count: int
+    has_duplicate_no_op_pair_identity: bool
+
+
+def _pair_identity(record) -> PairIdentity:
+    kind = "no_op" if record.is_noop_control else "real"
+    return (
+        record.compaction_event_id, record.layer_index, record.kv_head_index,
+        record.evicted_absolute_token_position, record.retained_absolute_token_position, kind,
+    )
+
+
+def derive_pair_identity_evidence(example_result) -> PairIdentityEvidence:
+    real_identities = [_pair_identity(r) for r in example_result.pair_records if not r.is_noop_control]
+    no_op_identities = [_pair_identity(r) for r in example_result.pair_records if r.is_noop_control]
+
+    by_event: dict[int, set[PairIdentity]] = {}
+    for identity in real_identities:
+        by_event.setdefault(identity[0], set()).add(identity)
+    events_with_exactly_four = sum(
+        1 for identities in by_event.values() if len(identities) == REAL_PAIR_EVALUATIONS_PER_EVENT
+    )
+
+    return PairIdentityEvidence(
+        unique_completed_real_pair_count=len(set(real_identities)),
+        events_with_exactly_four_unique_real_pairs=events_with_exactly_four,
+        has_duplicate_real_pair_identity=len(real_identities) != len(set(real_identities)),
+        completed_no_op_pair_count=len(no_op_identities),
+        has_duplicate_no_op_pair_identity=len(no_op_identities) != len(set(no_op_identities)),
+    )
+
+
+@dataclass(frozen=True)
+class SemanticSwapCheckEvidence:
+    """B1 execution-boundary closure §12: POSITIVE semantic-swap-check
+    evidence -- `checks_required` is the frozen B2A constant (12 real
+    pairs); `checks_attempted`/`checks_passed` are summed directly off
+    `example_result.semantic_swap_checks_attempted`/`.semantic_swap_checks_passed`
+    (`kvcot.discovery.orchestrator.run_example`, itself reading
+    `PairBuildResult.semantic_swap_check_attempted`/`.semantic_swap_check_passed`
+    at every return point in `kvcot.discovery.pipeline.build_swap_pair_record`)
+    -- never derived from "no semantic_swap_parity_failure record exists in
+    pair_failure_details", which is vacuously true for a pair whose check
+    was never reached. The gate condition requires
+    `checks_attempted == checks_required == 12` AND `checks_failed == 0`."""
+
+    checks_required: int
+    checks_attempted: int
+    checks_passed: int
+    checks_failed: int
+
+
+def derive_semantic_swap_check_evidence(example_result) -> SemanticSwapCheckEvidence:
+    attempted = example_result.semantic_swap_checks_attempted
+    passed = example_result.semantic_swap_checks_passed
+    return SemanticSwapCheckEvidence(
+        checks_required=B2A_REAL_PAIR_EVALUATIONS_TOTAL,
+        checks_attempted=attempted,
+        checks_passed=passed,
+        checks_failed=attempted - passed,
+    )
 
 
 def derive_no_op_numerical_parity(example_result) -> bool:

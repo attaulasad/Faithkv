@@ -411,6 +411,66 @@ def test_baseline_snapshot_clone_is_released_before_swapped_clone_is_created(mon
     )
 
 
+def test_baseline_branch_eval_result_is_released_before_swapped_snapshot_is_cloned(monkeypatch):
+    """B1 execution-boundary closure §8: it is not enough to release the
+    baseline SNAPSHOT clone (already proven by
+    `test_baseline_snapshot_clone_is_released_before_swapped_clone_is_created`)
+    -- the full `BranchEvalResult` `evaluate_branch` returns (specifically
+    its `final_cache_state`, a complete live cache on the real-model path)
+    must ALSO be unreachable before the swapped branch is even cloned, not
+    merely released by the time the whole pair finishes. Proven via a
+    weakref to the exact `final_cache_state` object `evaluate_branch`
+    returns for baseline, captured by wrapping `pipeline.evaluate_branch`
+    itself."""
+    import gc
+    import weakref
+
+    import kvcot.discovery.pipeline as pipeline_mod
+
+    install_fake_rkv_compression_module(monkeypatch)
+    prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
+    trace = run_natural_pass1(
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, decode_one_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID,
+        _always_correct,
+    )
+    plan, _ = build_pass1_plan(trace, NUM_LAYERS, NUM_HEADS, IDENTITY)
+    pass2_result = run_pass2_capture(
+        plan, trace.full_token_ids, HarnessState(), prefill_fn, decode_one_fn, build_snapshot_from_state
+    )
+    target_capture = pass2_result.target_captures[0]
+    cd = target_capture.event_plan.candidate_donor_selection
+
+    final_cache_state_refs: list[weakref.ReferenceType] = []
+    real_evaluate_branch = pipeline_mod.evaluate_branch
+
+    def _spying_evaluate_branch(step_fn, initial_cache_state, bridge_token_id, reference_token_ids):
+        result = real_evaluate_branch(step_fn, initial_cache_state, bridge_token_id, reference_token_ids)
+        final_cache_state_refs.append(weakref.ref(result.final_cache_state))
+        return result
+
+    monkeypatch.setattr(pipeline_mod, "evaluate_branch", _spying_evaluate_branch)
+
+    def _non_retaining_step_fn(state, token_id):
+        logits, _ = branch_step_fn(state, token_id)
+        return logits, state.clone()  # never hands back the caller's own object
+
+    build_result = build_swap_pair_record(
+        example_id="ex-1", model_revision="rev-a", rkv_revision="rkv-rev",
+        target_capture=target_capture,
+        evicted_absolute_position=cd.evicted_selected[0], donor_absolute_position=cd.donor_selected[0],
+        trace=trace, branch_step_fn=_non_retaining_step_fn,
+    )
+    assert build_result.record is not None, build_result.failure_detail
+
+    assert len(final_cache_state_refs) == 2  # baseline, then swapped
+    gc.collect()
+    baseline_final_cache_ref = final_cache_state_refs[0]
+    assert baseline_final_cache_ref() is None, (
+        "baseline's full BranchEvalResult (and its final_cache_state) was still reachable after "
+        "the compact score was extracted -- it must be released before the swapped branch begins"
+    )
+
+
 def test_semantic_swap_parity_passes_and_reports_zero_bytes_changed_on_the_real_happy_path(monkeypatch):
     """The companion positive case: with the real (unpatched)
     `apply_semantic_within_head_swap`, `net_physical_bytes_changed` must be
@@ -445,6 +505,98 @@ def test_semantic_swap_parity_passes_and_reports_zero_bytes_changed_on_the_real_
     assert build_result.record is not None, build_result.failure_detail
     assert build_result.record.parity_check_passed is True
     assert build_result.record.net_physical_bytes_changed == 0
+    # B1 execution-boundary closure §12: the check was attempted AND passed
+    # -- positive evidence, set at the return point, not inferred later.
+    assert build_result.semantic_swap_check_attempted is True
+    assert build_result.semantic_swap_check_passed is True
+
+
+def test_semantic_swap_check_attempted_but_not_passed_when_provenance_update_missing(monkeypatch):
+    """Companion to `test_semantic_swap_parity_is_derived_and_catches_a_missing_provenance_update`:
+    confirms `PairBuildResult.semantic_swap_check_attempted`/`.semantic_swap_check_passed`
+    reflect that specific failure -- attempted (the swap itself succeeded),
+    but not passed (the derived parity failed)."""
+    import kvcot.discovery.pipeline as pipeline_mod
+    from kvcot.generation.provenance import LayerProvenance, ModelProvenance
+
+    install_fake_rkv_compression_module(monkeypatch)
+    prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
+
+    trace = run_natural_pass1(
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, decode_one_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID,
+        _always_correct,
+    )
+    plan, failure = build_pass1_plan(trace, NUM_LAYERS, NUM_HEADS, IDENTITY)
+    assert failure is None and plan is not None
+
+    pass2_result = run_pass2_capture(
+        plan, trace.full_token_ids, HarnessState(), prefill_fn, decode_one_fn, build_snapshot_from_state
+    )
+    target_capture = pass2_result.target_captures[0]
+    cd = target_capture.event_plan.candidate_donor_selection
+
+    fake_provenance = ModelProvenance(
+        layers={
+            i: LayerProvenance(
+                positions=torch.arange(target_capture.pristine_snapshot.key_cache[i].shape[-2])
+                .unsqueeze(0)
+                .expand(NUM_HEADS, -1)
+                .clone()
+            )
+            for i in range(NUM_LAYERS)
+        }
+    )
+    pristine_with_provenance = dataclasses.replace(target_capture.pristine_snapshot, provenance=fake_provenance)
+    target_capture_with_provenance = dataclasses.replace(target_capture, pristine_snapshot=pristine_with_provenance)
+
+    real_apply = pipeline_mod.apply_semantic_within_head_swap
+
+    def _reporting_no_provenance_update(*args, **kwargs):
+        result = real_apply(*args, **kwargs)
+        return dataclasses.replace(result, provenance_updated=False)
+
+    monkeypatch.setattr(pipeline_mod, "apply_semantic_within_head_swap", _reporting_no_provenance_update)
+
+    build_result = build_swap_pair_record(
+        example_id="ex-1", model_revision="rev-a", rkv_revision="rkv-rev",
+        target_capture=target_capture_with_provenance,
+        evicted_absolute_position=cd.evicted_selected[0], donor_absolute_position=cd.donor_selected[0],
+        trace=trace, branch_step_fn=branch_step_fn,
+    )
+
+    assert build_result.semantic_swap_check_attempted is True
+    assert build_result.semantic_swap_check_passed is False
+
+
+def test_semantic_swap_check_not_attempted_when_candidate_donor_pool_lookup_fails(monkeypatch):
+    """A pair that fails BEFORE the swap is even called (candidate/donor
+    not found in the pre-event pool) must report
+    `semantic_swap_check_attempted=False` -- the check never ran, so it
+    cannot be reported as having run and passed."""
+    install_fake_rkv_compression_module(monkeypatch)
+    prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
+    trace = run_natural_pass1(
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, decode_one_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID,
+        _always_correct,
+    )
+    plan, failure = build_pass1_plan(trace, NUM_LAYERS, NUM_HEADS, IDENTITY)
+    assert failure is None and plan is not None
+    pass2_result = run_pass2_capture(
+        plan, trace.full_token_ids, HarnessState(), prefill_fn, decode_one_fn, build_snapshot_from_state
+    )
+    target_capture = pass2_result.target_captures[0]
+
+    build_result = build_swap_pair_record(
+        example_id="ex-1", model_revision="rev-a", rkv_revision="rkv-rev",
+        target_capture=target_capture,
+        evicted_absolute_position=999_999,  # not in any pool -- pool lookup fails immediately
+        donor_absolute_position=999_998,
+        trace=trace, branch_step_fn=branch_step_fn,
+    )
+
+    assert build_result.record is None
+    assert build_result.semantic_swap_check_attempted is False
+    assert build_result.semantic_swap_check_passed is False
 
 
 # --------------------------------------------------------------------------

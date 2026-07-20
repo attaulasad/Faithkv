@@ -1,6 +1,34 @@
 # Plan and status
 
-## Current status: Phase B1B-R4.1 — focused completion amendment on B1B-R4 — INCOMPLETE; GPU/B2A/B2B STILL BLOCKED
+## Current status: Phase B1 execution-boundary closure — focused completion pass on B1B-R4.1 — INCOMPLETE; GPU/B2A/B2B STILL BLOCKED
+
+**Phase B1 execution-boundary closure (2026-07-20, CHANGELOG.md) is a
+forward completion pass on top of the already-pushed B1B-R4.1 commit**
+(`4e45beac1912a0a7852a034420732a10d0d703e7`, itself already self-recorded
+INCOMPLETE), fixing five concrete defects a fresh evidence-based audit (16
+numbered claims, all 16 confirmed against the actual current code)
+found: `reset_patched_state` no longer secretly resets CUDA peak-memory
+stats (the R-KV worker's Pass-2 state construction was silently wiping
+Pass 1's already-accumulated peak); baseline/swapped branch evaluation now
+releases down to a compact score object the instant each branch finishes,
+not just the initial snapshot clone (the prior pass's own gap, closed one
+layer deeper); the semantic swap on an already-owned snapshot clone no
+longer clones the cache a second time; the `semantic_swap_parity` gate
+condition now requires POSITIVE attempted/passed counts instead of
+absence-of-a-failure-record; three new gate conditions replace a bare
+per-event pair count with exact, duplicate-detecting pair-identity
+accounting. 20 new CPU tests; full non-GPU suite: 970 passed, 0 failed.
+Full detail, including an HONEST itemized list of everything still open
+(largest: `Pass2Result.target_captures` still retains full capture tensors
+through all 12+1 pair evaluations — no `CompactBranchTarget` conversion
+was built; plus no CUDA-synchronized timing, no VRAM phase split, no full
+worker-level success test, no Hub snapshot resolver, no strict single-GPU
+load path, no immutable attempt-directory architecture, and more):
+`docs/B1_EXECUTION_BOUNDARY_FINAL_CLOSURE.md`. **Status: B1
+EXECUTION-BOUNDARY CLOSURE VERDICT: INCOMPLETE — B2A/GPU REMAIN BLOCKED.
+No discovery result exists. No method exists.**
+
+## Prior status: Phase B1B-R4.1 — focused completion amendment on B1B-R4 — INCOMPLETE; GPU/B2A/B2B STILL BLOCKED
 
 **Phase B1B-R4.1 (2026-07-20, CHANGELOG.md) is a forward completion pass on
 top of the already-pushed B1B-R4 commit** (`4d7971b7b09c004c4670bfde

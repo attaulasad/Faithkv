@@ -1,5 +1,18 @@
 # B1B-R4.1 — focused completion amendment on B1B-R4 (CPU-only, no GPU)
 
+> **Superseding note (2026-07-20):** this document's own verdict below
+> (INCOMPLETE) was correct and remains the historical record of what this
+> pass actually did — not edited retroactively. A further forward pass,
+> **B1 execution-boundary closure**
+> (`docs/B1_EXECUTION_BOUNDARY_FINAL_CLOSURE.md`), closed five of the items
+> §5 below lists as remaining (the hidden CUDA peak-memory reset, baseline
+> branch live-cache retention, a redundant semantic-swap clone, the
+> semantic-swap gate's absence-of-failure derivation, and the pair-identity
+> bare-count gate) and itemizes what is still open after that pass, largest
+> being `Pass2Result.target_captures` still retaining full capture tensors
+> through the pair loop. That later document is authoritative for current
+> status; this one is preserved as-is for the historical record.
+
 Run on branch `research/b1b-r4-final-b2a-closure`, on top of commit
 `4d7971b7b09c004c4670bfde3939416ab550ea71` ("Complete B1B-R4 final B2A
 closure", already pushed). This document does not undo, reset, or rewrite

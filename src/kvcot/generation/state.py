@@ -82,6 +82,24 @@ def reset_patched_state(model: Any, fresh_cache_factory: Callable[[], Any]) -> A
 
     Returns the fresh cache so callers thread it through the next forward
     call explicitly — this function never holds cache state itself.
+
+    B1 execution-boundary closure (2026-07-20): this function owns MODEL
+    and CACHE state only -- it must never reset, synchronize, or otherwise
+    touch CUDA memory-measurement state. It used to call
+    `torch.cuda.reset_peak_memory_stats()` as a bundled side effect, which
+    is a genuine measurement-integrity defect for any caller that
+    constructs more than one fresh state within a single measured window
+    (`kvcot.discovery.b2a_workers.run_rkv_worker` calls this once for Pass
+    1's initial state and once more, via `pass2_initial_state_factory`,
+    for Pass 2's -- the SECOND call used to silently wipe whatever peak
+    Pass 1 had already accumulated, moments before Pass 2 even started).
+    Peak-memory reset is now owned exclusively by each caller's own
+    measurement-boundary code (`kvcot.discovery.b2a_workers` already had
+    its own explicit, correctly-scoped reset per worker spanning Pass 1
+    through Pass 2 and branch evaluation; `kvcot.cli.cmd_generate` and
+    `kvcot.generation.replay.replay_and_snapshot` gained an equivalent
+    explicit reset immediately adjacent to their own `reset_patched_state`
+    call, preserving their exact prior behavior).
     """
     # self.length (modeling.py:560-563) — cumulative absolute token counter
     # on the CausalLM model object. Deleting it (not zeroing it) matches
@@ -120,9 +138,6 @@ def reset_patched_state(model: Any, fresh_cache_factory: Callable[[], Any]) -> A
                 kv_cluster.kept_similarity_scores = []
             if hasattr(kv_cluster, "kept_final_scores"):
                 kv_cluster.kept_final_scores = []
-
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
 
     # query_cache (modeling.py:260-261) needs no explicit reset here: it is
     # a `hasattr`-gated dict dynamically attached to the Cache object, so a
