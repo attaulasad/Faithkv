@@ -2290,6 +2290,59 @@ def cmd_plan_discovery(args: argparse.Namespace) -> int:
     return 0
 
 
+# ----------------------------------------------------------------- prepare-b2a-manifest
+#
+# CPU-only real resolution of the B2A one-example manifest's prompt
+# identity (B1B-R3 §5/§20). `--dry-run` prints the exact plan (dataset
+# repo/revision/index, tokenizer name/revision, existing manifest state)
+# without downloading or writing anything. `--execute` fetches the pinned
+# MATH-500 row and loads the pinned tokenizer ONLY (never model weights),
+# then atomically writes the resolved manifest -- refuses to overwrite an
+# already-populated manifest without `--force`.
+
+
+def cmd_prepare_b2a_manifest(args: argparse.Namespace) -> int:
+    from kvcot.discovery.discovery_config import load_discovery_config
+    from kvcot.discovery.manifest_prepare import (
+        ManifestPreparationError,
+        ManifestPreparationRefused,
+        build_plan,
+        prepare_manifest,
+    )
+
+    config = load_discovery_config(args.config)
+    plan = build_plan(config, force=args.force)
+
+    if args.dry_run:
+        print("prepare-b2a-manifest dry-run plan:")
+        print(f"  dataset: {plan.dataset_repo}@{plan.dataset_revision} config={plan.dataset_config} split={plan.dataset_split}")
+        print(f"  example_index: {plan.example_index}")
+        print(f"  tokenizer: {plan.tokenizer_name}@{plan.tokenizer_revision}")
+        print(f"  existing_manifest_path: {plan.existing_manifest_path}")
+        print(f"  existing_manifest_is_prompt_resolved: {plan.existing_manifest_is_prompt_resolved}")
+        print(f"  force: {plan.force}")
+        print("  no download, no write performed by --dry-run")
+        return 0
+
+    if not args.execute:
+        raise SystemExit("prepare-b2a-manifest requires exactly one of --dry-run or --execute.")
+
+    try:
+        manifest = prepare_manifest(config, force=args.force)
+    except ManifestPreparationRefused as e:
+        raise SystemExit(str(e)) from e
+    except ManifestPreparationError as e:
+        raise SystemExit(str(e)) from e
+
+    print(f"prepare-b2a-manifest: wrote {plan.existing_manifest_path}")
+    print(f"  unique_id={manifest.unique_id}")
+    print(f"  raw_content_hash={manifest.raw_content_hash}")
+    print(f"  prompt_token_ids_sha256={manifest.prompt_token_ids_sha256}")
+    print(f"  prompt_token_count={manifest.prompt_token_count}")
+    print(f"  manifest_hash={manifest.manifest_hash()}")
+    return 0
+
+
 # --------------------------------------------------------------------- b2a-calibrate
 #
 # One-example-only B2A calibration command (B1B-R2 §11). "B2A is a one-
@@ -2407,27 +2460,20 @@ def cmd_b2a_calibrate(args: argparse.Namespace) -> int:
         raise SystemExit("b2a-calibrate --execute requires CUDA; none is available on this machine.")
 
     from kvcot.discovery.b2a_execute import run_b2a_calibration
+    from kvcot.discovery.manifest import DEFAULT_MANIFEST_PATH
 
-    artifact = run_b2a_calibration(config, manifest)
+    # The coordinator never loads a model itself (B1B-R3 §11) -- it launches
+    # the FullKV and R-KV workers as separate subprocesses, each re-loading
+    # config/manifest from these same paths independently.
+    artifact = run_b2a_calibration(
+        config, manifest, config_path=str(args.config), manifest_path=str(DEFAULT_MANIFEST_PATH),
+    )
     print(f"b2a-calibrate result: passed={artifact.gate_result.passed}")
+    print(f"  artifact written: {artifact.artifact_path}")
     if not artifact.gate_result.passed:
         print(f"  failed_conditions={artifact.gate_result.failed_conditions}")
         return 2
 
-    out_path = Path("results/decisions") / f"b2a_calibration_{manifest.unique_id.replace('/', '_')}.json"
-    write_json(
-        out_path,
-        {
-            "config_hash": artifact.config_hash,
-            "manifest_hash": artifact.manifest_hash,
-            "gate_result": {
-                k: v for k, v in artifact.gate_result.__dict__.items()
-            },
-            "example_valid": artifact.example_result.valid,
-            "n_pair_records": len(artifact.example_result.pair_records),
-        },
-    )
-    print(f"  artifact written: {out_path}")
     print("  stop: B2B pilot NOT started by this command.")
     return 0
 
@@ -2512,6 +2558,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", required=True)
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_plan_discovery)
+
+    p = sub.add_parser(
+        "prepare-b2a-manifest",
+        help="CPU-only: resolve the B2A one-example manifest's prompt identity from the live tokenizer.",
+    )
+    p.add_argument("--config", required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--execute", action="store_true")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(func=cmd_prepare_b2a_manifest)
 
     p = sub.add_parser(
         "b2a-calibrate",

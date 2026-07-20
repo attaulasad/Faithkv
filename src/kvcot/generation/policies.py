@@ -29,6 +29,13 @@ class RKVMethodConfig:
     divide_method: str = "step_length"
     divide_length: int = 128
     compression_content: str = "all"
+    # R1KV.__init__'s own default (third_party/R-KV/HuggingFace/rkv/compression/
+    # r1_kv.py) -- never overridden by the primary Qwen pipeline (configs/lock.yaml
+    # has no kernel_size row, CLAUDE.md §4), so this default preserves that
+    # pipeline's existing, already-validated behavior exactly. The discovery-track
+    # B2A path (kvcot.discovery.b2a_execute) passes its own frozen value
+    # (DiscoveryRkvLock.kernel_size) explicitly instead of relying on this default.
+    kernel_size: int = 7
     # Our provenance adapter needs this; docs/UPSTREAM_AUDIT.md H5 confirms
     # enabling it does not alter R-KV's scores or selected indices.
     record_kept_token_indices: bool = True
@@ -118,6 +125,7 @@ class _PatchedPolicyBase(Policy):
                 "mix_lambda": mc.mix_lambda,
                 "retain_ratio": mc.retain_ratio,
                 "retain_direction": mc.retain_direction,
+                "kernel_size": mc.kernel_size,
                 "first_tokens": 4,  # accepted by upstream's CLI shape; unused by R1KV.__init__ (absorbed by **kwargs)
                 "record_kept_token_indices": mc.record_kept_token_indices,
             },
@@ -211,6 +219,7 @@ class RKVPolicy(_PatchedPolicyBase):
         divide_method: str = "step_length",
         divide_length: int = 128,
         compression_content: str = "all",
+        kernel_size: int = 7,
     ):
         super().__init__(
             RKVMethodConfig(
@@ -222,6 +231,7 @@ class RKVPolicy(_PatchedPolicyBase):
                 divide_method=divide_method,
                 divide_length=divide_length,
                 compression_content=compression_content,
+                kernel_size=kernel_size,
             )
         )
         self.condition_name = f"rkv_b{budget}"

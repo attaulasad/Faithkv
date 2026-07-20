@@ -40,7 +40,7 @@ from kvcot.discovery.nll import mean_nll
 from kvcot.discovery.pass1 import NaturalRunTrace
 from kvcot.discovery.pass2 import TargetCapture
 from kvcot.discovery.schemas import SwapPairRecord
-from kvcot.discovery.swap import SwapAliasingError, SwapIndexError, apply_within_head_swap
+from kvcot.discovery.swap import SwapAliasingError, SwapIndexError, apply_semantic_within_head_swap
 from kvcot.discovery.uncertainty import UncertaintySignal, compute_pair_uncertainty_signals
 from kvcot.generation.state import ModelStateSnapshot
 from kvcot.utils.hashing import sha256_int_ids
@@ -146,20 +146,18 @@ def build_swap_pair_record(
     swapped_snapshot = pristine.clone()
 
     try:
-        swap_result = apply_within_head_swap(
-            key_cache=swapped_snapshot.key_cache,
-            value_cache=swapped_snapshot.value_cache,
+        semantic_swap = apply_semantic_within_head_swap(
+            swapped_snapshot,
             layer_index=ev.layer_index,
             kv_head_index=head,
             retained_post_storage_position=donor_post_idx,
             candidate_key=candidate_key,
             candidate_value=candidate_value,
+            donor_absolute_position=donor_absolute_position,
+            candidate_absolute_position=evicted_absolute_position,
         )
     except (SwapIndexError, SwapAliasingError) as exc:
         return PairBuildResult(None, STAGE_BRANCH_EVALUATION_FAILURE, f"swap_failed: {exc}")
-
-    swapped_snapshot.key_cache = swap_result.key_cache
-    swapped_snapshot.value_cache = swap_result.value_cache
 
     # Evaluation order (baseline first, here) cannot contaminate results:
     # `baseline_snapshot`/`swapped_snapshot` are independent clones with no

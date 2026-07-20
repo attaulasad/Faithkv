@@ -1,0 +1,40 @@
+name: CPU tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'research/**'
+
+jobs:
+  cpu-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Initialize pinned R-KV submodule
+        run: git submodule update --init --recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install CPU/test dependencies only
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[cpu-tools,dev]"
+
+      - name: Byte-compile source and tests
+        run: python -m compileall src tests
+
+      - name: Collect tests (no execution)
+        run: python -m pytest --collect-only
+
+      - name: Run CPU-safe test suite
+        run: python -m pytest -m "not gpu" -q
+
+      - name: Check for whitespace/diff issues
+        run: git diff --check

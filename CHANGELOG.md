@@ -5,6 +5,62 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-20 — Phase B1B-R3: executable B2A boundary and evidence producer (no GPU used, no model inference, no model weights downloaded; one pinned MATH-500 row and the pinned tokenizer's config-only files downloaded via `kvcot prepare-b2a-manifest --execute`; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; PR #18 merge not undone)
+
+Run on branch `research/b1b-r3-executable-closure`, cut from `main` at
+commit `7034e46b516eff656b5508d9253ee02b13405f95` (the merged PR #18,
+B1B-R2). Full detail: `docs/B1B_R3_EXECUTABLE_STATE_CLOSURE.md`.
+
+**Authorization.** No new `CLAUDE.md` exception — stays inside the
+CPU-side harness architecture already authorized by §1b/§4b, plus the
+already-permitted "pinned tokenizer/config files" and "one pinned MATH-500
+row" CPU-only downloads. No model weights, no CUDA, no Vast.ai activity of
+any kind.
+
+**Twelve audit-defect repairs** (independent audit of merged PR #18):
+(1) `RKVPolicy` was being constructed with a config object as its
+positional `budget` argument — fixed to explicit keywords, and the
+previously-unwired `kernel_size` field is now threaded through and
+runtime-verified (`kvcot.discovery.runtime_rkv_verification`); (2) the
+one-example manifest's prompt identity is now genuinely resolved
+(`kvcot prepare-b2a-manifest`, new CPU-only command) — this also caught
+and corrected a non-reproducible `raw_content_hash` left over from B1B-R2;
+(3) a real MATH-500 answer verifier
+(`kvcot.discovery.math500_verification`) replaces a stub that always
+returned `"unverifiable"`, unblocking Pass 2; (4) `RealModelState`'s
+provenance was silently never populated between forward calls (missing
+position-append step) — unified into one shared `advance_after_forward`
+helper (`kvcot.discovery.real_model_adapter`), used by Pass 1, Pass 2, and
+branch continuation alike; (5) branch evaluation now restores a snapshot
+exactly once per branch (`build_real_branch_step_fn_restore_once`) instead
+of once per scored token; (6) swap bookkeeping
+(`apply_semantic_within_head_swap`, `kvcot.discovery.swap`) now keeps
+provenance and R-KV kept-index history consistent with the K/V content it
+swaps; (7) every B2A gate-evidence field is now derived from an actual
+observation (`kvcot.discovery.b2a_evidence`) instead of a hard-coded
+literal; (8) FullKV and R-KV now run in separate OS subprocesses
+(`kvcot.discovery.b2a_workers`, `kvcot.discovery.b2a_worker_entry`),
+coordinated by `kvcot.discovery.b2a_execute.run_b2a_calibration`; (9)
+no-op accounting now has an explicit `NoOpMode` policy separating the
+CPU-mandatory per-event no-op from B2A's single numerical calibration;
+(10) every B2A attempt (pass, fail, or exception) now writes an immutable
+artifact (`kvcot.discovery.b2a_artifact`); (11) selected-capture size
+tightening beyond B1B-R2's existing target-count bound was assessed and
+deliberately deferred — documented, not silently claimed complete; (12)
+frozen-vs-runtime R-KV configuration drift is covered by (1)'s runtime
+verification.
+
+Also new: a CPU GitHub Actions workflow
+(`.github/workflows/cpu-tests.yml`) and a frozen-framework-seed
+application/recording module (`kvcot.discovery.framework_seed`).
+
+**Validation performed (CPU-only):** `python -m compileall src tests`;
+`pytest --collect-only`; `pytest -m "not gpu" -q` (843 passed, 14
+deselected); `kvcot prepare-b2a-manifest --dry-run` and `--execute`
+(network available, real resolution performed); `kvcot b2a-calibrate
+--dry-run` (exit 0, no blockers). No CUDA test was executed; no Llama-8B
+weights were downloaded; B2A/B2B were not run.
+
 ## 2026-07-20 — Phase B1B-R2: real-model boundary and B2A preflight (no GPU used, no model inference, no model weights downloaded; MATH-500 dataset revision independently verified against the live Hugging Face Hub API — no weights or rows downloaded; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; PR #17 merge not undone)
 
 Run on branch `research/b1b-r2-gpu-boundary-repair`, cut from `main` at

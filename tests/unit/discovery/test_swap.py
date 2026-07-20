@@ -1,7 +1,14 @@
 import pytest
 import torch
 
-from kvcot.discovery.swap import SwapAliasingError, SwapIndexError, apply_within_head_swap
+from kvcot.discovery.swap import (
+    SwapAliasingError,
+    SwapIndexError,
+    apply_semantic_within_head_swap,
+    apply_within_head_swap,
+)
+from kvcot.generation.provenance import LayerProvenance, ModelProvenance
+from kvcot.generation.state import ModelStateSnapshot
 
 NUM_LAYERS = 3
 NUM_HEADS = 4
@@ -272,3 +279,151 @@ def test_every_untouched_cache_slice_remains_bit_exact():
                     continue
                 assert torch.equal(result.key_cache[l][0, h, s, :], key_cache[l][0, h, s, :]), (l, h, s)
                 assert torch.equal(result.value_cache[l][0, h, s, :], value_cache[l][0, h, s, :]), (l, h, s)
+
+
+# --------------------------------------------------------------------------
+# B1B-R3 §10: apply_semantic_within_head_swap -- provenance/kept-index
+# bookkeeping consistency
+# --------------------------------------------------------------------------
+
+
+def _make_full_snapshot(seed: int) -> ModelStateSnapshot:
+    key_cache, value_cache = _make_cache(seed)
+    provenance = ModelProvenance(
+        layers={
+            l: LayerProvenance(positions=torch.arange(100 * (l + 1), 100 * (l + 1) + SEQ_LEN).unsqueeze(0).expand(NUM_HEADS, -1).clone())
+            for l in range(NUM_LAYERS)
+        }
+    )
+    kv_cluster_bookkeeping = [
+        {"kept_token_indices": [provenance.layers[l].positions.clone()]} for l in range(NUM_LAYERS)
+    ]
+    return ModelStateSnapshot(
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_cache={},
+        compression_flags_per_layer=["none"] * NUM_LAYERS,
+        model_length=SEQ_LEN,
+        after_think=None,
+        provenance=provenance,
+        kv_cluster_bookkeeping_per_layer=kv_cluster_bookkeeping,
+    )
+
+
+def test_semantic_swap_updates_kv_content_provenance_and_bookkeeping_consistently():
+    snapshot = _make_full_snapshot(seed=30)
+    layer_index, head_index, slot = 1, 2, 5
+    donor_absolute_position = int(snapshot.provenance.layers[layer_index].positions[head_index, slot].item())
+    candidate_absolute_position = donor_absolute_position + 12345  # a distinguishable, different identity
+    candidate_key = torch.full((HEAD_DIM,), 42.0)
+    candidate_value = torch.full((HEAD_DIM,), -42.0)
+
+    result = apply_semantic_within_head_swap(
+        snapshot,
+        layer_index=layer_index,
+        kv_head_index=head_index,
+        retained_post_storage_position=slot,
+        candidate_key=candidate_key,
+        candidate_value=candidate_value,
+        donor_absolute_position=donor_absolute_position,
+        candidate_absolute_position=candidate_absolute_position,
+    )
+
+    assert result.is_noop is False
+    assert result.provenance_updated is True
+    assert result.kept_index_bookkeeping_updated is True
+    assert torch.equal(snapshot.key_cache[layer_index][0, head_index, slot, :], candidate_key)
+    assert torch.equal(snapshot.value_cache[layer_index][0, head_index, slot, :], candidate_value)
+    assert int(snapshot.provenance.layers[layer_index].positions[head_index, slot].item()) == candidate_absolute_position
+    assert int(
+        snapshot.kv_cluster_bookkeeping_per_layer[layer_index]["kept_token_indices"][-1][head_index, slot].item()
+    ) == candidate_absolute_position
+
+
+def test_semantic_swap_touches_only_the_one_targeted_identity():
+    snapshot = _make_full_snapshot(seed=31)
+    layer_index, head_index, slot = 0, 1, 3
+    before_positions = {l: snapshot.provenance.layers[l].positions.clone() for l in range(NUM_LAYERS)}
+    donor_absolute_position = int(before_positions[layer_index][head_index, slot].item())
+
+    apply_semantic_within_head_swap(
+        snapshot,
+        layer_index=layer_index,
+        kv_head_index=head_index,
+        retained_post_storage_position=slot,
+        candidate_key=torch.zeros(HEAD_DIM),
+        candidate_value=torch.ones(HEAD_DIM),
+        donor_absolute_position=donor_absolute_position,
+        candidate_absolute_position=donor_absolute_position + 999,
+    )
+
+    for l in range(NUM_LAYERS):
+        for h in range(NUM_HEADS):
+            for s in range(SEQ_LEN):
+                expected = before_positions[l][h, s].item()
+                if (l, h, s) == (layer_index, head_index, slot):
+                    assert int(snapshot.provenance.layers[l].positions[h, s].item()) != expected
+                else:
+                    assert int(snapshot.provenance.layers[l].positions[h, s].item()) == expected
+
+
+def test_semantic_swap_noop_leaves_identity_unchanged():
+    snapshot = _make_full_snapshot(seed=32)
+    layer_index, head_index, slot = 1, 1, 4
+    existing_key = snapshot.key_cache[layer_index][0, head_index, slot, :].clone().contiguous()
+    existing_value = snapshot.value_cache[layer_index][0, head_index, slot, :].clone().contiguous()
+    donor_absolute_position = int(snapshot.provenance.layers[layer_index].positions[head_index, slot].item())
+
+    result = apply_semantic_within_head_swap(
+        snapshot,
+        layer_index=layer_index,
+        kv_head_index=head_index,
+        retained_post_storage_position=slot,
+        candidate_key=existing_key,
+        candidate_value=existing_value,
+        donor_absolute_position=donor_absolute_position,
+        candidate_absolute_position=donor_absolute_position,
+    )
+
+    assert result.is_noop is True
+    assert int(snapshot.provenance.layers[layer_index].positions[head_index, slot].item()) == donor_absolute_position
+
+
+def test_semantic_swap_does_not_alias_or_mutate_a_pristine_clone():
+    pristine = _make_full_snapshot(seed=33)
+    baseline = pristine.clone()
+    swapped = pristine.clone()
+    layer_index, head_index, slot = 2, 0, 7
+    donor_absolute_position = int(swapped.provenance.layers[layer_index].positions[head_index, slot].item())
+
+    apply_semantic_within_head_swap(
+        swapped,
+        layer_index=layer_index,
+        kv_head_index=head_index,
+        retained_post_storage_position=slot,
+        candidate_key=torch.full((HEAD_DIM,), 5.0),
+        candidate_value=torch.full((HEAD_DIM,), -5.0),
+        donor_absolute_position=donor_absolute_position,
+        candidate_absolute_position=donor_absolute_position + 1,
+    )
+
+    assert torch.equal(baseline.key_cache[layer_index], pristine.key_cache[layer_index])
+    assert int(baseline.provenance.layers[layer_index].positions[head_index, slot].item()) == donor_absolute_position
+    assert not torch.equal(swapped.key_cache[layer_index], pristine.key_cache[layer_index])
+
+
+def test_semantic_swap_without_provenance_or_bookkeeping_is_best_effort_and_still_swaps_kv():
+    key_cache, value_cache = _make_cache(seed=34)
+    snapshot = ModelStateSnapshot(
+        key_cache=key_cache, value_cache=value_cache, query_cache={},
+        compression_flags_per_layer=["none"] * NUM_LAYERS, model_length=SEQ_LEN, after_think=None,
+        provenance=None, kv_cluster_bookkeeping_per_layer=None,
+    )
+    result = apply_semantic_within_head_swap(
+        snapshot, layer_index=0, kv_head_index=0, retained_post_storage_position=0,
+        candidate_key=torch.zeros(HEAD_DIM), candidate_value=torch.ones(HEAD_DIM),
+        donor_absolute_position=0, candidate_absolute_position=1,
+    )
+    assert result.provenance_updated is False
+    assert result.kept_index_bookkeeping_updated is False
+    assert torch.equal(snapshot.key_cache[0][0, 0, 0, :], torch.zeros(HEAD_DIM))

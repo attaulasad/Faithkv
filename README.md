@@ -2,6 +2,36 @@
 
 ## Current status (read this first)
 
+**Phase B1B-R3 (2026-07-20)** repaired twelve defects found during an
+independent audit of the merged PR #18 (B1B-R2, commit
+`7034e46b516eff656b5508d9253ee02b13405f95` — merged before this pass,
+not reopened or reverted): an invalid `RKVPolicy` construction (a config
+object passed as the positional `budget` argument); the frozen prompt
+identity is now genuinely resolved via a new CPU-only `kvcot
+prepare-b2a-manifest` command (one pinned MATH-500 row, the pinned
+tokenizer's config files only — no model weights), which also caught and
+corrected a non-reproducible `raw_content_hash` left over from B1B-R2; a
+real MATH-500 answer verifier now replaces a stub that always returned
+"unverifiable"; the real-model adapter's provenance state was silently
+never populated (traced to a missing position-append step, now unified
+into one shared `advance_after_forward` helper); branch evaluation now
+restores a snapshot once per branch instead of once per scored token;
+swap bookkeeping (provenance, R-KV kept-index history) is now updated
+consistently with the K/V content it swaps; every B2A gate-evidence field
+is now derived from an actual observation instead of a hard-coded literal;
+FullKV and R-KV now run in separate OS subprocesses, coordinated and
+combined by a new worker architecture; no-op accounting now has an
+explicit policy separating the CPU-mandatory per-event no-op from B2A's
+single numerical calibration; every B2A attempt (pass, fail, or exception)
+now writes an immutable artifact; and the runtime R-KV configuration is now
+read back off the live model and compared against the frozen hash. One
+defect (further selected-capture size tightening beyond B1B-R2's existing
+target-count bound) was assessed and deliberately deferred, documented
+honestly rather than claimed complete. See
+`docs/B1B_R3_EXECUTABLE_STATE_CLOSURE.md`. **Status: B1B-R3 implemented,
+ready for independent CPU audit. GPU, B2A, and B2B remain blocked. No
+discovery result exists. No method exists.**
+
 **Phase B1B-R2 (2026-07-20)** repaired eight defects found during
 independent review of B1B-R1: absolute-position device/dtype parity in the
 capture wrapper; capture is now target-only and memory-bounded (an opt-in
