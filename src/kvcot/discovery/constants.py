@@ -17,40 +17,70 @@ BRIDGE_TOKEN_COUNT = 1
 EVENTS_SELECTED_PER_EXAMPLE = 3
 CANDIDATES_PER_EVENT = 2
 DONORS_PER_EVENT = 2
-PAIR_BRANCHES_PER_EVENT = CANDIDATES_PER_EVENT * DONORS_PER_EVENT
-B2B_PILOT_EXAMPLE_COUNT = 12
-# 3 events x 4 real cross-product swaps x 12 examples = 144 -- the no-op
-# control is mandatory but NEVER counted in this total (B1B-R2 §9).
-B2B_PILOT_TOTAL_REAL_BRANCHES = B2B_PILOT_EXAMPLE_COUNT * EVENTS_SELECTED_PER_EXAMPLE * PAIR_BRANCHES_PER_EVENT
 
-# B2A no-op numerical calibration count -- exactly ONE, drawn from the
-# shared orchestrator's structurally-always-3 (one-per-event) mandatory
-# no-op pairs, never one full additional no-op branch per event (B1B-R3
-# §13). `kvcot.discovery.b2a_execute` selects the FIRST valid one; the
-# other (structurally-produced, still CPU-mandatory) no-ops are extra
-# confirmatory data, never double-counted into any total.
+# B1B-R4 §4: "pair evaluation" is the frozen, unambiguous vocabulary -- one
+# candidate-donor pair evaluation contains one baseline continuation AND one
+# swapped continuation (never counted as two). `PAIR_BRANCHES_PER_EVENT` is
+# kept as a deprecated compatibility alias (old name, same value) so no
+# import site breaks; new code must use `REAL_PAIR_EVALUATIONS_PER_EVENT`.
+REAL_PAIR_EVALUATIONS_PER_EVENT = CANDIDATES_PER_EVENT * DONORS_PER_EVENT
+PAIR_BRANCHES_PER_EVENT = REAL_PAIR_EVALUATIONS_PER_EVENT  # deprecated alias -- see docstring above
+
+B2B_PILOT_EXAMPLE_COUNT = 12
+# 12 examples x 3 events x 4 real cross-product pair evaluations = 144 --
+# the no-op control is mandatory in the CPU harness but is NEVER counted in
+# this total, and B2B itself runs ZERO GPU no-op evaluations (B1B-R4 §4:
+# "B2B contains no GPU no-op evaluations").
+B2B_PILOT_TOTAL_REAL_PAIR_EVALUATIONS = (
+    B2B_PILOT_EXAMPLE_COUNT * EVENTS_SELECTED_PER_EXAMPLE * REAL_PAIR_EVALUATIONS_PER_EVENT
+)
+B2B_PILOT_TOTAL_REAL_BRANCHES = B2B_PILOT_TOTAL_REAL_PAIR_EVALUATIONS  # deprecated alias
+
+# B2A: exactly 3 selected events x 4 real pair evaluations = 12 real pair
+# evaluations, PLUS exactly 1 no-op pair evaluation (separate from, never
+# folded into, the 12) -- B1B-R4 §4's frozen execution-count semantics.
+B2A_SELECTED_EVENTS = EVENTS_SELECTED_PER_EXAMPLE  # 3
+B2A_REAL_PAIR_EVALUATIONS_TOTAL = B2A_SELECTED_EVENTS * REAL_PAIR_EVALUATIONS_PER_EVENT  # 12
+
+# B2A no-op numerical calibration count -- exactly ONE, for the whole B2A
+# example (never one per event). B1B-R4 §7 makes `NoOpMode.B2A_SINGLE_
+# CALIBRATION` an ACTUAL execution-count control on
+# `kvcot.discovery.orchestrator.run_example` (via `PairExecutionPolicy`),
+# not just documentation: exactly one no-op pair is built, for the FIRST
+# selected event in the frozen plan, deterministically.
 B2A_NOOP_CALIBRATION_COUNT = 1
+B2A_NOOP_PAIR_EVALUATIONS_TOTAL = B2A_NOOP_CALIBRATION_COUNT  # 1
+
+# B1B-R4 §16: frozen subprocess timeout for each B2A worker (FullKV, R-KV),
+# in seconds -- 2 hours. `kvcot.discovery.b2a_workers.run_both_workers_via_
+# subprocess` passes this to its `subprocess_runner`; a worker that runs
+# longer is a hard `subprocess.TimeoutExpired` failure, never silently
+# waited on indefinitely.
+B2A_WORKER_TIMEOUT_SECONDS = 7200
 
 
 class NoOpMode(enum.Enum):
-    """B1B-R3 §13: an explicit policy for how the mandatory no-op control
-    (Part IX.20 -- `evicted_absolute_position == donor_absolute_position`)
-    is interpreted at each protocol stage, so the shared orchestrator
-    (`kvcot.discovery.orchestrator.run_example`, which always builds one
-    no-op pair per selected event, `4 cross-product + 1 no-op = 5` attempts,
-    unchanged by this enum) is never silently read as producing MORE real
-    branches than it does."""
+    """B1B-R4 §7: an explicit policy that ACTUALLY CONTROLS how many no-op
+    pair evaluations `kvcot.discovery.orchestrator.run_example` builds per
+    example, via `PairExecutionPolicy` -- not merely documentation layered
+    on top of a fixed, unconditional "1 no-op per event" orchestrator
+    behavior (B1B-R3's version of this enum documented three named
+    interpretations while the orchestrator itself always built exactly one
+    no-op pair per selected event, regardless of which mode name a caller
+    cited -- this repaired version makes the enum value the single source
+    of truth `run_example` actually branches on)."""
 
     # CPU tests: every example's no-op pair(s) are mandatory, structural,
-    # and reported/asserted individually (test_b1b_integration.py etc.) --
-    # this is the orchestrator's unmodified default behavior.
+    # and reported/asserted individually -- one no-op pair PER SELECTED
+    # EVENT (`3 events x (4 real + 1 no-op) = 15` pair evaluations for a
+    # valid 3-event example). This is `PairExecutionPolicy`'s default.
     CPU_REQUIRED = "cpu_required"
-    # B2A: exactly ONE no-op numerical calibration is reported as B2A
-    # evidence (`no_op_numerical_parity`), drawn from the orchestrator's
-    # first produced no-op pair for the one B2A example -- never one
-    # additional full no-op branch per event.
+    # B2A: exactly ONE no-op pair evaluation for the WHOLE example, built
+    # only for the first selected event in the frozen plan (deterministic,
+    # never re-selected per run) -- `12 real + 1 no-op = 13` pair
+    # evaluations total, never one additional no-op branch per event.
     B2A_SINGLE_CALIBRATION = "b2a_single_calibration"
-    # Reserved for a future mode that suppresses no-op pair construction
-    # entirely -- not used by any code path in this repository yet; never
-    # apply this to a CPU test path, which always requires the no-op.
+    # B2B planning and execution: no no-op pair evaluations at all --
+    # `3 events x 4 real = 12` real pair evaluations per example, zero GPU
+    # no-op evaluations, matching B1B-R4 §4's frozen B2B accounting.
     DISABLED = "disabled"

@@ -1,196 +1,209 @@
-"""Real B2A evidence derivation (B1B-R3 §12). Every function here computes
-one gate-evidence field from ACTUAL observations already collected by the
-harness -- `kvcot.discovery.b2a_execute` calls these instead of hand-writing
-`True`/`0.0` literals. Nothing here runs a GPU or collects new
-measurements; this module is a pure function of already-collected
-`kvcot.discovery.orchestrator.ExampleResult` / `B2AOneExampleMeasurement`
-data, so it is fully CPU-testable against synthetic `ExampleResult`
-fixtures.
+"""Real B2A evidence derivation (B1B-R4 §8/§22, superseding B1B-R3's
+version of this module). Every function here computes gate-evidence fields
+from ACTUAL observations already collected by the harness
+(`kvcot.discovery.orchestrator.ExampleResult` /
+`kvcot.discovery.pass1.NaturalRunTrace`) -- nothing here runs a GPU or
+collects a new measurement, so it stays fully CPU-testable against
+synthetic fixtures.
 
-## What each field means and where its value comes from
+## B1B-R3 defect repaired
 
-- `token_identical_replay` / `prefill_decode_boundary_parity` /
-  `compaction_position_equality` / `capture_gather_parity` /
-  `absolute_position_parity`: ALL FIVE are derived from
-  `example_result.valid` -- `kvcot.discovery.pass2.run_pass2_capture`
-  structurally REQUIRES every one of these to hold (exact token match at
-  every replayed position, correct prefill/decode call-boundary shapes,
-  matching compaction-event positions, `parity_check_passed` on every
-  selected target's capture record, and cross-pass absolute-survivor
-  identity match) before it can return `valid=True` at all -- a failure at
-  ANY of them invalidates the whole example (`kvcot.discovery.pass2`
-  module docstring). This is a deliberately conservative, fail-closed
-  simplification: an example that fails for an unrelated Pass-1 reason
-  (e.g. `STAGE_ANSWER_INCORRECT_OR_UNVERIFIABLE`) reports all five as
-  `False` too, since none of them were ever actually demonstrated for a
-  COMPLETE run -- never vacuously `True` because "the check that would
-  have caught it never ran".
-- `no_op_numerical_parity`: derived from finding an ACTUAL `is_noop_control
-  =True` record among `example_result.pair_records`
-  (`kvcot.discovery.schemas.SwapPairRecord`'s own pydantic validators
-  already require bit-exact `baseline_per_token_nll == swapped_per_token_nll`
-  for any record constructed with `is_noop_control=True` -- so a present,
-  valid no-op record IS the calibration). `False` if no such record exists
-  in this example's pair_records (the mandatory no-op attempt itself
-  failed for every targeted event).
-- `dataset_row_identity_match` / `prompt_token_hash_match` /
-  `manifest_hash_match`: derived from
-  `kvcot.discovery.b2a_execute`'s own pre-flight prompt-identity
-  verification (re-render, re-tokenize, re-hash, compare against the
-  manifest) -- `run_b2a_calibration` REFUSES to proceed to model inference
-  at all on any mismatch (B1B-R3 §6), so reaching evidence collection is
-  itself proof these matched; never re-derived a second, weaker way here.
-- `model_revision_match` / `tokenizer_revision_match`: derived
-  structurally -- both `AutoModelForCausalLM.from_pretrained` and
-  `AutoTokenizer.from_pretrained` were called with an EXPLICIT `revision=`
-  kwarg equal to the frozen config value; transformers/huggingface_hub
-  raise rather than silently substitute a different revision when a
-  specific commit is requested and unavailable. This is a structural
-  guarantee from the call shape, not a runtime read-back of a resolved
-  commit attribute (transformers does not expose one uniformly across
-  versions) -- documented here as the weaker of the two kinds of identity
-  check this module performs, alongside the stronger, genuinely
-  runtime-read-back `rkv_config_hash_match` below.
-- `generation_config_hash_match`: derived the same structural way --
-  `kvcot.discovery.orchestrator.run_example` reads `max_new_tokens`,
-  `batch_size`, etc. directly off the SAME `config.generation` object used
-  to compute the frozen hash (no second, independently-typed copy exists
-  anywhere in this path that could silently drift) -- also a structural
-  guarantee, not an independent runtime introspection.
-- `rkv_config_hash_match`: derived from
-  `kvcot.discovery.runtime_rkv_verification.verify_runtime_matches_frozen`
-  -- a genuine runtime read-back off the loaded model's per-layer
-  `kv_cluster`/`config` objects, the strongest identity check in this
-  module.
-- `observed_retention_ratio`: `mean(final cache length per layer) /
-  prompt+generated token count` -- computed directly from
-  `trace.cache_length_final_per_layer` and `len(trace.full_token_ids)`,
-  never a configured/target value.
-- `event_count`: the number of DISTINCT selected compaction events
-  actually represented in `example_result.pair_records`
-  (`len({pr.compaction_event_id for pr in pair_records})`) -- explicitly
-  NOT `len(pair_records)` (which double/quintuple-counts per-event pair
-  attempts). A conservative lower bound: if every pair attempt for one
-  selected event failed, that event is invisible to this count even though
-  Pass 1 selected it -- documented, not silently treated as exact.
-- `sufficient_eligible_events`: `example_result.valid` -- Pass 1's
-  `build_pass1_plan` already hard-requires >=3 eligible events to produce
-  any plan at all (`PLAN_FAILURE_TOO_FEW_ELIGIBLE_EVENTS`), so a valid
-  example structurally proves this.
-- `meaningful_compression_observed`: `event_count >= 1 and
-  observed_retention_ratio < 1.0` -- at least one real eviction occurred
-  AND the final cache is strictly smaller than the FullKV-equivalent
-  length. This exact threshold is the definition, not a separate
-  configured cutoff.
-- `projected_complete_pilot_gpu_hours`: see
-  `project_complete_pilot_gpu_hours`'s docstring for the exact formula.
+The prior version of this module derived FIVE independent trajectory/parity
+conditions (`token_identical_replay`, `prefill_decode_boundary_parity`,
+`compaction_position_equality`, `capture_gather_parity`,
+`absolute_position_parity`) all from the single umbrella `example_result
+.valid` boolean -- a worker could satisfy all five while never having
+demonstrated any of them separately. This version requires the caller
+(`kvcot.discovery.b2a_workers.run_rkv_worker`) to supply each one from an
+INDEPENDENT raw observation: Pass 1 vs Pass 2 call-boundary comparison
+(`kvcot.discovery.call_trace`), the token-identity check `run_pass2_capture`
+already performs (`Pass2Result.valid`/`invalid_reason`), and the per-target
+capture parity flags (`kvcot.discovery.capture.UpdateKvCaptureRecord
+.gather_parity_passed` / `.observed_kept_indices_parity_passed`) read off
+each selected target's capture record -- `example_result.valid` is no
+longer read by this module at all for those five conditions.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from kvcot.discovery.constants import B2B_PILOT_EXAMPLE_COUNT, B2B_PILOT_TOTAL_REAL_BRANCHES
+from kvcot.discovery.constants import B2B_PILOT_EXAMPLE_COUNT, B2B_PILOT_TOTAL_REAL_PAIR_EVALUATIONS
 
 
 @dataclass(frozen=True)
-class DerivedTrajectoryEvidence:
+class PairCompletionEvidence:
+    """B1B-R4 §8/§22: exact, independently-countable selection and
+    pair-completion accounting -- never derived from `len(pair_records)`
+    alone (which conflates real and no-op pairs) and never a single
+    umbrella boolean."""
+
+    observed_total_compaction_events: int
+    eligible_compaction_events: int
+    selected_compaction_events: int
+    events_with_all_four_real_pairs_completed: int
+    attempted_real_pair_count: int
+    completed_real_pair_count: int
+    failed_real_pair_count: int
+    attempted_no_op_pair_count: int
+    completed_no_op_pair_count: int
+    pair_failure_details: tuple[str, ...]
+
+
+def derive_pair_completion_evidence(
+    *, trace, example_result, pair_attrition_dropped_stages: tuple[str, ...] = ()
+) -> PairCompletionEvidence:
+    """Derive every count from `example_result`/`trace` directly -- never
+    from a re-run or a second independently-maintained counter."""
+    from kvcot.discovery.pass1 import eligible_event_ids
+
+    observed_total = len(trace.compaction_events) if trace is not None else 0
+    eligible = len(eligible_event_ids(trace)) if trace is not None else 0
+
+    real_records = [r for r in example_result.pair_records if not r.is_noop_control]
+    by_event: dict[int, int] = {}
+    for r in real_records:
+        by_event[r.compaction_event_id] = by_event.get(r.compaction_event_id, 0) + 1
+    selected_events = len({r.compaction_event_id for r in example_result.pair_records})
+    events_with_all_four = sum(1 for count in by_event.values() if count >= 4)
+
+    attempted_real = example_result.attempted_real_pair_count
+    completed_real = example_result.completed_real_pair_count
+    attempted_no_op = example_result.attempted_no_op_pair_count
+    completed_no_op = example_result.completed_no_op_pair_count
+
+    return PairCompletionEvidence(
+        observed_total_compaction_events=observed_total,
+        eligible_compaction_events=eligible,
+        selected_compaction_events=selected_events,
+        events_with_all_four_real_pairs_completed=events_with_all_four,
+        attempted_real_pair_count=attempted_real,
+        completed_real_pair_count=completed_real,
+        failed_real_pair_count=attempted_real - completed_real,
+        attempted_no_op_pair_count=attempted_no_op,
+        completed_no_op_pair_count=completed_no_op,
+        pair_failure_details=pair_attrition_dropped_stages,
+    )
+
+
+@dataclass(frozen=True)
+class TrajectoryParityEvidence:
+    """The five previously-conflated conditions, each with its own
+    independent raw source (B1B-R4 §8)."""
+
     token_identical_replay: bool
     prefill_decode_boundary_parity: bool
     compaction_position_equality: bool
     capture_gather_parity: bool
     absolute_position_parity: bool
-    no_op_numerical_parity: bool
-    event_count: int
-    sufficient_eligible_events: bool
-    observed_retention_ratio: float
-    meaningful_compression_observed: bool
 
 
-def derive_trajectory_evidence(example_result) -> DerivedTrajectoryEvidence:
-    valid = example_result.valid
-    event_count = len({pr.compaction_event_id for pr in example_result.pair_records})
-    no_op_found = any(pr.is_noop_control for pr in example_result.pair_records)
+def derive_trajectory_parity_evidence(
+    *,
+    pass2_result_valid: bool,
+    pass2_invalid_reason: str | None,
+    call_boundary_all_match: bool,
+    target_capture_gather_parities: tuple[bool | None, ...],
+    target_capture_absolute_parities: tuple[bool | None, ...],
+) -> TrajectoryParityEvidence:
+    """`token_identical_replay` comes from `Pass2Result`'s own token-by-
+    token comparison against Pass 1's frozen trace
+    (`kvcot.discovery.pass2.run_pass2_capture`, `INVALID_TOKEN_MISMATCH`) --
+    specifically whether that WAS the failure reason (or no failure at all);
+    a Pass-2 failure for an unrelated reason (e.g. a missing snapshot)
+    reports this `True` (tokens genuinely matched) while the OTHER four
+    conditions report `False` (never demonstrated for an incomplete run).
 
+    `prefill_decode_boundary_parity` comes from an INDEPENDENT comparison of
+    two separately-recorded `kvcot.discovery.call_trace.CallTraceRecorder`
+    traces (Pass 1's vs Pass 2's) -- never inferred from `pass2_result.valid`.
+
+    `capture_gather_parity`/`absolute_position_parity` are each `True` only
+    when EVERY required selected target reported an explicit successful
+    observation (`None` -- not evaluable -- counts as failure here, per
+    B1B-R4 §8: "Aggregate conditions are true only when every required
+    selected target has an explicit successful observation").
+
+    `pass2_attempted` (derived, not a separate caller-supplied flag) is
+    `True` iff Pass 2 was ever reached at all -- either it succeeded
+    (`pass2_result_valid=True`) or it was reached and failed for a specific
+    reason (`pass2_invalid_reason is not None`). An example that never got
+    past Pass 1 (natural run invalid, wrong answer, cap hit, too few
+    eligible events -- `pass2_result_valid=False` AND
+    `pass2_invalid_reason=None`) reports `token_identical_replay=False`
+    too: nothing was ever replayed, so no token-identity claim can be made,
+    never vacuously `True` because "the check that would have caught a
+    mismatch never ran"."""
+    pass2_attempted = pass2_result_valid or pass2_invalid_reason is not None
+    token_identical = pass2_attempted and pass2_invalid_reason != "pass2_token_mismatch"
+    ran_to_completion = pass2_result_valid
+
+    def _all_true(values: tuple[bool | None, ...]) -> bool:
+        return len(values) > 0 and all(v is True for v in values)
+
+    return TrajectoryParityEvidence(
+        token_identical_replay=token_identical,
+        prefill_decode_boundary_parity=ran_to_completion and call_boundary_all_match,
+        compaction_position_equality=ran_to_completion and pass2_invalid_reason is None,
+        capture_gather_parity=ran_to_completion and _all_true(target_capture_gather_parities),
+        absolute_position_parity=ran_to_completion and _all_true(target_capture_absolute_parities),
+    )
+
+
+def derive_observed_retention_ratio(example_result) -> float:
     trace = example_result.trace
     if trace is not None and trace.cache_length_final_per_layer:
         total_tokens = len(trace.full_token_ids)
         mean_final_len = sum(trace.cache_length_final_per_layer.values()) / len(trace.cache_length_final_per_layer)
-        observed_retention_ratio = mean_final_len / total_tokens if total_tokens > 0 else 0.0
-    else:
-        observed_retention_ratio = 0.0
+        return mean_final_len / total_tokens if total_tokens > 0 else 0.0
+    return 0.0
 
-    meaningful_compression_observed = event_count >= 1 and observed_retention_ratio < 1.0
 
-    return DerivedTrajectoryEvidence(
-        token_identical_replay=valid,
-        prefill_decode_boundary_parity=valid,
-        compaction_position_equality=valid,
-        capture_gather_parity=valid,
-        absolute_position_parity=valid,
-        no_op_numerical_parity=no_op_found,
-        event_count=event_count,
-        sufficient_eligible_events=valid,
-        observed_retention_ratio=observed_retention_ratio,
-        meaningful_compression_observed=meaningful_compression_observed,
-    )
+def derive_no_op_numerical_parity(example_result) -> bool:
+    """`True` only when an ACTUAL `is_noop_control=True` record exists among
+    `example_result.pair_records` -- `kvcot.discovery.schemas.SwapPairRecord`'s
+    own validators already require bit-exact
+    `baseline_per_token_nll == swapped_per_token_nll` for any such record, so
+    a present, schema-valid no-op record IS the calibration."""
+    return any(pr.is_noop_control for pr in example_result.pair_records)
+
+
+def derive_meaningful_compression_observed(*, selected_event_count: int, observed_retention_ratio: float) -> bool:
+    return selected_event_count >= 1 and observed_retention_ratio < 1.0
+
+
+def per_real_pair_projection_seconds(real_pair_wall_seconds: tuple[float, ...]) -> float:
+    """B1B-R4 §12's frozen conservative per-pair statistic: the MAXIMUM
+    total time among the completed real pair evaluations -- never the mean
+    or an aggregate bucket. `0.0` if no real pair completed (never divides
+    by zero, never fabricates a number)."""
+    return max(real_pair_wall_seconds) if real_pair_wall_seconds else 0.0
 
 
 def project_complete_pilot_gpu_hours(
     *,
-    fullkv_natural_generation_wall_seconds: float,
-    rkv_pass1_wall_seconds: float,
-    token_identical_pass2_wall_seconds: float,
-    score_recomputation_wall_seconds: float,
-    targeted_capture_wall_seconds: float,
-    cache_clone_restore_wall_seconds: float,
-    one_fixed_shape_swap_wall_seconds: float,
-    bridge_plus_48_scored_wall_seconds: float,
+    per_example_total_seconds: float,
+    per_real_pair_seconds: float,
 ) -> float:
-    """Projected complete-B2B-pilot GPU-hours, extrapolated from this ONE
-    example's measured component wall-times.
-
-    Exact formula:
+    """B1B-R4 §12's frozen projection formula:
 
     ```
-    per_example_seconds = fullkv_natural_generation_wall_seconds
-                         + rkv_pass1_wall_seconds
-                         + token_identical_pass2_wall_seconds
-                         + score_recomputation_wall_seconds
-                         + targeted_capture_wall_seconds
-
-    per_branch_seconds = cache_clone_restore_wall_seconds
-                        + one_fixed_shape_swap_wall_seconds
-                        + bridge_plus_48_scored_wall_seconds
-
-    projected_seconds = B2B_PILOT_EXAMPLE_COUNT * per_example_seconds
-                       + B2B_PILOT_TOTAL_REAL_BRANCHES * per_branch_seconds
-
+    projected_seconds = B2B_PILOT_EXAMPLE_COUNT * per_example_total_seconds
+                       + B2B_PILOT_TOTAL_REAL_PAIR_EVALUATIONS * per_real_pair_seconds
     projected_gpu_hours = projected_seconds / 3600
     ```
 
-    `B2B_PILOT_EXAMPLE_COUNT` (12) scales the once-per-example components
-    (natural generation, Pass 1, Pass 2, score recomputation, targeted
-    capture); `B2B_PILOT_TOTAL_REAL_BRANCHES` (144 = 12 examples x 3 events
-    x 4 real swaps) scales the once-per-branch components (clone/restore,
-    the swap itself, and the bridge-plus-48-scored evaluation) -- matching
-    B2B's own accounting exactly (`kvcot.discovery.constants`), never a
-    separately-invented multiplier. The mandatory no-op calibration is
-    NOT separately scaled into this projection (B2A's single calibration
-    time is already included in `cache_clone_restore_wall_seconds`'s own
-    measurement for this one example; B2B's no-op accounting is a CPU-test
-    concern, not a GPU-time driver -- `kvcot.discovery.constants.NoOpMode`).
-    """
-    per_example_seconds = (
-        fullkv_natural_generation_wall_seconds
-        + rkv_pass1_wall_seconds
-        + token_identical_pass2_wall_seconds
-        + score_recomputation_wall_seconds
-        + targeted_capture_wall_seconds
-    )
-    per_branch_seconds = (
-        cache_clone_restore_wall_seconds + one_fixed_shape_swap_wall_seconds + bridge_plus_48_scored_wall_seconds
-    )
+    `per_example_total_seconds` must already be `fullkv_natural_generation +
+    rkv_pass1 + rkv_pass2` (once-per-example components; the caller is
+    responsible for not double-counting score/capture submeasurements that
+    are already contained inside the Pass 2 total). `per_real_pair_seconds`
+    is `per_real_pair_projection_seconds`'s output -- the MAXIMUM of the 12
+    individually-measured real pair evaluations, never an aggregate bucket
+    multiplied by 144 (the B1B-R3/B1B-R2 defect this repairs). The single
+    B2A no-op calibration is deliberately excluded from this projection
+    (B2B runs zero no-op evaluations, `kvcot.discovery.constants.NoOpMode
+    .DISABLED`)."""
     projected_seconds = (
-        B2B_PILOT_EXAMPLE_COUNT * per_example_seconds + B2B_PILOT_TOTAL_REAL_BRANCHES * per_branch_seconds
+        B2B_PILOT_EXAMPLE_COUNT * per_example_total_seconds
+        + B2B_PILOT_TOTAL_REAL_PAIR_EVALUATIONS * per_real_pair_seconds
     )
     return projected_seconds / 3600.0

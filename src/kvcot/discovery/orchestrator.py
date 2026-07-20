@@ -35,6 +35,7 @@ from kvcot.discovery.attrition import (
     STAGE_UNCERTAINTY_MISSING,
     AttritionCounters,
 )
+from kvcot.discovery.constants import NoOpMode
 from kvcot.discovery.harness_types import DecodeOneFn, PrefillFn, SnapshotFn
 from kvcot.discovery.pass1 import (
     PLAN_FAILURE_TOO_FEW_ELIGIBLE_EVENTS,
@@ -82,12 +83,55 @@ _PAIR_STAGE_MAP = {
 
 
 @dataclass(frozen=True)
+class PairExecutionPolicy:
+    """B1B-R4 §7 repair: an execution policy that ACTUALLY CONTROLS pair
+    construction in `run_example` below, not merely a documentation label
+    layered on top of a fixed orchestrator behavior. `no_op_mode` is the
+    only knob (`kvcot.discovery.constants.NoOpMode`); the default
+    (`CPU_REQUIRED`) preserves this module's pre-existing, already-tested
+    behavior exactly (one no-op pair per selected event) so every caller
+    that does not pass a policy explicitly is unaffected by this repair."""
+
+    no_op_mode: NoOpMode = NoOpMode.CPU_REQUIRED
+
+
+@dataclass(frozen=True)
 class ExampleResult:
     example_id: str
     valid: bool
     invalid_stage: str | None
     trace: NaturalRunTrace | None
     pair_records: tuple[SwapPairRecord, ...]
+    # B1B-R4 §22: exact execution accounting, independent of pair_records
+    # (which only contains SUCCESSFULLY built records -- a pair-level
+    # attrition drop must not silently shrink this count). Always populated,
+    # even for an invalid example (all zero in that case, since no pairs are
+    # ever attempted once an example is dropped before pair construction).
+    attempted_real_pair_count: int = 0
+    attempted_no_op_pair_count: int = 0
+    completed_real_pair_count: int = 0
+    completed_no_op_pair_count: int = 0
+    # B1B-R4 §12: one wall-clock duration PER COMPLETED pair evaluation
+    # (real, then no-op), measured around the ENTIRE `build_swap_pair_record`
+    # call for that pair -- never an aggregate bucket later multiplied by a
+    # pair count. Sequential (never overlapping) since pairs are built one
+    # at a time in the loop below; length == completed_real_pair_count /
+    # completed_no_op_pair_count respectively (a failed pair contributes no
+    # entry -- there is no meaningful "whole pair" duration for one that
+    # never produced a record).
+    real_pair_wall_seconds: tuple[float, ...] = ()
+    no_op_pair_wall_seconds: tuple[float, ...] = ()
+    # B1B-R4 §8: the RAW Pass-2 failure reason (e.g.
+    # "pass2_token_mismatch"), independent of `invalid_stage`'s coarser
+    # attrition-funnel bucket -- lets a caller derive `token_identical_replay`
+    # specifically, never conflated with the other four trajectory/parity
+    # conditions (`kvcot.discovery.b2a_evidence.derive_trajectory_parity_evidence`).
+    pass2_invalid_reason: str | None = None
+    # B1B-R4 §18: MINIMIZED per-target capture evidence only -- built here,
+    # immediately after a successful Pass 2, so the object this function
+    # RETURNS never carries a full-layer/full-cache tensor anywhere,
+    # regardless of what a caller does with it afterward.
+    minimized_target_evidence: tuple[Any, ...] = ()  # kvcot.discovery.capture_minimize.MinimizedTargetEvidence
 
 
 def run_example(
@@ -111,7 +155,20 @@ def run_example(
     branch_step_fn,
     example_attrition: AttritionCounters,
     pair_attrition: AttritionCounters,
+    pair_execution_policy: "PairExecutionPolicy | None" = None,
+    clock_fn: Callable[[], float] | None = None,
 ) -> ExampleResult:
+    """`pair_execution_policy` defaults to `PairExecutionPolicy()`
+    (`NoOpMode.CPU_REQUIRED`) -- every pre-existing caller that does not
+    pass one explicitly gets the exact same pair-construction behavior this
+    function always had (B1B-R4 §7). `clock_fn` (B1B-R4 §12) defaults to
+    `time.monotonic` -- CPU tests inject a deterministic fake clock instead,
+    so per-pair timing is exercised without depending on real wall-clock
+    variance."""
+    import time
+
+    clock_fn = clock_fn or time.monotonic
+    pair_execution_policy = pair_execution_policy or PairExecutionPolicy()
     example_attrition.record_entered()
 
     try:
@@ -147,18 +204,67 @@ def run_example(
     if not pass2_result.valid:
         stage = _PASS2_REASON_TO_STAGE[pass2_result.invalid_reason]
         example_attrition.record_dropped(stage)
-        return ExampleResult(example_id, False, stage, trace, ())
+        return ExampleResult(
+            example_id, False, stage, trace, (), pass2_invalid_reason=pass2_result.invalid_reason
+        )
 
     example_attrition.record_passed()
 
+    # B1B-R4 §18: minimize every selected target's capture evidence RIGHT
+    # HERE, while `pass2_result.target_captures` (which holds full-layer/
+    # full-cache tensors) is still in scope -- the object this function
+    # returns never needs a full tensor again after this point.
+    from kvcot.discovery.capture_minimize import build_minimized_target_evidence
+
+    minimized_target_evidence = tuple(
+        build_minimized_target_evidence(tc.event_plan, tc.capture_record) for tc in pass2_result.target_captures
+    )
+
     pair_records: list[SwapPairRecord] = []
-    for target_capture in pass2_result.target_captures:
+    attempted_real = 0
+    attempted_no_op = 0
+    completed_real = 0
+    completed_no_op = 0
+    real_pair_wall_seconds: list[float] = []
+    no_op_pair_wall_seconds: list[float] = []
+    no_op_mode = pair_execution_policy.no_op_mode
+
+    for event_index, target_capture in enumerate(pass2_result.target_captures):
         cd = target_capture.event_plan.candidate_donor_selection
         noop_position = cd.donor_selected[0]
-        pairs_to_build = list(cd.cross_product) + [(noop_position, noop_position)]
+        real_pairs = list(cd.cross_product)
 
-        for evicted_pos, donor_pos in pairs_to_build:
+        # B1B-R4 §7: the no-op mode ACTUALLY CONTROLS whether a no-op pair
+        # is even attempted for this event -- never unconditionally built
+        # and then merely relabeled downstream.
+        if no_op_mode == NoOpMode.CPU_REQUIRED:
+            include_noop = True
+        elif no_op_mode == NoOpMode.B2A_SINGLE_CALIBRATION:
+            # Exactly ONE no-op pair for the whole example, drawn from the
+            # FIRST selected event in the frozen plan -- deterministic,
+            # never re-selected per run, never one per event.
+            include_noop = event_index == 0
+        elif no_op_mode == NoOpMode.DISABLED:
+            include_noop = False
+        else:
+            raise ValueError(f"unrecognized NoOpMode: {no_op_mode!r}")
+
+        pairs_to_build = [(pos, "real") for pos in real_pairs]
+        if include_noop:
+            pairs_to_build.append(((noop_position, noop_position), "no_op"))
+
+        for (evicted_pos, donor_pos), kind in pairs_to_build:
+            if kind == "real":
+                attempted_real += 1
+            else:
+                attempted_no_op += 1
             pair_attrition.record_entered()
+            # B1B-R4 §12: one non-overlapping wall-clock measurement around
+            # the ENTIRE pair-construction call (clone/restore, semantic
+            # swap, bridge-plus-scored evaluation for BOTH baseline and
+            # swapped branches) -- never an aggregate bucket shared across
+            # every pair in this loop.
+            pair_start = clock_fn()
             result = build_swap_pair_record(
                 example_id=example_id,
                 model_revision=model_revision,
@@ -169,6 +275,7 @@ def run_example(
                 trace=trace,
                 branch_step_fn=branch_step_fn,
             )
+            pair_elapsed = clock_fn() - pair_start
             if result.record is None:
                 pair_attrition.record_dropped(_PAIR_STAGE_MAP[result.failure_stage])
                 continue
@@ -177,8 +284,24 @@ def run_example(
                 continue
             pair_attrition.record_passed()
             pair_records.append(result.record)
+            if kind == "real":
+                completed_real += 1
+                real_pair_wall_seconds.append(pair_elapsed)
+            else:
+                completed_no_op += 1
+                no_op_pair_wall_seconds.append(pair_elapsed)
 
-    return ExampleResult(example_id, True, None, trace, tuple(pair_records))
+    return ExampleResult(
+        example_id, True, None, trace, tuple(pair_records),
+        attempted_real_pair_count=attempted_real,
+        attempted_no_op_pair_count=attempted_no_op,
+        completed_real_pair_count=completed_real,
+        completed_no_op_pair_count=completed_no_op,
+        real_pair_wall_seconds=tuple(real_pair_wall_seconds),
+        no_op_pair_wall_seconds=tuple(no_op_pair_wall_seconds),
+        pass2_invalid_reason=None,
+        minimized_target_evidence=minimized_target_evidence,
+    )
 
 
 def _has_no_recorded_uncertainty_anywhere(record: SwapPairRecord) -> bool:

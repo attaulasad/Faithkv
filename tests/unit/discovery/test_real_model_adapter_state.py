@@ -32,6 +32,7 @@ from kvcot.discovery.real_model_adapter import (  # noqa: E402
     build_real_snapshot_fn,
     compute_kept_indices_lengths,
     evaluate_branch_from_snapshot,
+    restore_compaction_tracker_from_snapshot,
 )
 from kvcot.generation.provenance import LayerProvenance, ModelProvenance
 from kvcot.generation.replay import CompactionTracker
@@ -314,3 +315,93 @@ def test_two_independent_branches_from_the_same_snapshot_do_not_alias():
     assert branch_a.cache is not branch_b.cache
     for layer_idx in range(NUM_LAYERS):
         assert branch_a.cache.key_cache[layer_idx].data_ptr() != branch_b.cache.key_cache[layer_idx].data_ptr()
+
+
+# --------------------------------------------------------------------------
+# restore_compaction_tracker_from_snapshot (B1B-R4 §13)
+# --------------------------------------------------------------------------
+
+
+def test_restore_compaction_tracker_pure_formula_against_a_hand_built_snapshot():
+    """Isolated test of the derivation formula itself, independent of any
+    real forward call: `last_event_absolute_position = absolute_position -
+    tokens_since_last_compaction`, the exact inverse of
+    `CompactionTracker.tokens_since_last`."""
+    fake_snapshot = SimpleNamespace(
+        compaction_event_steps=[5, 12], tokens_since_last_compaction=3, absolute_position=15,
+    )
+    tracker = restore_compaction_tracker_from_snapshot(fake_snapshot)
+    assert tracker.event_steps == [5, 12]
+    assert tracker.last_event_absolute_position == 12
+    assert tracker.tokens_since_last(15) == 3
+
+
+def test_restore_compaction_tracker_no_event_case_matches_fresh_tracker_default():
+    fake_snapshot = SimpleNamespace(compaction_event_steps=[], tokens_since_last_compaction=7, absolute_position=7)
+    tracker = restore_compaction_tracker_from_snapshot(fake_snapshot)
+    assert tracker.event_steps == []
+    assert tracker.last_event_absolute_position == 0  # matches CompactionTracker()'s own default
+
+
+def test_snapshot_carries_complete_event_history_after_real_evictions():
+    model = FakeEvictingModel(budget=2)
+    state = _fresh_state(model)
+    prefill_fn = build_real_prefill_fn("cpu")
+    decode_fn = build_real_decode_one_fn("cpu")
+
+    prefill_fn(state, [10, 11])  # positions 0,1 -- hits budget=2 within prefill: event attributed to abs pos 2 (end of the one opaque prefill call)
+    decode_fn(state, 20)  # position 2 fed -- evicts again: event at abs pos 3
+
+    snapshot_fn = build_real_snapshot_fn()
+    snapshot = snapshot_fn(state)
+
+    assert snapshot.compaction_event_steps == [2, 3]
+    assert snapshot.tokens_since_last_compaction == 0
+
+    tracker = restore_compaction_tracker_from_snapshot(snapshot)
+    assert tracker.event_steps == [2, 3]
+    assert tracker.last_event_absolute_position == 3
+    assert tracker.tokens_since_last(snapshot.absolute_position) == 0
+
+
+def test_branch_step_fn_appends_to_restored_history_never_replaces_it():
+    model = FakeEvictingModel(budget=2)
+    state = _fresh_state(model)
+    prefill_fn = build_real_prefill_fn("cpu")
+    decode_fn = build_real_decode_one_fn("cpu")
+
+    prefill_fn(state, [10, 11])  # event attributed to abs pos 2
+    decode_fn(state, 20)  # event at abs pos 3
+    snapshot_fn = build_real_snapshot_fn()
+    snapshot = snapshot_fn(state)
+    assert snapshot.compaction_event_steps == [2, 3]
+
+    step_fn = build_real_branch_step_fn_restore_once(model, "cpu")
+    _, live = step_fn(snapshot, 200)  # abs pos 4 fed -- cache stays at budget, fires again
+
+    assert live.compaction.event_steps == [2, 3, 4]  # APPENDED, not replaced/reset to [4]
+    assert live.compaction.last_event_absolute_position == 4
+
+
+def test_restoring_same_snapshot_twice_gives_independent_trackers():
+    model = FakeEvictingModel(budget=2)
+    state = _fresh_state(model)
+    prefill_fn = build_real_prefill_fn("cpu")
+    prefill_fn(state, [10, 11])  # event attributed to abs pos 2
+    snapshot_fn = build_real_snapshot_fn()
+    snapshot = snapshot_fn(state)
+    assert snapshot.compaction_event_steps == [2]
+
+    step_fn = build_real_branch_step_fn_restore_once(model, "cpu")
+    _, branch_a = step_fn(snapshot, 200)
+    _, branch_b = step_fn(snapshot, 201)
+
+    assert branch_a.compaction is not branch_b.compaction
+    assert branch_a.compaction.event_steps == [2, 3] == branch_b.compaction.event_steps
+
+    # Mutating one branch's tracker must never be visible on the other --
+    # baseline and swapped branches cannot mutate each other's tracker.
+    branch_a.compaction.event_steps.append(9999)
+    assert 9999 not in branch_b.compaction.event_steps
+    branch_a.compaction.note_event(9999)
+    assert branch_b.compaction.last_event_absolute_position == 3

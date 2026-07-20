@@ -5,6 +5,63 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-20 — Phase B1B-R4: final executable, measurement, and worker-evidence closure (no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; PR #19 merge not undone)
+
+Run on branch `research/b1b-r4-final-b2a-closure`, cut from `main` at
+commit `fa117046bea2a2c492e17cd91276b2e3c6d59f7f` (the merged PR #19,
+B1B-R3). Full detail: `docs/B1B_R4_FINAL_B2A_CLOSURE.md`.
+
+**Authorization.** No new `CLAUDE.md` exception — stays inside the
+CPU-side harness architecture already authorized by §1b/§4b. No model
+weights, no CUDA, no Vast.ai activity of any kind.
+
+**Seventeen repairs** (independent audit of merged PR #19), plus three
+further defects found and fixed by this pass's own adversarial
+self-review: (1) execution-count vocabulary frozen ("pair evaluations",
+never "branches"); (2) FullKV now uses exact greedy generation
+(`kvcot.discovery.pass1.run_natural_pass1` + the real adapter), replacing a
+sampling call given `temperature=0.0`/`generator=None`; (3) framework
+determinism applied and recorded independently in both worker processes;
+(4) `NoOpMode` now actually controls pair construction
+(`kvcot.discovery.orchestrator.PairExecutionPolicy`) instead of only
+documenting an intended interpretation; (5) five trajectory/parity
+conditions (`token_identical_replay`, `prefill_decode_boundary_parity`,
+`compaction_position_equality`, `capture_gather_parity`,
+`absolute_position_parity`) are now derived independently
+(`kvcot.discovery.b2a_evidence`, `kvcot.discovery.call_trace`) instead of
+all five copied from one `example_valid` boolean; (6) resolved-vs-requested
+model/tokenizer revision read back via `transformers`' own `_commit_hash`
+attributes (`kvcot.discovery.runtime_evidence`); (7) batch size, parameter
+placement, and one-example scope derived from real observations, never
+hard-coded; (8) per-real-pair-evaluation timing measured individually via
+an injectable clock (`kvcot.discovery.orchestrator.run_example`'s
+`clock_fn`), never an aggregate bucket multiplied by 144; (9)
+branch-restored `CompactionTracker` state reconstructed from the snapshot
+(`restore_compaction_tracker_from_snapshot`) instead of reset to empty;
+(10) VRAM gate uses `max(peak_allocated, peak_reserved)` across both
+workers; (11) the weight-cache safety guard scoped to
+`prepare-b2a-manifest`'s own call site only (before/after snapshot diff),
+no longer rejecting generic prompt verification on a host with
+pre-existing model weights; (12) partial FullKV evidence preserved when
+R-KV fails after FullKV succeeds; (13) every worker subprocess launch uses
+`capture_output=True, timeout=7200, check=False`, and every attempt writes
+a durable `WorkerEnvelope`; (14) artifact names include microseconds and a
+random UUID4 suffix; (15) selected-capture evidence minimized to a bounded
+per-target record (`kvcot.discovery.capture_minimize`), finally closing the
+B1B-R3 Defect-11 deferral; (16) one canonical FullKV/R-KV worker API
+(`kvcot.discovery.b2a_workers.run_fullkv_worker`/`run_rkv_worker`),
+removing the B1B-R3 split with a `NotImplementedError` stub; (17) both
+worker-control bodies are now exercised by CPU tests against injected fake
+backends, never a preconstructed result. Adversarial self-review (§5,
+`docs/B1B_R4_FINAL_B2A_CLOSURE.md`) additionally found and fixed: the
+`no_offload_verified` gate condition using a weaker check than available;
+the four dataset/manifest identity conditions checking only worker-vs-
+worker agreement, never worker-vs-manifest; and Pass 2 snapshot/capture
+time being measured but never folded into `wall_seconds_pass2`,
+under-counting the projection. `python -m pytest -m "not gpu" -q`: 931
+passed, 14 deselected, 0 failed. **Status: B1B-R4 implemented,
+ready for independent CPU audit. GPU, B2A, and B2B remain blocked.**
+
 ## 2026-07-20 — Phase B1B-R3: executable B2A boundary and evidence producer (no GPU used, no model inference, no model weights downloaded; one pinned MATH-500 row and the pinned tokenizer's config-only files downloaded via `kvcot prepare-b2a-manifest --execute`; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; PR #18 merge not undone)
 
 Run on branch `research/b1b-r3-executable-closure`, cut from `main` at

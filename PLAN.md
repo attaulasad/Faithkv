@@ -1,6 +1,36 @@
 # Plan and status
 
-## Current status: Phase B1B-R3 — executable B2A boundary and evidence producer — IMPLEMENTED FOR REVIEW; GPU/B2A/B2B STILL BLOCKED
+## Current status: Phase B1B-R4 — final executable, measurement, and worker-evidence closure — IMPLEMENTED FOR REVIEW; GPU/B2A/B2B STILL BLOCKED
+
+**Phase B1B-R4 (2026-07-20, CHANGELOG.md) repairs the remaining defects
+found during an independent audit of the merged PR #19 (B1B-R3, commit
+`fa117046bea2a2c492e17cd91276b2e3c6d59f7f`)**: FullKV sampling replaced
+with exact greedy generation reusing R-KV Pass 1's own loop; framework
+determinism applied and recorded independently in both worker processes;
+`NoOpMode` now actually controls pair construction
+(`kvcot.discovery.orchestrator.PairExecutionPolicy`) instead of only
+documenting intent; five trajectory/parity conditions derived
+independently instead of copied from one umbrella boolean; resolved-vs-
+requested revision read back via `transformers`' own commit-hash
+attributes; batch size/parameter placement/one-example scope derived from
+real observations; per-pair timing measured individually (never an
+aggregate bucket multiplied by 144); branch-restored compaction history
+reconstructed from the snapshot instead of reset; VRAM gate uses
+`max(allocated, reserved)`; the weight-cache guard scoped to manifest
+preparation only; partial FullKV evidence preserved on R-KV failure;
+durable per-attempt worker envelopes; collision-resistant artifact naming;
+bounded selected-capture minimization; one canonical FullKV/R-KV worker
+API exercised by CPU tests against injected fakes. This pass's own
+adversarial self-review found and fixed three further defects (documented
+in `docs/B1B_R4_FINAL_B2A_CLOSURE.md` §5). Full detail:
+`docs/B1B_R4_FINAL_B2A_CLOSURE.md`. **Status: B1B-R4 implemented, ready for
+independent CPU audit. GPU, B2A, and B2B remain blocked. No discovery
+result exists. No method exists.** The full 12-real+1-no-op success path
+is not exercised by any `run_rkv_worker`-level CPU test (a fake-model
+fixture limitation, documented in that document's §4) — the orchestrator-
+level success path IS exercised extensively elsewhere.
+
+## Prior status: Phase B1B-R3 — executable B2A boundary and evidence producer — IMPLEMENTED FOR REVIEW; GPU/B2A/B2B STILL BLOCKED
 
 **Phase B1B-R3 (2026-07-20, CHANGELOG.md) repairs twelve defects found
 during an independent audit of the merged PR #18 (B1B-R2, commit

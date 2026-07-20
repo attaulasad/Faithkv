@@ -2,6 +2,37 @@
 
 ## Current status (read this first)
 
+**Phase B1B-R4 (2026-07-20)** repairs the remaining defects found during an
+independent audit of the merged PR #19 (B1B-R3, commit
+`fa117046bea2a2c492e17cd91276b2e3c6d59f7f` — merged before this pass, not
+reopened or reverted): FullKV now uses exact greedy generation (reusing
+R-KV Pass 1's own natural-run loop) instead of a sampling call given
+degenerate parameters; framework determinism is applied and recorded
+independently in both worker processes; the no-op mode enum now actually
+controls pair construction (`PairExecutionPolicy`) instead of only
+documenting an intended interpretation; the five trajectory/parity
+conditions are now derived independently rather than all copied from one
+umbrella validity boolean; resolved-vs-requested model/tokenizer revision
+is read back from `transformers`' own commit-hash attributes; batch size,
+parameter placement, and one-example scope are derived from real
+observations; per-pair timing is now measured individually (never an
+aggregate bucket multiplied by 144); branch-restored `CompactionTracker`
+state is reconstructed from the snapshot instead of reset to empty; the
+VRAM gate now uses `max(allocated, reserved)`; the weight-cache safety
+guard no longer rejects generic prompt verification on a host with
+pre-existing model weights; partial FullKV evidence survives an R-KV
+failure; every worker attempt writes a durable envelope; artifact names now
+include microseconds and a random suffix; selected captures are minimized
+to a bounded per-target record; and the two worker bodies now share one
+canonical API, exercised end-to-end by CPU tests against injected fakes.
+This pass's own adversarial self-review additionally found and fixed three
+further defects (a too-weak no-offload check, identity conditions that
+only compared the two workers against each other rather than against the
+manifest, and a wall-clock under-count). See
+`docs/B1B_R4_FINAL_B2A_CLOSURE.md`. **Status: B1B-R4 implemented, ready for
+independent CPU audit. GPU, B2A, and B2B remain blocked. No discovery
+result exists. No method exists.**
+
 **Phase B1B-R3 (2026-07-20)** repaired twelve defects found during an
 independent audit of the merged PR #18 (B1B-R2, commit
 `7034e46b516eff656b5508d9253ee02b13405f95` — merged before this pass,

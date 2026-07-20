@@ -60,23 +60,40 @@ B2A_ONE_EXAMPLE_REQUIRED_MEASUREMENTS: tuple[str, ...] = (
 # discovery pilot must stop -- this module only defines the thresholds and a
 # pure-Python evaluator; it never runs a GPU measurement itself.
 MAX_PROJECTED_PILOT_GPU_HOURS = 4.00
-MAX_PEAK_ALLOCATED_MEMORY_GIB = 22.0
+# B1B-R4 §14: renamed from allocated-only to total-peak-CUDA-tracked-memory
+# terminology -- the gate now compares against `max(peak_allocated,
+# peak_reserved)`, never allocated alone. `MAX_PEAK_ALLOCATED_MEMORY_GIB` is
+# kept as a deprecated compatibility alias (same value, same name import
+# sites already use).
+MAX_PEAK_TRACKED_MEMORY_GIB = 22.0
+MAX_PEAK_ALLOCATED_MEMORY_GIB = MAX_PEAK_TRACKED_MEMORY_GIB  # deprecated alias -- see comment above
 
 
 class B2AOneExampleMeasurement(BaseModel):
-    """What a future (not-yet-authorized) B2A one-example run must report.
-    Constructing this model does not run anything -- it is a schema a
-    future GPU-side script would populate and this module would then
-    evaluate against the hard stop conditions below."""
+    """What a B2A one-example run reports (B1B-R4 §12, superseding B1B-R3's
+    version of this schema, which conflated restore/bridge-forward timing
+    into aggregate buckets and then multiplied one of them by 144 in the
+    projection). `real_pair_wall_seconds` holds one entry PER completed real
+    pair evaluation (up to 12) -- never an aggregate bucket."""
 
     fullkv_natural_generation_wall_seconds: float = Field(ge=0.0)
     rkv_pass1_wall_seconds: float = Field(ge=0.0)
-    token_identical_pass2_wall_seconds: float = Field(ge=0.0)
-    score_recomputation_wall_seconds: float = Field(ge=0.0)
+    rkv_pass2_wall_seconds: float = Field(ge=0.0)
+    # Diagnostic submeasurement only -- ALREADY CONTAINED inside
+    # `rkv_pass2_wall_seconds` (Pass 2 performs the targeted capture inline),
+    # never added again on top of it in any projection.
     targeted_capture_wall_seconds: float = Field(ge=0.0)
-    cache_clone_restore_wall_seconds: float = Field(ge=0.0)
-    one_fixed_shape_swap_wall_seconds: float = Field(ge=0.0)
-    bridge_plus_48_scored_wall_seconds: float = Field(ge=0.0)
+    # `fullkv_natural_generation_wall_seconds + rkv_pass1_wall_seconds +
+    # rkv_pass2_wall_seconds` -- the frozen once-per-example projection
+    # component (B1B-R4 §12's "Recommended frozen projection semantics").
+    per_example_total_wall_seconds: float = Field(ge=0.0)
+    real_pair_wall_seconds: list[float] = Field(default_factory=list)
+    no_op_pair_wall_seconds: list[float] = Field(default_factory=list)
+    # The conservative per-pair statistic actually used by the projection:
+    # `max(real_pair_wall_seconds)`, never their sum and never a separately
+    # invented number -- `kvcot.discovery.b2a_evidence
+    # .per_real_pair_projection_seconds`'s output.
+    per_real_pair_seconds: float = Field(ge=0.0)
 
     peak_cuda_allocated_bytes: int = Field(ge=0)
     peak_cuda_reserved_bytes: int = Field(ge=0)
@@ -87,7 +104,10 @@ class B2AOneExampleMeasurement(BaseModel):
 
     @property
     def peak_vram_gib(self) -> float:
-        return self.peak_cuda_allocated_bytes / (1024**3)
+        """B1B-R4 §14: gates on the MAXIMUM of allocated and reserved --
+        never allocated alone (a run can be reserved-heavy/allocated-light
+        or vice versa; both must be tracked)."""
+        return max(self.peak_cuda_allocated_bytes, self.peak_cuda_reserved_bytes) / (1024**3)
 
 
 # Every one of these must be `True` on `B2AGateEvidence`/`B2AGateResult` for
@@ -121,6 +141,14 @@ MANDATORY_GATE_CONDITIONS: tuple[str, ...] = (
     # identity/parity conditions above, never replaced by them.
     "meaningful_compression_observed",
     "sufficient_eligible_events",
+    # B1B-R4 §21: exact selected-event and pair-completion counts as their
+    # own mandatory gate evidence -- a worker that reports only an umbrella
+    # validity boolean can no longer pass; every one of these four must be
+    # independently demonstrated.
+    "selected_event_count_exact",
+    "real_pair_count_exact",
+    "no_op_count_exact",
+    "all_required_pair_evaluations_completed",
 )
 
 
@@ -155,6 +183,10 @@ class B2AGateEvidence(BaseModel):
     one_example_only: bool
     meaningful_compression_observed: bool
     sufficient_eligible_events: bool
+    selected_event_count_exact: bool
+    real_pair_count_exact: bool
+    no_op_count_exact: bool
+    all_required_pair_evaluations_completed: bool
 
     runtime_gpu_hours: float = Field(ge=0.0)
     peak_vram_gib: float = Field(ge=0.0)
@@ -181,6 +213,10 @@ def build_gate_evidence_from_measurement(
     one_example_only: bool,
     meaningful_compression_observed: bool,
     sufficient_eligible_events: bool,
+    selected_event_count_exact: bool,
+    real_pair_count_exact: bool,
+    no_op_count_exact: bool,
+    all_required_pair_evaluations_completed: bool,
 ) -> B2AGateEvidence:
     """Build gate evidence from an already-collected `B2AOneExampleMeasurement`
     plus every identity/parity/environment condition the caller must supply
@@ -208,6 +244,10 @@ def build_gate_evidence_from_measurement(
         one_example_only=one_example_only,
         meaningful_compression_observed=meaningful_compression_observed,
         sufficient_eligible_events=sufficient_eligible_events,
+        selected_event_count_exact=selected_event_count_exact,
+        real_pair_count_exact=real_pair_count_exact,
+        no_op_count_exact=no_op_count_exact,
+        all_required_pair_evaluations_completed=all_required_pair_evaluations_completed,
         runtime_gpu_hours=measurement.projected_complete_pilot_gpu_hours,
         peak_vram_gib=measurement.peak_vram_gib,
     )
@@ -246,6 +286,10 @@ class B2AGateResult:
     one_example_only: bool
     meaningful_compression_observed: bool
     sufficient_eligible_events: bool
+    selected_event_count_exact: bool
+    real_pair_count_exact: bool
+    no_op_count_exact: bool
+    all_required_pair_evaluations_completed: bool
     failed_conditions: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -300,6 +344,10 @@ def evaluate_b2a_gate(evidence: B2AGateEvidence) -> B2AGateResult:
         "one_example_only": evidence.one_example_only,
         "meaningful_compression_observed": evidence.meaningful_compression_observed,
         "sufficient_eligible_events": evidence.sufficient_eligible_events,
+        "selected_event_count_exact": evidence.selected_event_count_exact,
+        "real_pair_count_exact": evidence.real_pair_count_exact,
+        "no_op_count_exact": evidence.no_op_count_exact,
+        "all_required_pair_evaluations_completed": evidence.all_required_pair_evaluations_completed,
     }
     failed = tuple(name for name in MANDATORY_GATE_CONDITIONS if not values[name])
     return B2AGateResult(passed=not failed, failed_conditions=failed, **values)

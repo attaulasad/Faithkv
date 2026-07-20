@@ -56,7 +56,7 @@ def test_dry_run_prints_required_planning_information(capsys, block_disallowed_i
     assert "deepseek-ai/DeepSeek-R1-Distill-Llama-8B" in out
     assert "HuggingFaceH4/MATH-500" in out
     assert "one_example_only=True" in out
-    assert "144 real branches" in out
+    assert "144 real pair evaluations" in out
     assert "canonical_config_hash=" in out
     assert "generation_config_hash=" in out
     assert "rkv_config_hash=" in out

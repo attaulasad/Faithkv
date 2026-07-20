@@ -154,10 +154,72 @@ def test_prepare_manifest_force_allows_correcting_raw_content_hash(monkeypatch, 
     assert result.raw_content_hash == "b" * 64
 
 
-def test_prepare_manifest_no_weight_files_check_does_not_raise_for_absent_cache(monkeypatch, tmp_path):
-    _patch_network(monkeypatch)
-    # _assert_no_weight_files_cached is called from within _render_and_tokenize
-    # in production; here it's bypassed entirely by the fake render function,
-    # so this test targets the standalone function directly against an
-    # environment with no matching cache entries at all.
-    mp._assert_no_weight_files_cached("nonexistent/model", "0" * 40)  # should not raise
+def test_snapshot_weight_shaped_files_empty_for_absent_cache():
+    # B1B-R4 §15: the split guard's pure observation function, exercised
+    # against an environment with no matching cache entries at all.
+    assert mp._snapshot_weight_shaped_files("nonexistent/model", "0" * 40) == frozenset()
+
+
+def test_assert_no_new_weight_files_passes_when_nothing_changed():
+    before = frozenset({"model.safetensors"})  # pre-existing weight file
+    after = frozenset({"model.safetensors"})  # unchanged
+    mp._assert_no_new_weight_files_introduced(before, after)  # should not raise
+
+
+def test_assert_no_new_weight_files_fails_only_on_a_genuinely_new_file():
+    before = frozenset()
+    after = frozenset({"model.safetensors"})
+    with pytest.raises(mp.ManifestPreparationError, match="introduced new weight-shaped"):
+        mp._assert_no_new_weight_files_introduced(before, after)
+
+
+def test_render_and_tokenize_does_not_inspect_or_reject_pre_existing_weights(monkeypatch):
+    """B1B-R4 §15 regression: `_render_and_tokenize` is shared by generic
+    B2A prompt-identity re-verification -- it must never call the
+    weight-cache guard at all, so a GPU host with pre-existing weights for
+    the pinned revision never fails generic prompt rendering."""
+    called = {"snapshot": False}
+
+    def _boom(*args, **kwargs):
+        called["snapshot"] = True
+        raise AssertionError("_render_and_tokenize must never call the weight-cache snapshot guard")
+
+    monkeypatch.setattr(mp, "_snapshot_weight_shaped_files", _boom)
+
+    class _FakeTok:
+        chat_template = "template"
+
+        def apply_chat_template(self, messages, tokenize, add_generation_prompt):
+            return [1, 2, 3]
+
+    import transformers
+
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", lambda *a, **k: _FakeTok())
+    mp._render_and_tokenize({"problem": "2+2=?"}, "some/model", "0" * 40)
+    assert called["snapshot"] is False
+
+
+def test_resolve_prompt_identity_detects_a_genuinely_new_weight_file(monkeypatch):
+    """The guard DOES fire when `resolve_prompt_identity`'s own call
+    introduces a new weight-shaped file -- proven by faking the before/after
+    snapshots to differ."""
+    snapshots = iter([frozenset(), frozenset({"new_model.safetensors"})])
+    monkeypatch.setattr(mp, "_snapshot_weight_shaped_files", lambda *a, **k: next(snapshots))
+    monkeypatch.setattr(
+        mp, "_fetch_pinned_dataset_row",
+        lambda *a, **k: mp.FetchedDatasetRow(row=VALID_ROW, raw_content_hash="a" * 64),
+    )
+
+    class _FakeTok:
+        chat_template = "template"
+
+    monkeypatch.setattr(
+        mp, "_render_and_tokenize", lambda row, name, rev: (_FakeTok(), "x", [{"role": "user", "content": "x"}], [1, 2, 3])
+    )
+    plan = mp.PreparedManifestPlan(
+        dataset_repo="HuggingFaceH4/MATH-500", dataset_config="default", dataset_split="test",
+        dataset_revision="a" * 40, example_index=0, tokenizer_name="some/model", tokenizer_revision="0" * 40,
+        existing_manifest_path=mp.DEFAULT_MANIFEST_PATH, existing_manifest_is_prompt_resolved=False, force=False,
+    )
+    with pytest.raises(mp.ManifestPreparationError, match="introduced new weight-shaped"):
+        mp.resolve_prompt_identity(plan)

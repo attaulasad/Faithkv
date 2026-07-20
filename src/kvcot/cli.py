@@ -2420,11 +2420,13 @@ def cmd_b2a_calibrate(args: argparse.Namespace) -> int:
         print(
             f"  B2B pilot cost model (planning information only, NOT authorized here): "
             f"{B2B_PILOT_EXAMPLE_COUNT} examples x {EVENTS_SELECTED_PER_EXAMPLE} events x "
-            f"{PAIR_BRANCHES_PER_EVENT} real swaps = {B2B_PILOT_TOTAL_REAL_BRANCHES} real branches"
+            f"{PAIR_BRANCHES_PER_EVENT} real pair evaluations = {B2B_PILOT_TOTAL_REAL_BRANCHES} real pair "
+            "evaluations; 0 GPU no-op pair evaluations"
         )
         print(
-            f"  B2A-only minimal no-op calibration (this example only): up to {EVENTS_SELECTED_PER_EXAMPLE} "
-            "no-op swaps -- reported separately, never added to the 144-branch B2B total"
+            f"  B2A pair-evaluation accounting (this example only): {EVENTS_SELECTED_PER_EXAMPLE} selected events "
+            f"x {PAIR_BRANCHES_PER_EVENT} real pair evaluations = 12 real pair evaluations, PLUS exactly 1 no-op "
+            "pair evaluation -- reported separately, never added to the 144 B2B total"
         )
         print(f"  canonical_config_hash={canonical_config_hash(config)}")
         print(f"  generation_config_hash={generation_config_hash(config.generation)}")

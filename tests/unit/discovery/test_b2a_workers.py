@@ -1,11 +1,12 @@
-"""CPU-only coordinator tests (B1B-R3 §11/§18) -- `subprocess_runner` is
-injected so the entire coordination flow (temp dirs, launching both
+"""CPU-only coordinator tests (B1B-R4 §11/§16/§18/§19) -- `subprocess_runner`
+is injected so the entire coordination flow (temp dirs, launching both
 workers, reading back JSON, schema validation, shared-identity checking,
-cleanup) is exercised WITHOUT ever invoking a real Python subprocess,
-torch, or CUDA."""
+cleanup, timeout handling) is exercised WITHOUT ever invoking a real Python
+subprocess, torch, or CUDA."""
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,14 +23,43 @@ from kvcot.discovery.b2a_workers import (
 MANIFEST_HASH = "m" * 64
 PROMPT_HASH = "p" * 64
 
+_DETERMINISM_POLICY = dict(
+    framework_seed=13, python_random_seeded=True, torch_cpu_seeded=True, torch_cuda_seeded=True,
+    cudnn_deterministic_requested=True, attention_backend="flash_attention_2",
+    bitwise_determinism_guaranteed=False, tolerance_note="note",
+)
+_RUNTIME_GENERATION = dict(
+    generation_mode="greedy", do_sample=False, temperature=None, top_p=None, batch_size=1, max_new_tokens=48,
+    eos_token_id=99, eos_append_feed_policy="p", one_prefill_policy="p", single_token_decode_policy="p",
+    attention_backend="flash_attention_2", cache_implementation="DynamicCache", framework_seed=13,
+    prompt_token_count=200,
+)
+_PARAMETER_PLACEMENT = dict(
+    unique_device_types=["cuda"], every_parameter_on_cuda=True, hf_device_map=None, no_offload_verified=True,
+    parameter_count=100,
+)
+_RUNTIME_IDENTITY = dict(
+    requested_model_revision="modelrev", resolved_model_revision="modelrev", model_revision_match=True,
+    requested_tokenizer_revision="tokrev", resolved_tokenizer_revision="tokrev", tokenizer_revision_match=True,
+)
+_MEMORY = dict(
+    allocated_before_reset_bytes=100, reserved_before_reset_bytes=200, peak_allocated_bytes=1000,
+    peak_reserved_bytes=2000, reset_point="after_model_and_tokenizer_load_before_measured_inference",
+)
+
 
 def _fullkv_payload(**overrides) -> dict:
     payload = dict(
         role="fullkv", model_revision="modelrev", tokenizer_revision="tokrev",
         dataset_repo="HuggingFaceH4/MATH-500", dataset_revision="d" * 40,
-        manifest_hash=MANIFEST_HASH, prompt_token_ids_sha256=PROMPT_HASH,
+        manifest_hash=MANIFEST_HASH, prompt_token_ids_sha256=PROMPT_HASH, prompt_token_count=200,
         natural_generated_token_ids=[1, 2, 3], natural_answer="42", natural_answer_status="correct",
-        wall_seconds=1.5, peak_cuda_allocated_bytes=1000, peak_cuda_reserved_bytes=2000,
+        cap_hit=False, prefill_call_count=1, decode_call_count=3, call_boundary_trace_hash="t" * 64,
+        wall_seconds=1.5,
+        determinism_policy=_DETERMINISM_POLICY, runtime_generation=_RUNTIME_GENERATION,
+        runtime_generation_config_hash="g" * 64, parameter_placement=_PARAMETER_PLACEMENT,
+        runtime_identity=_RUNTIME_IDENTITY, memory=_MEMORY,
+        peak_cuda_allocated_bytes=1000, peak_cuda_reserved_bytes=2000,
         every_parameter_on_cuda=True, batch_size=1, software_versions={"torch": "2.0"},
     )
     payload.update(overrides)
@@ -40,12 +70,26 @@ def _rkv_payload(**overrides) -> dict:
     payload = dict(
         role="rkv", model_revision="modelrev", tokenizer_revision="tokrev",
         dataset_repo="HuggingFaceH4/MATH-500", dataset_revision="d" * 40,
-        manifest_hash=MANIFEST_HASH, prompt_token_ids_sha256=PROMPT_HASH,
+        manifest_hash=MANIFEST_HASH, prompt_token_ids_sha256=PROMPT_HASH, prompt_token_count=200,
         rkv_upstream_revision="r" * 40, runtime_rkv_config_hash="h" * 64, frozen_rkv_config_hash="h" * 64,
-        example_valid=True, event_count=3, observed_retention_ratio=0.5, no_op_numerical_parity=True,
-        natural_answer_status="correct", wall_seconds_pass1=1.0, wall_seconds_pass2=1.0,
-        wall_seconds_targeted_capture=0.1, wall_seconds_cache_clone_restore=0.05,
-        wall_seconds_one_swap=0.01, wall_seconds_bridge_plus_48_scored=0.5,
+        rkv_config_hash_match=True,
+        example_valid=True, natural_answer_status="correct",
+        token_identical_replay=True, prefill_decode_boundary_parity=True, compaction_position_equality=True,
+        capture_gather_parity=True, absolute_position_parity=True, no_op_numerical_parity=True,
+        pass1_call_boundary={"prefill_call_count": 1, "prefill_token_count": 200, "decode_call_count": 300, "ordered_trace_hash": "a" * 64},
+        pass2_call_boundary={"prefill_call_count": 1, "prefill_token_count": 200, "decode_call_count": 300, "ordered_trace_hash": "a" * 64},
+        observed_total_compaction_events=5, eligible_compaction_events=3, selected_compaction_events=3,
+        events_with_all_four_real_pairs_completed=3, attempted_real_pair_count=12, completed_real_pair_count=12,
+        failed_real_pair_count=0, attempted_no_op_pair_count=1, completed_no_op_pair_count=1,
+        pair_failure_details=[],
+        selected_event_count_exact=True, real_pair_count_exact=True, no_op_count_exact=True,
+        all_required_pair_evaluations_completed=True,
+        observed_retention_ratio=0.5,
+        wall_seconds_pass1=1.0, wall_seconds_pass2=1.0, wall_seconds_targeted_capture=0.1,
+        real_pair_wall_seconds=[1.0] * 12, no_op_pair_wall_seconds=[0.5],
+        determinism_policy=_DETERMINISM_POLICY, runtime_generation=_RUNTIME_GENERATION,
+        runtime_generation_config_hash="g" * 64, parameter_placement=_PARAMETER_PLACEMENT,
+        runtime_identity=_RUNTIME_IDENTITY, memory=_MEMORY, minimized_target_evidence=[],
         peak_cuda_allocated_bytes=1000, peak_cuda_reserved_bytes=2000, every_parameter_on_cuda=True,
         batch_size=1, software_versions={"torch": "2.0"},
     )
@@ -54,12 +98,18 @@ def _rkv_payload(**overrides) -> dict:
 
 
 def _make_fake_runner(fullkv_payload: dict | None, rkv_payload: dict | None, *, fail_role: str | None = None):
-    """Returns a fake `subprocess_runner(argv) -> CompletedProcess`-shaped
-    callable that writes the requested payload to the `--output` path
-    named in argv, simulating a successful worker subprocess -- never
-    actually launching Python."""
+    """Returns a fake `subprocess_runner(argv, **kwargs) -> CompletedProcess`
+    -shaped callable that writes the requested payload to the `--output`
+    path named in argv, simulating a successful worker subprocess -- never
+    actually launching Python. Accepts (and ignores) the real
+    `capture_output`/`text`/`timeout`/`check` kwargs the coordinator now
+    always passes (B1B-R4 §16)."""
 
-    def runner(argv):
+    def runner(argv, **kwargs):
+        assert kwargs.get("capture_output") is True
+        assert kwargs.get("text") is True
+        assert kwargs.get("timeout") is not None
+        assert kwargs.get("check") is False
         role = argv[argv.index("--role") + 1]
         output_path = Path(argv[argv.index("--output") + 1])
         if role == fail_role:
@@ -101,6 +151,15 @@ def test_coordinator_raises_on_fullkv_worker_failure():
         )
 
 
+def test_fullkv_failure_error_carries_no_partial_result():
+    runner = _make_fake_runner(_fullkv_payload(), _rkv_payload(), fail_role="fullkv")
+    try:
+        run_both_workers_via_subprocess("cfg.yaml", "manifest.json", python_executable="fake-python", subprocess_runner=runner)
+        assert False, "expected WorkerFailedError"
+    except WorkerFailedError as exc:
+        assert exc.partial_fullkv_result is None
+
+
 def test_coordinator_raises_on_rkv_worker_failure():
     runner = _make_fake_runner(_fullkv_payload(), _rkv_payload(), fail_role="rkv")
     with pytest.raises(WorkerFailedError, match="rkv worker exited"):
@@ -109,8 +168,28 @@ def test_coordinator_raises_on_rkv_worker_failure():
         )
 
 
+def test_rkv_failure_preserves_partial_fullkv_result():
+    """B1B-R4 §16: FullKV evidence must survive an R-KV failure -- never
+    discarded."""
+    runner = _make_fake_runner(_fullkv_payload(), _rkv_payload(), fail_role="rkv")
+    try:
+        run_both_workers_via_subprocess("cfg.yaml", "manifest.json", python_executable="fake-python", subprocess_runner=runner)
+        assert False, "expected WorkerFailedError"
+    except WorkerFailedError as exc:
+        assert isinstance(exc.partial_fullkv_result, FullKVWorkerResult)
+        assert exc.partial_fullkv_result.role == "fullkv"
+
+
+def test_coordinator_raises_on_worker_timeout():
+    def runner(argv, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout", 0))
+
+    with pytest.raises(WorkerFailedError, match="timed out"):
+        run_both_workers_via_subprocess("cfg.yaml", "manifest.json", python_executable="fake-python", subprocess_runner=runner)
+
+
 def test_coordinator_raises_if_worker_reports_success_but_writes_no_file():
-    def runner(argv):
+    def runner(argv, **kwargs):
         return SimpleNamespace(returncode=0, stdout="", stderr="")  # never writes the output file
 
     with pytest.raises(WorkerFailedError, match="wrote no output file"):
@@ -120,7 +199,7 @@ def test_coordinator_raises_if_worker_reports_success_but_writes_no_file():
 
 
 def test_coordinator_rejects_malformed_worker_output():
-    def runner(argv):
+    def runner(argv, **kwargs):
         output_path = Path(argv[argv.index("--output") + 1])
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps({"role": "fullkv"}), encoding="utf-8")  # missing required fields

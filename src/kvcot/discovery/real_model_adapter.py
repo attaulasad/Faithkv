@@ -341,6 +341,33 @@ def build_real_snapshot_fn() -> SnapshotFn:
 # --------------------------------------------------------------------------
 
 
+def restore_compaction_tracker_from_snapshot(snapshot: Any) -> "CompactionTracker":
+    """B1B-R4 §13 repair: reconstruct a branch's `CompactionTracker` from
+    the snapshot it is restoring FROM, instead of `CompactionTracker()` (an
+    always-empty tracker that silently discarded every compaction event the
+    natural run recorded before this snapshot's absolute position). Uses
+    `kvcot.generation.state.ModelStateSnapshot`'s own two fields
+    (`compaction_event_steps`, `tokens_since_last_compaction`) -- never a
+    second, independently-recomputed history.
+
+    `last_event_absolute_position` is derived as `snapshot.absolute_position
+    - snapshot.tokens_since_last_compaction`, matching
+    `CompactionTracker.tokens_since_last`'s own definition exactly (so this
+    is a true inverse, not an approximation) -- in the never-any-event case
+    (`compaction_event_steps == []`), `tokens_since_last_compaction` at
+    capture time equals `absolute_position - 0` (the class's own zero
+    default), so this derivation naturally recovers `0`, the same initial
+    value a fresh `CompactionTracker()` would report -- consistent with
+    `CompactionTracker`'s defined initial semantics, not a special case.
+    """
+    from kvcot.generation.replay import CompactionTracker
+
+    return CompactionTracker(
+        event_steps=list(snapshot.compaction_event_steps),
+        last_event_absolute_position=snapshot.absolute_position - snapshot.tokens_since_last_compaction,
+    )
+
+
 @dataclass
 class _LiveBranchState:
     """A branch's already-restored, in-progress live state -- returned by
@@ -368,7 +395,7 @@ def build_real_branch_step_fn_restore_once(model: Any, device: str):
     generic evaluator it plugs into.
     """
     from kvcot.generation.decode import decode_step
-    from kvcot.generation.replay import CompactionTracker, restore_snapshot
+    from kvcot.generation.replay import restore_snapshot
     from kvcot.generation.state import ModelStateSnapshot
 
     def branch_step_fn(state: Any, token_id: int):
@@ -378,7 +405,8 @@ def build_real_branch_step_fn_restore_once(model: Any, device: str):
             cache = DynamicCache()
             restored_provenance = restore_snapshot(model, cache, state)
             live = _LiveBranchState(
-                cache=cache, model_provenance=restored_provenance, compaction=CompactionTracker(),
+                cache=cache, model_provenance=restored_provenance,
+                compaction=restore_compaction_tracker_from_snapshot(state),
                 absolute_position=state.absolute_position,
             )
         elif isinstance(state, _LiveBranchState):
