@@ -1,6 +1,21 @@
 # Plan and status
 
-## Current status: B0.5-R2.2 authority reconciliation and B1A CPU prerequisite implementation — CPU PREREQUISITES IMPLEMENTED; GPU STILL BLOCKED
+## Current status: Phase B1B-R1 — B1A defect repairs and B1B CPU harness architecture integration — IMPLEMENTED FOR REVIEW; GPU STILL BLOCKED
+
+**Phase B1B-R1 (2026-07-20, CHANGELOG.md) repairs six B1A defects found
+during independent review of PR #16, and adds a new, dated `CLAUDE.md`
+§1b/§4b exception that narrowly authorizes CPU-side B1B **harness
+architecture** work (Pass 1/Pass 2 orchestration, branch construction/
+evaluation, attrition accounting, `plan-discovery --dry-run`, a
+documentation-only future B2A contract) — exercised only against
+dependency-injected synthetic/deterministic components in CPU tests, never
+a real model. No model inference or GPU use is authorized by this
+exception; B2A (GPU calibration) and B2B (the bounded discovery pilot)
+still require their own separate, future, dated authorization, exactly as
+§1a already required. Full detail:
+`docs/B1A_REPAIR_AND_B1B_CPU_INTEGRATION.md`. **Status: B1A repairs and B1B
+CPU harness architecture implemented for review. GPU, B2A, and Vast.ai
+remain blocked. No discovery result exists. No method exists.**
 
 **Phase B0.5-R2.2 (2026-07-19, CHANGELOG.md) does two things in one
 consolidated pass.** First, it reconciles a real (if narrow) contradiction:

@@ -1,6 +1,7 @@
 import torch
 
 from kvcot.discovery.capture import capture_update_kv
+from kvcot.generation.provenance import LayerProvenance
 
 from _fake_rkv_fixtures import FakeR1KV, install_fake_rkv_compression_module
 
@@ -19,13 +20,17 @@ def _make_tensors(seed: int, seq_len: int = SEQ_LEN, window: int = WINDOW):
     return key_states, value_states, query_states
 
 
+def _identity_position_map(seq_len: int) -> torch.Tensor:
+    return torch.arange(seq_len, dtype=torch.long).unsqueeze(0).expand(NUM_HEADS, -1).clone()
+
+
 def test_wrapper_captures_gather_parity_on_real_compaction(monkeypatch):
     install_fake_rkv_compression_module(monkeypatch)
     kv = FakeR1KV(budget=BUDGET, window_size=WINDOW)
     key_states, value_states, query_states = _make_tensors(seed=1)
 
     sink = []
-    with capture_update_kv(kv, sink):
+    with capture_update_kv(kv, sink, pre_event_position_map_fn=lambda: _identity_position_map(SEQ_LEN)):
         k_out, v_out = kv.update_kv(key_states, query_states, value_states)
 
     assert len(sink) == 1
@@ -52,6 +57,7 @@ def test_no_compaction_below_budget_skips_recomputation(monkeypatch):
     assert record.had_compaction is False
     assert record.recomputed_final_score is None
     assert record.parity_check_passed is True
+    assert record.observed_kept_indices_parity_passed is None  # not applicable -- no compaction
 
 
 def test_wrapper_is_per_instance_not_class_level(monkeypatch):
@@ -152,17 +158,21 @@ def test_hook_off_vs_hook_on_bit_exact_returned_tensors(monkeypatch):
     assert torch.equal(v_off, v_on)
 
 
-def test_observed_kept_indices_parity_passes_at_first_event(monkeypatch):
+def test_pre_call_tensors_are_retained_as_clones_with_correct_shape(monkeypatch):
     install_fake_rkv_compression_module(monkeypatch)
-    kv = FakeR1KV(budget=BUDGET, window_size=WINDOW, record_kept_token_indices=True)
-    key_states, value_states, query_states = _make_tensors(seed=8)
+    kv = FakeR1KV(budget=BUDGET, window_size=WINDOW)
+    key_states, value_states, query_states = _make_tensors(seed=10)
 
     sink = []
     with capture_update_kv(kv, sink):
         kv.update_kv(key_states, query_states, value_states)
 
     record = sink[0]
-    assert record.observed_kept_indices_parity_passed is True
+    assert record.pre_call_key_shape == (1, NUM_HEADS, SEQ_LEN, HEAD_DIM)
+    assert record.pre_call_value_shape == (1, NUM_HEADS, SEQ_LEN, HEAD_DIM)
+    assert record.pre_call_dtype == str(key_states.dtype)
+    assert record.pre_call_device == str(key_states.device)
+    assert torch.equal(record.pre_call_key_states, key_states)
 
 
 def test_broken_update_kv_detected_by_gather_parity_check(monkeypatch):
@@ -182,7 +192,7 @@ def test_broken_update_kv_detected_by_gather_parity_check(monkeypatch):
     key_states, value_states, query_states = _make_tensors(seed=9)
 
     sink = []
-    with capture_update_kv(kv, sink):
+    with capture_update_kv(kv, sink, pre_event_position_map_fn=lambda: _identity_position_map(SEQ_LEN)):
         kv.update_kv(key_states, query_states, value_states)
 
     record = sink[0]
@@ -191,18 +201,253 @@ def test_broken_update_kv_detected_by_gather_parity_check(monkeypatch):
     assert "gather_parity_failed" in record.parity_failure_reason
 
 
-def test_pre_call_tensors_are_retained_as_clones_with_correct_shape(monkeypatch):
+# --------------------------------------------------------------------------
+# Blocker 2: absolute survivor parity at EVERY compaction event (repaired)
+# --------------------------------------------------------------------------
+
+
+def test_observed_kept_indices_parity_passes_at_first_event(monkeypatch):
     install_fake_rkv_compression_module(monkeypatch)
-    kv = FakeR1KV(budget=BUDGET, window_size=WINDOW)
-    key_states, value_states, query_states = _make_tensors(seed=10)
+    kv = FakeR1KV(budget=BUDGET, window_size=WINDOW, record_kept_token_indices=True)
+    key_states, value_states, query_states = _make_tensors(seed=8)
 
     sink = []
-    with capture_update_kv(kv, sink):
+    with capture_update_kv(kv, sink, pre_event_position_map_fn=lambda: _identity_position_map(SEQ_LEN)):
         kv.update_kv(key_states, query_states, value_states)
 
     record = sink[0]
-    assert record.pre_call_key_shape == (1, NUM_HEADS, SEQ_LEN, HEAD_DIM)
-    assert record.pre_call_value_shape == (1, NUM_HEADS, SEQ_LEN, HEAD_DIM)
-    assert record.pre_call_dtype == str(key_states.dtype)
-    assert record.pre_call_device == str(key_states.device)
-    assert torch.equal(record.pre_call_key_states, key_states)
+    assert record.observed_kept_indices_parity_passed is True
+    assert torch.equal(record.recomputed_kept_absolute_positions, record.observed_kept_absolute_positions)
+
+
+class _TwoEventHarness:
+    """Drives a real `FakeR1KV` through exactly two compaction events using
+    the REAL `kvcot.generation.provenance.LayerProvenance` adapter to build
+    the pre-event absolute-position map at each event -- never a shadow
+    reconstruction, exactly the contract `capture_update_kv` requires.
+    Event 2's pre-event map is provably non-identity: it is seeded from
+    event 1's own (per-head, order-shuffling) survivor selection."""
+
+    def __init__(self, budget=8, window=3, num_heads=2, head_dim=6, seed=100):
+        self.budget = budget
+        self.window = window
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.gen = torch.Generator().manual_seed(seed)
+        self.provenance = LayerProvenance.empty(num_heads)
+        self.full_keys: torch.Tensor | None = None
+        self.full_values: torch.Tensor | None = None
+
+    def _rand(self, seq_len):
+        return torch.randn(1, self.num_heads, seq_len, self.head_dim, generator=self.gen)
+
+    def prefill(self, kv, capture_sink, n_tokens: int):
+        self.full_keys = self._rand(n_tokens)
+        self.full_values = self._rand(n_tokens)
+        query = self._rand(self.window)
+        self.provenance.append_new_tokens_prefill(list(range(n_tokens)))
+        with capture_update_kv(kv, capture_sink, pre_event_position_map_fn=lambda: self.provenance.positions):
+            k_out, v_out = kv.update_kv(self.full_keys, query, self.full_values)
+        self._maybe_adopt(kv)
+        self.full_keys, self.full_values = k_out, v_out
+        return capture_sink[-1]
+
+    def append_and_step(self, kv, capture_sink, absolute_position: int):
+        new_k = self._rand(1)
+        new_v = self._rand(1)
+        query = self._rand(self.window)
+        self.full_keys = torch.cat([self.full_keys, new_k], dim=2)
+        self.full_values = torch.cat([self.full_values, new_v], dim=2)
+        self.provenance.append_new_token(absolute_position)
+        with capture_update_kv(kv, capture_sink, pre_event_position_map_fn=lambda: self.provenance.positions):
+            k_out, v_out = kv.update_kv(self.full_keys, query, self.full_values)
+        self._maybe_adopt(kv)
+        self.full_keys, self.full_values = k_out, v_out
+        return capture_sink[-1]
+
+    def _maybe_adopt(self, kv):
+        if getattr(kv, "kept_token_indices", None):
+            self.provenance.adopt_upstream_kept_indices(kv.kept_token_indices[-1])
+
+
+BUDGET_2 = 8
+WINDOW_2 = 3
+
+
+def _build_two_event_harness(monkeypatch):
+    install_fake_rkv_compression_module(monkeypatch)
+    harness = _TwoEventHarness(budget=BUDGET_2, window=WINDOW_2, num_heads=2, head_dim=6, seed=100)
+    kv = FakeR1KV(budget=BUDGET_2, window_size=WINDOW_2, record_kept_token_indices=True)
+    sink = []
+    event1_record = harness.prefill(kv, sink, n_tokens=10)  # 10 >= budget(8) -> event 1 fires immediately
+    assert event1_record.had_compaction is True
+    return harness, kv, sink, event1_record
+
+
+def test_multi_event_first_and_second_event_absolute_parity(monkeypatch):
+    harness, kv, sink, event1_record = _build_two_event_harness(monkeypatch)
+
+    # Event 1's pre-event map is the fresh prefill append -- identity by
+    # construction (no eviction has happened yet).
+    assert torch.equal(event1_record.pre_event_absolute_position_map, _identity_position_map(10))
+    assert event1_record.observed_kept_indices_parity_passed is True
+
+    # Post-event-1 provenance is now the (per-head, order-shuffling)
+    # survivor selection -- provably non-identity.
+    post_event1_positions = harness.provenance.positions.clone()
+    assert not torch.equal(post_event1_positions, _identity_position_map(post_event1_positions.shape[1]))
+
+    # Drive to event 2: one appended token pushes length to budget(8)+1=9 >= 8.
+    event2_record = harness.append_and_step(kv, sink, absolute_position=10)
+    assert event2_record.had_compaction is True
+    assert event2_record.observed_kept_indices_parity_passed is True
+    assert torch.equal(event2_record.recomputed_kept_absolute_positions, event2_record.observed_kept_absolute_positions)
+
+    # Event 2's pre-event map itself is non-identity (its first BUDGET_2
+    # columns come straight from event 1's shuffled survivor selection).
+    assert not torch.equal(
+        event2_record.pre_event_absolute_position_map,
+        torch.arange(event2_record.pre_event_absolute_position_map.shape[1]).unsqueeze(0).expand(2, -1),
+    )
+    assert len(sink) == 2
+
+
+def test_same_set_wrong_order_fails_ordered_parity(monkeypatch):
+    # capture.py's OWN independent recomputation (from key/query states plus
+    # the pre-event position map) is left correct; only R-KV's real,
+    # observed `kept_token_indices[-1]` bookkeeping is corrupted, by
+    # swapping two of its columns -- same SET of absolute positions per
+    # head, different order. If parity used set equality this would still
+    # "pass"; ordered `torch.equal` must fail it.
+    install_fake_rkv_compression_module(monkeypatch)
+
+    class SwappedOrderR1KV(FakeR1KV):
+        def update_kv(self, key_states, query_states, value_states):
+            k, v = super().update_kv(key_states, query_states, value_states)
+            if self.record_kept_token_indices and self.kept_token_indices:
+                last = self.kept_token_indices[-1].clone()
+                last[:, -1], last[:, -2] = last[:, -2].clone(), last[:, -1].clone()
+                self.kept_token_indices[-1] = last
+            return k, v
+
+    kv = SwappedOrderR1KV(budget=BUDGET, window_size=WINDOW, record_kept_token_indices=True)
+    key_states, value_states, query_states = _make_tensors(seed=20)
+
+    sink = []
+    with capture_update_kv(kv, sink, pre_event_position_map_fn=lambda: _identity_position_map(SEQ_LEN)):
+        kv.update_kv(key_states, query_states, value_states)
+
+    record = sink[0]
+    assert record.observed_kept_indices_parity_passed is False
+    assert "observed_kept_indices_parity_failed" in record.parity_failure_reason
+    # Same SET, confirming this is genuinely an ordering failure, not a
+    # missing/extra-value failure.
+    for h in range(NUM_HEADS):
+        assert set(record.recomputed_kept_absolute_positions[h].tolist()) == set(
+            record.observed_kept_absolute_positions[h].tolist()
+        )
+
+
+def test_one_wrong_absolute_position_fails(monkeypatch):
+    install_fake_rkv_compression_module(monkeypatch)
+
+    class OneWrongPositionR1KV(FakeR1KV):
+        def update_kv(self, key_states, query_states, value_states):
+            k, v = super().update_kv(key_states, query_states, value_states)
+            if self.record_kept_token_indices and self.kept_token_indices:
+                last = self.kept_token_indices[-1].clone()
+                last[0, 0] = last[0, 0] + 999  # one wrong absolute position, head 0
+                self.kept_token_indices[-1] = last
+            return k, v
+
+    kv = OneWrongPositionR1KV(budget=BUDGET, window_size=WINDOW, record_kept_token_indices=True)
+    key_states, value_states, query_states = _make_tensors(seed=21)
+
+    sink = []
+    with capture_update_kv(kv, sink, pre_event_position_map_fn=lambda: _identity_position_map(SEQ_LEN)):
+        kv.update_kv(key_states, query_states, value_states)
+
+    record = sink[0]
+    assert record.observed_kept_indices_parity_passed is False
+    assert "observed_kept_indices_parity_failed" in record.parity_failure_reason
+
+
+def test_missing_pre_event_map_is_a_hard_failure(monkeypatch):
+    install_fake_rkv_compression_module(monkeypatch)
+    kv = FakeR1KV(budget=BUDGET, window_size=WINDOW, record_kept_token_indices=True)
+    key_states, value_states, query_states = _make_tensors(seed=11)
+
+    sink = []
+    with capture_update_kv(kv, sink):  # no pre_event_position_map_fn supplied at all
+        kv.update_kv(key_states, query_states, value_states)
+
+    record = sink[0]
+    assert record.had_compaction is True
+    assert record.observed_kept_indices_parity_passed is False
+    assert record.parity_check_passed is False
+    assert "missing_pre_event_absolute_position_map" in record.parity_failure_reason
+
+
+def test_pre_event_map_shape_mismatch_is_a_hard_failure(monkeypatch):
+    install_fake_rkv_compression_module(monkeypatch)
+    kv = FakeR1KV(budget=BUDGET, window_size=WINDOW, record_kept_token_indices=True)
+    key_states, value_states, query_states = _make_tensors(seed=12)
+
+    wrong_shape_map = torch.arange(SEQ_LEN - 1).unsqueeze(0).expand(NUM_HEADS, -1).clone()  # wrong length
+    sink = []
+    with capture_update_kv(kv, sink, pre_event_position_map_fn=lambda: wrong_shape_map):
+        kv.update_kv(key_states, query_states, value_states)
+
+    record = sink[0]
+    assert record.observed_kept_indices_parity_passed is False
+    assert "shape_mismatch" in record.parity_failure_reason
+
+
+def test_pre_event_position_map_and_kept_positions_are_clones_not_aliases(monkeypatch):
+    install_fake_rkv_compression_module(monkeypatch)
+    kv = FakeR1KV(budget=BUDGET, window_size=WINDOW, record_kept_token_indices=True)
+    key_states, value_states, query_states = _make_tensors(seed=13)
+
+    live_map = _identity_position_map(SEQ_LEN)
+    sink = []
+    with capture_update_kv(kv, sink, pre_event_position_map_fn=lambda: live_map):
+        kv.update_kv(key_states, query_states, value_states)
+
+    record = sink[0]
+    before = record.pre_event_absolute_position_map.clone()
+    live_map.fill_(-1)  # mutate the live map the caller still holds
+    assert torch.equal(record.pre_event_absolute_position_map, before)  # unaffected
+
+    observed_before = record.observed_kept_absolute_positions.clone()
+    kv.kept_token_indices[-1].fill_(-1)  # mutate R-KV's own live bookkeeping
+    assert torch.equal(record.observed_kept_absolute_positions, observed_before)  # unaffected
+
+
+def test_no_compaction_call_parity_remains_non_applicable_even_with_map_fn(monkeypatch):
+    install_fake_rkv_compression_module(monkeypatch)
+    kv = FakeR1KV(budget=BUDGET, window_size=WINDOW, record_kept_token_indices=True)
+    key_states, value_states, query_states = _make_tensors(seed=14, seq_len=6)  # < budget
+
+    sink = []
+    with capture_update_kv(kv, sink, pre_event_position_map_fn=lambda: _identity_position_map(6)):
+        kv.update_kv(key_states, query_states, value_states)
+
+    record = sink[0]
+    assert record.had_compaction is False
+    assert record.observed_kept_indices_parity_passed is None
+    assert record.parity_check_passed is True
+
+
+def test_bookkeeping_unavailable_parity_stays_none_not_a_hard_failure(monkeypatch):
+    install_fake_rkv_compression_module(monkeypatch)
+    kv = FakeR1KV(budget=BUDGET, window_size=WINDOW, record_kept_token_indices=False)
+    key_states, value_states, query_states = _make_tensors(seed=15)
+
+    sink = []
+    with capture_update_kv(kv, sink):  # no map, but no bookkeeping either -- genuinely not evaluable
+        kv.update_kv(key_states, query_states, value_states)
+
+    record = sink[0]
+    assert record.had_compaction is True
+    assert record.observed_kept_indices_parity_passed is None
+    assert record.parity_check_passed is True

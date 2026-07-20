@@ -63,7 +63,15 @@ def compute_entropy_nats(raw_logits: torch.Tensor) -> UncertaintySignal:
     in float32, natural log, never normalized by vocabulary size, never
     coerced to zero on non-finite input (`store null plus an explicit
     missing reason` instead, per the frozen spec).
+
+    `raw_logits.ndim` MUST be exactly 1 (Blocker 5 repair). A malformed rank
+    (a batch dimension, an extra singleton dimension, a bare 0-D scalar) is
+    a PROGRAMMER ERROR at the call site, not a shape this function silently
+    accommodates -- raises `ValueError` immediately, never flattens or sums
+    over the extra dimension(s) on the caller's behalf.
     """
+    if raw_logits.ndim != 1:
+        raise ValueError(f"raw_logits must be 1-D (a single vocabulary distribution), got shape {tuple(raw_logits.shape)}")
     if raw_logits.numel() == 0:
         return _missing("empty_logits_tensor")
     z = raw_logits.float()
@@ -80,7 +88,13 @@ def compute_logit_margin(raw_logits: torch.Tensor) -> UncertaintySignal:
     """Top-1 minus top-2 raw-logit margin, in logit units (not a probability
     margin, not a selected-token log-probability, independent of whether
     the sampled token was top-1). Computed in float32.
+
+    `raw_logits.ndim` MUST be exactly 1 (Blocker 5 repair), for the same
+    reason as `compute_entropy_nats`: a malformed rank raises `ValueError`
+    immediately, never silently flattened or reduced.
     """
+    if raw_logits.ndim != 1:
+        raise ValueError(f"raw_logits must be 1-D (a single vocabulary distribution), got shape {tuple(raw_logits.shape)}")
     if raw_logits.numel() < 2:
         return _missing(VOCAB_TOO_SMALL_MISSING_REASON)
     z = raw_logits.float()

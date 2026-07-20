@@ -2227,6 +2227,63 @@ def cmd_validate_run(args: argparse.Namespace) -> int:
     return 0 if n_invalid == 0 else 1
 
 
+# ------------------------------------------------------------------- plan-discovery
+#
+# B1B CPU harness dry-run planner (docs/B1A_REPAIR_AND_B1B_CPU_INTEGRATION.md
+# §10, authorized by CLAUDE.md §1b/§4b). ALWAYS behaves as a planning-only
+# command -- there is no non-dry-run mode, on purpose: B2A/B2B/GPU/Vast.ai
+# execution is not authorized by this pass. Every import in this function
+# body is CPU-only, pure-Python (kvcot.discovery.discovery_config,
+# kvcot.discovery.constants -- deliberately NOT kvcot.discovery.branch_eval
+# or kvcot.discovery.pass1, which import torch at module scope); none of
+# them import torch, transformers, datasets, or huggingface_hub, so this
+# command cannot load model weights, download a dataset, or initialize CUDA
+# even if asked to -- matching every other `--dry-run` command in this CLI.
+
+
+def cmd_plan_discovery(args: argparse.Namespace) -> int:
+    from kvcot.discovery.constants import MINIMUM_FUTURE_TOKENS_AFTER_EVENT, SCORED_HORIZON
+    from kvcot.discovery.discovery_config import load_discovery_config
+
+    config = load_discovery_config(args.config)
+
+    n_events = 3
+    n_candidates = 2
+    n_donors = 2
+    n_pair_branches_per_event = n_candidates * n_donors
+    pilot_example_count = 12
+    pilot_total_pair_branches = pilot_example_count * n_events * n_pair_branches_per_event
+
+    print("plan-discovery plan:")
+    print(f"  model: {config.model.name}@{config.model.revision}")
+    print(f"  tokenizer: {config.model.tokenizer_name}@{config.model.tokenizer_revision}")
+    print(f"  dataset: {config.dataset.name} (revision_frozen={config.dataset.revision_is_frozen})")
+    print(f"  rkv: budget={config.rkv.budget} upstream_revision={config.rkv.upstream_revision}")
+    print("  bridge_tokens=1")
+    print(f"  scored_horizon={SCORED_HORIZON}")
+    print(f"  minimum_future_tokens_after_event={MINIMUM_FUTURE_TOKENS_AFTER_EVENT}")
+    print(
+        f"  events={n_events} candidates={n_candidates} donors={n_donors} "
+        f"pair_branches_per_event={n_pair_branches_per_event}"
+    )
+    print(
+        f"  12-example pilot total pair branches (planning information only): {pilot_total_pair_branches}"
+    )
+    print(
+        "  B2A (one-example GPU calibration), B2B (the bounded discovery pilot), and any Vast.ai "
+        "(or other GPU host) activity of any kind are BLOCKED -- not authorized by this command, by "
+        "configs/discovery/*.yaml, or by CLAUDE.md §1a/§1b."
+    )
+    if not config.dataset.revision_is_frozen:
+        print(
+            "  BLOCKED: dataset.revision is not frozen -- actual B2A execution remains blocked until "
+            "the one-example manifest identity and dataset revision are independently frozen from an "
+            "authoritative source (never guessed)."
+        )
+    print("  no result files created")
+    return 0
+
+
 # ----------------------------------------------------------------------------- main
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2302,6 +2359,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("validate-run")
     p.add_argument("--run-dir", required=True)
     p.set_defaults(func=cmd_validate_run)
+
+    p = sub.add_parser("plan-discovery")
+    p.add_argument("--config", required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_plan_discovery)
 
     p = sub.add_parser("failure-atlas")
     p.add_argument("--full-artifact", required=True)

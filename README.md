@@ -2,6 +2,25 @@
 
 ## Current status (read this first)
 
+**Phase B1B-R1 (2026-07-20)** repaired six B1A defects found during
+independent review of PR #16 (no-offload assertion now unconditional and
+`hf_device_map`-aware; absolute survivor parity now checked at every
+compaction event, not just the first; the active discovery schema now
+closes every internal-consistency gap named in review; the fixed-shape
+swap primitive now rejects dtype/device mismatches and detects storage
+overlap via real storage identity, not just starting address; the
+uncertainty functions now require a 1-D input; the Llama-8B discovery
+config is now frozen with a machine-checkable "dataset revision not yet
+frozen" flag), and added a new, dated `CLAUDE.md` §1b/§4b exception that
+narrowly authorizes CPU-side B1B **harness architecture** — Pass 1/Pass 2
+orchestration, branch construction/evaluation, attrition accounting, a
+dry-run planner, and a documentation-only future B2A contract — exercised
+only against dependency-injected synthetic/deterministic components in CPU
+tests, never a real model. See
+`docs/B1A_REPAIR_AND_B1B_CPU_INTEGRATION.md`. **Status: B1A repairs and
+B1B CPU harness architecture implemented for review. GPU, B2A, and Vast.ai
+remain blocked. No discovery result exists. No method exists.**
+
 **Phase B0.5-R2.2 (2026-07-19)** reconciled a narrow contradiction between
 `CLAUDE.md`'s original blanket model freeze and the already-selected
 Llama-8B/MATH-500 discovery operating point (resolved via a new, dated

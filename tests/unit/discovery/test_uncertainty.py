@@ -145,3 +145,92 @@ def test_resolve_prediction_logit_source_rejects_invalid_inputs():
         resolve_prediction_logit_source(absolute_position=-1, prompt_length=10)
     with pytest.raises(ValueError):
         resolve_prediction_logit_source(absolute_position=0, prompt_length=0)
+
+
+# --------------------------------------------------------------------------
+# Blocker 5: tensor-shape contracts -- raw_logits.ndim must be exactly 1
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [(2, 2), (1, 2, 3), ()],
+    ids=["shape_2x2", "shape_1x2x3", "scalar_tensor"],
+)
+def test_entropy_rejects_malformed_rank(shape):
+    logits = torch.zeros(shape)
+    with pytest.raises(ValueError):
+        compute_entropy_nats(logits)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [(2, 2), (1, 2, 3), ()],
+    ids=["shape_2x2", "shape_1x2x3", "scalar_tensor"],
+)
+def test_logit_margin_rejects_malformed_rank(shape):
+    logits = torch.zeros(shape)
+    with pytest.raises(ValueError):
+        compute_logit_margin(logits)
+
+
+def test_entropy_never_flattens_or_sums_a_malformed_rank_input():
+    # A (2, 3) tensor superficially "looks like" it could be flattened to a
+    # valid 6-vocab distribution -- it must be rejected outright, never
+    # silently reshaped/summed on the caller's behalf.
+    logits = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    with pytest.raises(ValueError):
+        compute_entropy_nats(logits)
+
+
+def test_entropy_accepts_one_element_vocabulary():
+    result = compute_entropy_nats(torch.tensor([5.0]))
+    assert result.is_available
+    assert result.value == pytest.approx(0.0, abs=1e-6)  # single-outcome distribution -> zero entropy
+
+
+def test_logit_margin_one_element_vocabulary_is_missing_not_an_error():
+    result = compute_logit_margin(torch.tensor([5.0]))
+    assert not result.is_available
+    assert result.missing_reason is not None
+
+
+def test_entropy_non_finite_result_is_missing_with_explicit_reason():
+    result = compute_entropy_nats(torch.tensor([float("inf"), 0.0]))
+    assert not result.is_available
+    assert result.missing_reason == NON_FINITE_MISSING_REASON
+
+
+def test_logit_margin_non_finite_result_is_missing_with_explicit_reason():
+    result = compute_logit_margin(torch.tensor([float("inf"), float("inf"), 0.0]))
+    assert not result.is_available
+    assert result.missing_reason == NON_FINITE_MISSING_REASON
+
+
+def test_uncertainty_signal_stores_only_cloned_scalar_never_the_logits_tensor():
+    logits = torch.tensor([5.0, 2.0, 1.0])
+    entropy = compute_entropy_nats(logits)
+    margin = compute_logit_margin(logits)
+    assert isinstance(entropy.value, float)
+    assert isinstance(margin.value, float)
+    # Mutating the original logits after the fact cannot retroactively
+    # change an already-extracted Python float.
+    logits.fill_(0.0)
+    assert margin.value == pytest.approx(3.0, abs=1e-6)
+
+
+def test_source_and_missing_reason_propagate_into_pair_signals():
+    e_entropy = compute_entropy_nats(torch.empty(0))  # missing
+    r_entropy = compute_entropy_nats(torch.tensor([1.0, 2.0]))  # present
+    e_margin = compute_logit_margin(torch.tensor([1.0]))  # missing (vocab too small)
+    r_margin = compute_logit_margin(torch.tensor([5.0, 2.0]))  # present
+
+    pair = compute_pair_uncertainty_signals(e_entropy, r_entropy, e_margin, r_margin)
+
+    assert pair.entropy_e.is_available is False
+    assert pair.entropy_e.missing_reason is not None
+    assert pair.entropy_r.is_available is True
+    assert pair.entropy_diff is None  # one side missing
+    assert pair.logit_margin_e.is_available is False
+    assert pair.logit_margin_r.is_available is True
+    assert pair.logit_margin_diff is None
