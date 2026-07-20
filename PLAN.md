@@ -1,6 +1,32 @@
 # Plan and status
 
-## Current status: Phase B1B-R2 — real-model boundary and B2A preflight — IMPLEMENTED FOR REVIEW; GPU/B2A/B2B STILL BLOCKED
+## Current status: Phase B1B-R3 — executable B2A boundary and evidence producer — IMPLEMENTED FOR REVIEW; GPU/B2A/B2B STILL BLOCKED
+
+**Phase B1B-R3 (2026-07-20, CHANGELOG.md) repairs twelve defects found
+during an independent audit of the merged PR #18 (B1B-R2, commit
+`7034e46b516eff656b5508d9253ee02b13405f95`)**: invalid `RKVPolicy`
+construction, an unresolvable prompt identity, a stub answer verifier,
+split real-model provenance state, per-token (rather than per-branch)
+snapshot restoration, inconsistent swap bookkeeping, hard-coded B2A
+evidence, a FullKV/R-KV single-process conflict, ambiguous no-op
+accounting, a missing failure artifact, oversized selected captures
+(NOT fully repaired — see below), and frozen-vs-runtime R-KV configuration
+drift. Also resolves `configs/discovery/b2a_one_example_manifest.json`'s
+prompt identity for real via the new `kvcot prepare-b2a-manifest` command
+(CPU-only: one pinned MATH-500 row, the pinned tokenizer's config files
+only — no model weights), and corrects a non-reproducible `raw_content_hash`
+found in the process. `kvcot b2a-calibrate --execute`'s complete subprocess
+coordinator/worker architecture and evidence producer are now real,
+reviewable code, exercised end-to-end on CPU via a mocked worker runner
+(`tests/unit/discovery/test_b2a_execute_coordinator.py`) — but every path
+requiring CUDA is still never invoked. No new `CLAUDE.md` exception was
+needed. Full detail: `docs/B1B_R3_EXECUTABLE_STATE_CLOSURE.md`. **Status:
+B1B-R3 implemented, ready for independent CPU audit. GPU, B2A, and B2B
+remain blocked. No discovery result exists. No method exists.** Defect 11
+(further capture-size tightening) was assessed and deliberately deferred,
+not silently claimed complete — see that document's §2 Defect 11 entry.
+
+## Prior status: Phase B1B-R2 — real-model boundary and B2A preflight — IMPLEMENTED FOR REVIEW; GPU/B2A/B2B STILL BLOCKED
 
 **Phase B1B-R2 (2026-07-20, CHANGELOG.md) repairs eight defects found
 during independent review of B1B-R1** (device/dtype parity, target-only

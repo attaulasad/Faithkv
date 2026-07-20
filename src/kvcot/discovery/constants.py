@@ -9,6 +9,8 @@ silently drift apart.
 """
 from __future__ import annotations
 
+import enum
+
 SCORED_HORIZON = 48
 MINIMUM_FUTURE_TOKENS_AFTER_EVENT = 49
 BRIDGE_TOKEN_COUNT = 1
@@ -20,3 +22,35 @@ B2B_PILOT_EXAMPLE_COUNT = 12
 # 3 events x 4 real cross-product swaps x 12 examples = 144 -- the no-op
 # control is mandatory but NEVER counted in this total (B1B-R2 §9).
 B2B_PILOT_TOTAL_REAL_BRANCHES = B2B_PILOT_EXAMPLE_COUNT * EVENTS_SELECTED_PER_EXAMPLE * PAIR_BRANCHES_PER_EVENT
+
+# B2A no-op numerical calibration count -- exactly ONE, drawn from the
+# shared orchestrator's structurally-always-3 (one-per-event) mandatory
+# no-op pairs, never one full additional no-op branch per event (B1B-R3
+# §13). `kvcot.discovery.b2a_execute` selects the FIRST valid one; the
+# other (structurally-produced, still CPU-mandatory) no-ops are extra
+# confirmatory data, never double-counted into any total.
+B2A_NOOP_CALIBRATION_COUNT = 1
+
+
+class NoOpMode(enum.Enum):
+    """B1B-R3 §13: an explicit policy for how the mandatory no-op control
+    (Part IX.20 -- `evicted_absolute_position == donor_absolute_position`)
+    is interpreted at each protocol stage, so the shared orchestrator
+    (`kvcot.discovery.orchestrator.run_example`, which always builds one
+    no-op pair per selected event, `4 cross-product + 1 no-op = 5` attempts,
+    unchanged by this enum) is never silently read as producing MORE real
+    branches than it does."""
+
+    # CPU tests: every example's no-op pair(s) are mandatory, structural,
+    # and reported/asserted individually (test_b1b_integration.py etc.) --
+    # this is the orchestrator's unmodified default behavior.
+    CPU_REQUIRED = "cpu_required"
+    # B2A: exactly ONE no-op numerical calibration is reported as B2A
+    # evidence (`no_op_numerical_parity`), drawn from the orchestrator's
+    # first produced no-op pair for the one B2A example -- never one
+    # additional full no-op branch per event.
+    B2A_SINGLE_CALIBRATION = "b2a_single_calibration"
+    # Reserved for a future mode that suppresses no-op pair construction
+    # entirely -- not used by any code path in this repository yet; never
+    # apply this to a CPU test path, which always requires the no-op.
+    DISABLED = "disabled"

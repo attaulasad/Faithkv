@@ -34,6 +34,7 @@ rejected outright rather than attempting ambiguous span analysis.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -171,4 +172,112 @@ def apply_within_head_swap(
         kv_head_index=kv_head_index,
         retained_post_storage_position=retained_post_storage_position,
         is_noop=is_noop,
+    )
+
+
+@dataclass(frozen=True)
+class SemanticSwapResult:
+    """Structured mutation report (B1B-R3 §10) -- every field an auditor
+    needs to confirm exactly one slot changed and every piece of dependent
+    bookkeeping was updated consistently with it, without re-deriving
+    anything from the mutated snapshot by hand."""
+
+    swap_result: SwapResult
+    donor_absolute_position: int
+    candidate_absolute_position: int
+    provenance_updated: bool
+    kept_index_bookkeeping_updated: bool
+    is_noop: bool
+
+
+def apply_semantic_within_head_swap(
+    snapshot: Any,  # kvcot.generation.state.ModelStateSnapshot
+    *,
+    layer_index: int,
+    kv_head_index: int,
+    retained_post_storage_position: int,
+    candidate_key: torch.Tensor,
+    candidate_value: torch.Tensor,
+    donor_absolute_position: int,
+    candidate_absolute_position: int,
+) -> SemanticSwapResult:
+    """B1B-R3 §10 repair: `apply_within_head_swap` (above) is a pure,
+    intentionally narrow cache-content primitive -- it never touches
+    provenance or R-KV kept-index bookkeeping, by design (module docstring).
+    That left every caller responsible for keeping "which absolute token
+    occupies this physical slot" bookkeeping in sync with the swap, and
+    `kvcot.discovery.pipeline.build_swap_pair_record` did not: it swapped
+    the K/V content but the swapped snapshot's `provenance` and
+    `kv_cluster_bookkeeping_per_layer` kept reporting the DONOR's identity
+    at that slot.
+
+    This function is the one place that keeps both in sync: it calls
+    `apply_within_head_swap` for the actual K/V mutation (never
+    reimplementing it), writes the result into an INDEPENDENT mutation of
+    `snapshot` (the snapshot's `key_cache`/`value_cache` are replaced with
+    the swap's returned clones -- `snapshot` itself is mutated in place,
+    matching `kvcot.discovery.pipeline`'s existing "clone the pristine
+    snapshot, then mutate the clone" convention), and then updates:
+
+    - `snapshot.provenance.layers[layer_index].positions[kv_head_index,
+      retained_post_storage_position]`, from `donor_absolute_position` to
+      `candidate_absolute_position` -- ONLY if `snapshot.provenance` is not
+      `None` (a synthetic/CPU-test snapshot without full provenance skips
+      this step silently; the real-model adapter's snapshots always carry
+      it, `kvcot.generation.replay.capture_snapshot`).
+    - `snapshot.kv_cluster_bookkeeping_per_layer[layer_index]
+      ["kept_token_indices"][-1][kv_head_index,
+      retained_post_storage_position]`, the SAME identity update, applied to
+      the most-recently-recorded R-KV survivor-identity list -- this is
+      exactly the list `r1_kv.py`'s own multi-event remap
+      (`prev_indices = self.kept_token_indices[-1]`, r1_kv.py:141-154) reads
+      on the NEXT real compaction event on this branch; leaving it
+      reporting the donor's identity would corrupt that remap for the
+      swapped branch specifically. Only updated when this bookkeeping list
+      is present and non-empty for this layer (i.e. at least one real
+      compaction event has already fired here, which is guaranteed for any
+      layer this function is ever called on -- a swap target is only ever
+      constructed from an already-fired compaction event's captured pool).
+
+    No other layer, head, slot, or snapshot field is touched. The no-op
+    case (`donor_absolute_position == candidate_absolute_position`) still
+    calls `apply_within_head_swap` (whose own `is_noop` detection already
+    handles writing back the identical value) and, for provenance/
+    bookkeeping, writes back the SAME identity it already held -- a
+    genuinely no-op semantic update, not a special-cased skip.
+    """
+    swap_result = apply_within_head_swap(
+        key_cache=snapshot.key_cache,
+        value_cache=snapshot.value_cache,
+        layer_index=layer_index,
+        kv_head_index=kv_head_index,
+        retained_post_storage_position=retained_post_storage_position,
+        candidate_key=candidate_key,
+        candidate_value=candidate_value,
+    )
+    snapshot.key_cache = swap_result.key_cache
+    snapshot.value_cache = swap_result.value_cache
+
+    provenance_updated = False
+    if snapshot.provenance is not None:
+        layer_provenance = snapshot.provenance.layers.get(layer_index)
+        if layer_provenance is not None:
+            layer_provenance.positions[kv_head_index, retained_post_storage_position] = candidate_absolute_position
+            provenance_updated = True
+
+    kept_index_bookkeeping_updated = False
+    if snapshot.kv_cluster_bookkeeping_per_layer:
+        bookkeeping = snapshot.kv_cluster_bookkeeping_per_layer[layer_index]
+        kept_token_indices = bookkeeping.get("kept_token_indices") if bookkeeping else None
+        if kept_token_indices:
+            kept_token_indices[-1][kv_head_index, retained_post_storage_position] = candidate_absolute_position
+            kept_index_bookkeeping_updated = True
+
+    return SemanticSwapResult(
+        swap_result=swap_result,
+        donor_absolute_position=donor_absolute_position,
+        candidate_absolute_position=candidate_absolute_position,
+        provenance_updated=provenance_updated,
+        kept_index_bookkeeping_updated=kept_index_bookkeeping_updated,
+        is_noop=swap_result.is_noop,
     )
