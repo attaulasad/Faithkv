@@ -1,8 +1,10 @@
 # Discovery-track-only configuration (Blocker 6,
-# docs/B1A_REPAIR_AND_B1B_CPU_INTEGRATION.md). Authorized by CLAUDE.md
-# §1a/§4a (Llama-8B/MATH-500 CPU-side infrastructure) and §1b/§4b (bounded
-# B1B CPU-harness architecture). Loaded ONLY by the discovery track
-# (kvcot.discovery.discovery_config, `kvcot plan-discovery --dry-run`) --
+# docs/B1A_REPAIR_AND_B1B_CPU_INTEGRATION.md; frozen in full by
+# docs/B1B_R2_REAL_MODEL_BOUNDARY_AND_B2A_PREFLIGHT.md, dated 2026-07-20).
+# Authorized by CLAUDE.md §1a/§4a (Llama-8B/MATH-500 CPU-side
+# infrastructure) and §1b/§4b (bounded B1B CPU-harness architecture).
+# Loaded ONLY by the discovery track (kvcot.discovery.discovery_config,
+# `kvcot plan-discovery --dry-run`, `kvcot b2a-calibrate --dry-run`) --
 # never by the frozen Qwen-1.5B primary pipeline, and this file does NOT
 # change configs/lock.yaml in any way.
 #
@@ -11,12 +13,17 @@
 #   from huggingface_hub import HfApi
 #   info = HfApi().model_info("deepseek-ai/DeepSeek-R1-Distill-Llama-8B")
 #   print(info.sha)
-# Resolved 2026-07-20: sha = 6a6f4aa4197940add57724a7707d069478df56b1,
-# matching the value this pass was required to freeze exactly.
+# Resolved 2026-07-20: sha = 6a6f4aa4197940add57724a7707d069478df56b1.
+#
+# dataset.revision resolved 2026-07-20 directly against the Hugging Face
+# Hub API (GET /api/datasets/HuggingFaceH4/MATH-500, "sha" field),
+# cross-checked via two independent lookups against the live source. See
+# docs/B1B_R2_REAL_MODEL_BOUNDARY_AND_B2A_PREFLIGHT.md §8.
 #
 # NO GPU/inference authorization is granted by this file (CLAUDE.md §1b/
 # §4b). Any GPU run requires its own separate, future, dated authorization
-# (B2A calibration at minimum).
+# (B2A calibration at minimum) -- this file only freezes the configuration
+# a future, separately-authorized B2A run would be REQUIRED to match.
 
 model:
   name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
@@ -28,14 +35,30 @@ model:
 
 dataset:
   name: MATH-500
-  # Deliberately NOT frozen: no dataset repository ID or dataset revision
-  # has been independently verified from an authoritative source in this
-  # pass. This is an explicit, machine-checkable blocker
-  # (DiscoveryDatasetLock.revision_is_frozen == False) -- actual B2A
-  # execution remains blocked on freezing this, not silently permitted to
-  # proceed without it.
-  revision: null
+  config: default
+  split: test
+  revision: 6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be
 
 rkv:
   budget: 1024
   upstream_revision: 45eaa7d69d20b7388321f077020a610d9afb65bd
+  window_size: 8
+  mix_lambda: 0.1
+  retain_ratio: 0.2
+  retain_direction: last
+  divide_method: step_length
+  divide_length: 128
+  compression_content: all
+  kernel_size: 3
+
+generation:
+  generation_mode: greedy
+  do_sample: false
+  temperature: null
+  top_p: null
+  batch_size: 1
+  max_new_tokens: 6144
+  framework_seed: 13
+  attention_backend: flash_attention_2
+  cache_implementation: DynamicCache
+  no_offload_required: true

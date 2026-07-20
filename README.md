@@ -2,6 +2,32 @@
 
 ## Current status (read this first)
 
+**Phase B1B-R2 (2026-07-20)** repaired eight defects found during
+independent review of B1B-R1: absolute-position device/dtype parity in the
+capture wrapper; capture is now target-only and memory-bounded (an opt-in
+`should_capture` predicate, default-off for backward compatibility);
+branch construction now originates from a complete, independently-cloned
+`ModelStateSnapshot` (every layer's K/V, never one layer's returned
+tensors); Pass 1/Pass 2 now use explicit one-shot-prefill-then-single-
+token-decode call boundaries (`PrefillFn`/`DecodeOneFn`), and prefill-phase
+compaction events are never eligible branch targets; the discovery
+configuration is now fully frozen and hashed (generation mode, attention
+backend, cache implementation, the complete R-KV hyperparameter set, the
+prompt template); the MATH-500 dataset revision is now independently
+verified against the live Hugging Face Hub API and frozen, alongside a
+one-example manifest (the tokenized-prompt hash is honestly left
+unresolved — it requires a live tokenizer); branch-count accounting is
+now a single source of truth (`12 x 3 x 4 = 144` real branches, no-op
+excluded); and the B2A gate now has 21 mandatory, non-optional fields that
+make it impossible to construct a passing result without evidence for
+every one of them. Also added: `kvcot b2a-calibrate` (`--dry-run` fully
+exercised; `--execute`'s code path is implemented but never invoked in
+this pass — every precondition fails closed on this CPU-only, no-model
+build). No new `CLAUDE.md` exception was needed. See
+`docs/B1B_R2_REAL_MODEL_BOUNDARY_AND_B2A_PREFLIGHT.md`. **Status: B1B-R2
+implemented for review. GPU, B2A, and B2B remain blocked. No discovery
+result exists. No method exists.**
+
 **Phase B1B-R1 (2026-07-20)** repaired six B1A defects found during
 independent review of PR #16 (no-offload assertion now unconditional and
 `hf_device_map`-aware; absolute survivor parity now checked at every

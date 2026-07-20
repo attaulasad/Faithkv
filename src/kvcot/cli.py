@@ -2242,17 +2242,19 @@ def cmd_validate_run(args: argparse.Namespace) -> int:
 
 
 def cmd_plan_discovery(args: argparse.Namespace) -> int:
-    from kvcot.discovery.constants import MINIMUM_FUTURE_TOKENS_AFTER_EVENT, SCORED_HORIZON
+    from kvcot.discovery.constants import (
+        B2B_PILOT_EXAMPLE_COUNT,
+        B2B_PILOT_TOTAL_REAL_BRANCHES,
+        CANDIDATES_PER_EVENT,
+        DONORS_PER_EVENT,
+        EVENTS_SELECTED_PER_EXAMPLE,
+        MINIMUM_FUTURE_TOKENS_AFTER_EVENT,
+        PAIR_BRANCHES_PER_EVENT,
+        SCORED_HORIZON,
+    )
     from kvcot.discovery.discovery_config import load_discovery_config
 
     config = load_discovery_config(args.config)
-
-    n_events = 3
-    n_candidates = 2
-    n_donors = 2
-    n_pair_branches_per_event = n_candidates * n_donors
-    pilot_example_count = 12
-    pilot_total_pair_branches = pilot_example_count * n_events * n_pair_branches_per_event
 
     print("plan-discovery plan:")
     print(f"  model: {config.model.name}@{config.model.revision}")
@@ -2263,11 +2265,15 @@ def cmd_plan_discovery(args: argparse.Namespace) -> int:
     print(f"  scored_horizon={SCORED_HORIZON}")
     print(f"  minimum_future_tokens_after_event={MINIMUM_FUTURE_TOKENS_AFTER_EVENT}")
     print(
-        f"  events={n_events} candidates={n_candidates} donors={n_donors} "
-        f"pair_branches_per_event={n_pair_branches_per_event}"
+        f"  events={EVENTS_SELECTED_PER_EXAMPLE} candidates={CANDIDATES_PER_EVENT} donors={DONORS_PER_EVENT} "
+        f"pair_branches_per_event={PAIR_BRANCHES_PER_EVENT}"
     )
     print(
-        f"  12-example pilot total pair branches (planning information only): {pilot_total_pair_branches}"
+        f"  B2B pilot cost model (planning information only, NOT authorized by this command): "
+        f"{B2B_PILOT_EXAMPLE_COUNT} examples x {EVENTS_SELECTED_PER_EXAMPLE} events x "
+        f"{PAIR_BRANCHES_PER_EVENT} real swaps = {B2B_PILOT_TOTAL_REAL_BRANCHES} real branches "
+        "(the mandatory no-op control is excluded from this total -- it is a separate, CPU-mandatory "
+        "parity mechanism, never one of the 144 real branches)."
     )
     print(
         "  B2A (one-example GPU calibration), B2B (the bounded discovery pilot), and any Vast.ai "
@@ -2281,6 +2287,148 @@ def cmd_plan_discovery(args: argparse.Namespace) -> int:
             "authoritative source (never guessed)."
         )
     print("  no result files created")
+    return 0
+
+
+# --------------------------------------------------------------------- b2a-calibrate
+#
+# One-example-only B2A calibration command (B1B-R2 §11). "B2A is a one-
+# example engineering calibration. It does not authorize the 12-example
+# pilot." `--dry-run` never touches CUDA, never downloads a model, never
+# runs inference. `--execute` is a separate, explicit flag; it requires
+# CUDA and refuses to proceed on ANY unresolved/inconsistent identity
+# field -- in this build that is unconditional, since the frozen
+# manifest's prompt-token identity is not yet resolved.
+
+
+def cmd_b2a_calibrate(args: argparse.Namespace) -> int:
+    from kvcot.discovery.constants import (
+        B2B_PILOT_EXAMPLE_COUNT,
+        B2B_PILOT_TOTAL_REAL_BRANCHES,
+        BRIDGE_TOKEN_COUNT,
+        EVENTS_SELECTED_PER_EXAMPLE,
+        PAIR_BRANCHES_PER_EVENT,
+        SCORED_HORIZON,
+    )
+    from kvcot.discovery.discovery_config import (
+        canonical_config_hash,
+        generation_config_hash,
+        load_discovery_config,
+        prompt_template_hash,
+        rkv_config_hash,
+    )
+    from kvcot.discovery.manifest import load_b2a_one_example_manifest
+
+    config = load_discovery_config(args.config)
+    manifest = load_b2a_one_example_manifest()
+
+    blockers: list[str] = []
+    if not config.dataset.revision_is_frozen:
+        blockers.append("config dataset.revision is not frozen")
+    if config.dataset.revision != manifest.dataset_revision:
+        blockers.append(
+            f"config dataset.revision ({config.dataset.revision!r}) does not match manifest.dataset_revision "
+            f"({manifest.dataset_revision!r})"
+        )
+    if not manifest.prompt_identity_is_resolved:
+        blockers.append(
+            "manifest prompt-token identity is unresolved (prompt_token_ids_sha256 / "
+            "tokenizer_revision_used_for_prompt_hash require a live tokenizer)"
+        )
+
+    if args.dry_run:
+        print("b2a-calibrate dry-run plan:")
+        print("  B2A is a one-example engineering calibration. It does not authorize the 12-example pilot.")
+        print(f"  model: {config.model.name}@{config.model.revision}")
+        print(f"  tokenizer: {config.model.tokenizer_name}@{config.model.tokenizer_revision}")
+        print(
+            f"  dataset: {manifest.dataset_repo}@{manifest.dataset_revision} "
+            f"config={manifest.dataset_config} split={manifest.dataset_split}"
+        )
+        print(f"  selected example: index={manifest.example_index} unique_id={manifest.unique_id}")
+        print("  one_example_only=True (structural: exactly one manifest entry; no range/list is accepted)")
+        print(
+            f"  generation: mode={config.generation.generation_mode} do_sample={config.generation.do_sample} "
+            f"batch_size={config.generation.batch_size} max_new_tokens={config.generation.max_new_tokens} "
+            f"framework_seed={config.generation.framework_seed} "
+            f"attention_backend={config.generation.attention_backend} "
+            f"no_offload_required={config.generation.no_offload_required}"
+        )
+        print(
+            f"  rkv: budget={config.rkv.budget} window_size={config.rkv.window_size} "
+            f"mix_lambda={config.rkv.mix_lambda} divide_length={config.rkv.divide_length}"
+        )
+        print(
+            f"  call plan: exactly 1 prefill call (complete prompt) + 1 decode_one call per continuation token "
+            f"(never repeated one-token prefill calls); target-only capture at exactly "
+            f"{EVENTS_SELECTED_PER_EXAMPLE} preselected (position, layer) pairs; {BRIDGE_TOKEN_COUNT} unscored "
+            f"bridge token then {SCORED_HORIZON} scored teacher-forced tokens per branch"
+        )
+        print(
+            f"  B2B pilot cost model (planning information only, NOT authorized here): "
+            f"{B2B_PILOT_EXAMPLE_COUNT} examples x {EVENTS_SELECTED_PER_EXAMPLE} events x "
+            f"{PAIR_BRANCHES_PER_EVENT} real swaps = {B2B_PILOT_TOTAL_REAL_BRANCHES} real branches"
+        )
+        print(
+            f"  B2A-only minimal no-op calibration (this example only): up to {EVENTS_SELECTED_PER_EXAMPLE} "
+            "no-op swaps -- reported separately, never added to the 144-branch B2B total"
+        )
+        print(f"  canonical_config_hash={canonical_config_hash(config)}")
+        print(f"  generation_config_hash={generation_config_hash(config.generation)}")
+        print(f"  rkv_config_hash={rkv_config_hash(config.rkv)}")
+        print(f"  prompt_template_hash={prompt_template_hash()}")
+        print(f"  manifest_hash={manifest.manifest_hash()}")
+        if blockers:
+            print("  BLOCKED:")
+            for blocker in blockers:
+                print(f"    - {blocker}")
+        else:
+            print("  no unresolved/inconsistent identity fields detected")
+        print("  no result files created; no model loaded; no CUDA required")
+        return 0 if not blockers else 2
+
+    # ---- explicit GPU execution mode ----
+    if not args.execute:
+        raise SystemExit(
+            "b2a-calibrate requires exactly one of --dry-run or --execute; refusing to silently default "
+            "to running GPU inference."
+        )
+    if args.problem_index is not None or args.limit is not None:
+        raise SystemExit(
+            "b2a-calibrate --execute accepts no --problem-index/--limit override -- exactly the one frozen "
+            "manifest example runs, never a range, multiple ids, or unrestricted dataset iteration."
+        )
+    if blockers:
+        raise SystemExit("b2a-calibrate --execute refused:\n" + "\n".join(f"  - {b}" for b in blockers))
+
+    import torch
+
+    if not torch.cuda.is_available():
+        raise SystemExit("b2a-calibrate --execute requires CUDA; none is available on this machine.")
+
+    from kvcot.discovery.b2a_execute import run_b2a_calibration
+
+    artifact = run_b2a_calibration(config, manifest)
+    print(f"b2a-calibrate result: passed={artifact.gate_result.passed}")
+    if not artifact.gate_result.passed:
+        print(f"  failed_conditions={artifact.gate_result.failed_conditions}")
+        return 2
+
+    out_path = Path("results/decisions") / f"b2a_calibration_{manifest.unique_id.replace('/', '_')}.json"
+    write_json(
+        out_path,
+        {
+            "config_hash": artifact.config_hash,
+            "manifest_hash": artifact.manifest_hash,
+            "gate_result": {
+                k: v for k, v in artifact.gate_result.__dict__.items()
+            },
+            "example_valid": artifact.example_result.valid,
+            "n_pair_records": len(artifact.example_result.pair_records),
+        },
+    )
+    print(f"  artifact written: {out_path}")
+    print("  stop: B2B pilot NOT started by this command.")
     return 0
 
 
@@ -2364,6 +2512,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", required=True)
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_plan_discovery)
+
+    p = sub.add_parser(
+        "b2a-calibrate",
+        help="One-example engineering calibration. Does not authorize the 12-example B2B pilot.",
+    )
+    p.add_argument("--config", required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument(
+        "--execute", action="store_true",
+        help="Explicit GPU execution flag. Requires CUDA and a fully-resolved one-example manifest. "
+        "B2A is a one-example engineering calibration. It does not authorize the 12-example pilot.",
+    )
+    p.add_argument("--problem-index", type=int, default=None)
+    p.add_argument("--limit", type=int, default=None)
+    p.set_defaults(func=cmd_b2a_calibrate)
 
     p = sub.add_parser("failure-atlas")
     p.add_argument("--full-artifact", required=True)

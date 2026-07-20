@@ -4,12 +4,18 @@
 Deliberately model-agnostic: `step_fn` is dependency-injected
 (`Callable[[cache_state, token_id], tuple[logits, new_cache_state]]`), so
 this module never imports a real model and never downloads anything —
-tests supply a small deterministic toy step function. Evaluation rules,
-frozen: feed one unscored bridge token; score exactly the 48 supplied
-reference tokens; compute NLL via float32 `log_softmax` against the real
-target token; evolve each branch's own cache independently (never share
-mutable state between baseline and swapped); never sample or take argmax;
-never truncate the horizon.
+tests supply a small deterministic toy step function. As of B1B-R2 §5,
+`cache_state` is always a complete
+`kvcot.generation.state.ModelStateSnapshot` (every layer's K/V, not one
+layer's tensors) — `kvcot.discovery.pipeline.build_swap_pair_record` is the
+one caller that constructs `baseline_initial_cache_state`/
+`swapped_initial_cache_state` this way, from two independent clones of one
+pristine post-event snapshot. Evaluation rules, frozen: feed one unscored
+bridge token; score exactly the 48 supplied reference tokens; compute NLL
+via float32 `log_softmax` against the real target token; evolve each
+branch's own cache independently (never share mutable state between
+baseline and swapped); never sample or take argmax; never truncate the
+horizon.
 """
 from __future__ import annotations
 

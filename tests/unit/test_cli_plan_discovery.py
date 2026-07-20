@@ -43,15 +43,45 @@ def test_plan_discovery_prints_required_numbers(capsys, block_disallowed_imports
     assert "minimum_future_tokens_after_event=49" in out
     assert "events=3 candidates=2 donors=2 pair_branches_per_event=4" in out
     assert "144" in out
-    assert "BLOCKED" in out
+    assert "BLOCKED" in out  # B2A/B2B/Vast.ai remain blocked regardless of config freeze state
     assert "deepseek-ai/DeepSeek-R1-Distill-Llama-8B" in out
     assert "6a6f4aa4197940add57724a7707d069478df56b1" in out
     assert "no result files created" in out
 
 
-def test_plan_discovery_flags_unfrozen_dataset_revision(capsys, block_disallowed_imports):
+def test_plan_discovery_reports_frozen_dataset_revision_for_the_real_config(capsys, block_disallowed_imports):
+    """B1B-R2 §8: the real discovery config's dataset revision is now
+    independently verified and frozen -- the real config file must NOT
+    print the "dataset.revision is not frozen" blocker any more."""
     cmd_plan_discovery(Namespace(config=DISCOVERY_CONFIG, dry_run=True))
     out = capsys.readouterr().out
+    assert "revision_frozen=True" in out
+    assert "dataset.revision is not frozen" not in out
+
+
+def test_plan_discovery_flags_unfrozen_dataset_revision(capsys, tmp_path, block_disallowed_imports):
+    """The blocker code path itself must still fire for a config that has
+    NOT frozen its dataset revision -- proven here against a synthetic
+    config, since the real repo config no longer exercises it."""
+    unfrozen_config = tmp_path / "unfrozen.yaml"
+    unfrozen_config.write_text(
+        "model:\n"
+        "  name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B\n"
+        "  revision: 6a6f4aa4197940add57724a7707d069478df56b1\n"
+        "  tokenizer_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B\n"
+        "  tokenizer_revision: 6a6f4aa4197940add57724a7707d069478df56b1\n"
+        "  model_type: llama\n"
+        "  dtype: bfloat16\n"
+        "dataset:\n"
+        "  name: MATH-500\n"
+        "rkv:\n"
+        "  budget: 1024\n"
+        "  upstream_revision: 45eaa7d69d20b7388321f077020a610d9afb65bd\n",
+        encoding="utf-8",
+    )
+    cmd_plan_discovery(Namespace(config=str(unfrozen_config), dry_run=True))
+    out = capsys.readouterr().out
+    assert "revision_frozen=False" in out
     assert "dataset.revision is not frozen" in out
 
 

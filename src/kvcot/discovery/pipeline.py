@@ -1,9 +1,10 @@
 """Branch construction and evaluation — connects candidate/donor identities,
 captured K/V and score components, the fixed-shape swap, baseline/swapped
 branch evaluation, and final `SwapPairRecord` construction
-(`docs/B1A_REPAIR_AND_B1B_CPU_INTEGRATION.md` §9, authorized by CLAUDE.md
-§1b/§4b). Dependency-injected (`BranchStepFn`, model-agnostic, matching
-`kvcot.discovery.branch_eval.StepFn`'s existing shape) so synthetic
+(`docs/B1A_REPAIR_AND_B1B_CPU_INTEGRATION.md` §9,
+`docs/B1B_R2_REAL_MODEL_BOUNDARY_AND_B2A_PREFLIGHT.md` §5, authorized by
+CLAUDE.md §1b/§4b). Dependency-injected (`BranchStepFn`, model-agnostic,
+matching `kvcot.discovery.branch_eval.StepFn`'s existing shape) so synthetic
 deterministic models can exercise the complete pipeline on CPU.
 
 One (layer, kv_head) capture record's PRE-event non-recent score pool
@@ -13,6 +14,20 @@ One (layer, kv_head) capture record's PRE-event non-recent score pool
 truth for `score_e`/`score_r` and their components — candidate and donor
 are both drawn from that pool by `kvcot.discovery.pass1._pools_for_layer_head`
 (the protected recent window is excluded there, never scored here).
+
+## Branching from a complete `ModelStateSnapshot` (B1B-R2 §5, repaired)
+
+Previously this module treated ONE (layer, kv_head)'s returned K/V tensors
+as the complete branch continuation state — not a valid causal-LM
+continuation state (every other layer's K/V, and every other piece of
+mutable model state, was simply absent). Branch construction now starts
+from `target_capture.pristine_snapshot` — a complete, independently-cloned
+`kvcot.generation.state.ModelStateSnapshot` covering every layer — and
+`kvcot.discovery.swap.apply_within_head_swap` mutates only the selected
+layer/head/slot of an independent clone of it, leaving every other layer,
+head, and slot byte-identical to the pristine snapshot. `BranchStepFn` now
+receives a full `ModelStateSnapshot` as its "cache state" argument, never a
+bare per-layer tensor tuple.
 """
 from __future__ import annotations
 
@@ -27,6 +42,7 @@ from kvcot.discovery.pass2 import TargetCapture
 from kvcot.discovery.schemas import SwapPairRecord
 from kvcot.discovery.swap import SwapAliasingError, SwapIndexError, apply_within_head_swap
 from kvcot.discovery.uncertainty import UncertaintySignal, compute_pair_uncertainty_signals
+from kvcot.generation.state import ModelStateSnapshot
 from kvcot.utils.hashing import sha256_int_ids
 
 STAGE_INVALID_CANDIDATE_DONOR_POOL = "invalid_candidate_donor_pool"
@@ -119,11 +135,21 @@ def build_swap_pair_record(
     sim_e = record.recomputed_similarity_component[0, head, evicted_phys].item()
     sim_r = record.recomputed_similarity_component[0, head, donor_phys_pre].item()
 
+    # Branch from a COMPLETE, independently-cloned post-event
+    # ModelStateSnapshot (B1B-R2 §5) -- never one layer's returned K/V
+    # tensors standing in for the whole model's continuation state. Two
+    # separate clones of the SAME pristine snapshot give baseline and
+    # swapped their own independent, non-aliased storage; only the swapped
+    # copy's targeted (layer, kv_head, slot) is mutated.
+    pristine = target_capture.pristine_snapshot
+    baseline_snapshot = pristine.clone()
+    swapped_snapshot = pristine.clone()
+
     try:
         swap_result = apply_within_head_swap(
-            key_cache=[record.returned_key_states],
-            value_cache=[record.returned_value_states],
-            layer_index=0,
+            key_cache=swapped_snapshot.key_cache,
+            value_cache=swapped_snapshot.value_cache,
+            layer_index=ev.layer_index,
             kv_head_index=head,
             retained_post_storage_position=donor_post_idx,
             candidate_key=candidate_key,
@@ -132,12 +158,17 @@ def build_swap_pair_record(
     except (SwapIndexError, SwapAliasingError) as exc:
         return PairBuildResult(None, STAGE_BRANCH_EVALUATION_FAILURE, f"swap_failed: {exc}")
 
-    baseline_state = (record.returned_key_states, record.returned_value_states)
-    swapped_state = (swap_result.key_cache[0], swap_result.value_cache[0])
+    swapped_snapshot.key_cache = swap_result.key_cache
+    swapped_snapshot.value_cache = swap_result.value_cache
 
+    # Evaluation order (baseline first, here) cannot contaminate results:
+    # `baseline_snapshot`/`swapped_snapshot` are independent clones with no
+    # shared storage, and `branch_step_fn` is expected to treat its state
+    # argument functionally (never a shared global) -- see
+    # `docs/B1B_R2_REAL_MODEL_BOUNDARY_AND_B2A_PREFLIGHT.md` §5, requirement 7.
     try:
         comparison = evaluate_swap_branches(
-            branch_step_fn, baseline_state, swapped_state, bridge_token_id, reference_token_ids
+            branch_step_fn, baseline_snapshot, swapped_snapshot, bridge_token_id, reference_token_ids
         )
     except Exception as exc:
         return PairBuildResult(None, STAGE_BRANCH_EVALUATION_FAILURE, f"branch_eval_raised: {type(exc).__name__}: {exc}")

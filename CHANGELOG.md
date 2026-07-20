@@ -5,6 +5,57 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-20 — Phase B1B-R2: real-model boundary and B2A preflight (no GPU used, no model inference, no model weights downloaded; MATH-500 dataset revision independently verified against the live Hugging Face Hub API — no weights or rows downloaded; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; PR #17 merge not undone)
+
+Run on branch `research/b1b-r2-gpu-boundary-repair`, cut from `main` at
+commit `eadee9a183024a51f3030117c2faae928d6ee162` (the merged B1B-R1 PR
+#17). Full detail:
+`docs/B1B_R2_REAL_MODEL_BOUNDARY_AND_B2A_PREFLIGHT.md`.
+
+**Authorization.** No new `CLAUDE.md` exception — this pass repairs and
+completes the CPU-side B1B harness architecture already authorized by
+§1b/§4b; no line item requires or claims broader scope.
+
+**Eight B1B-R1 review-defect repairs:** (1) absolute-position
+device/dtype normalization in `kvcot.discovery.capture
+._recomputed_kept_physical_indices` (provenance-map device/dtype is now
+authoritative; a CUDA-marked mechanical test proves CUDA-topk/CPU-provenance
+gather correctness, skipped cleanly on this CPU-only build); (2)
+`capture_update_kv` gained an opt-in `should_capture` predicate so Pass 2
+captures ONLY the 3 preselected (position, layer) targets — every other
+call passes through with zero clone/storage, bounding retained state by
+target count, not call volume; (3) `kvcot.generation.state
+.ModelStateSnapshot` gained `.clone()` and Pass 2/`kvcot.discovery.pipeline`
+now branch from a complete, independently-cloned post-event snapshot
+(every layer's K/V and bookkeeping), never one layer's returned K/V tensors;
+(4) Pass 1/Pass 2 now take explicit `PrefillFn`/`DecodeOneFn` adapters
+(`kvcot.discovery.harness_types`) — exactly one opaque prefill call per
+pass, then one call per continuation token — and `eligible_event_ids`
+excludes prefill-phase compaction events (no valid mid-prefill snapshot
+boundary exists); (5) `kvcot.discovery.discovery_config` now freezes and
+hashes the complete generation/R-KV/prompt-template configuration
+(`DiscoveryGenerationLock`, expanded `DiscoveryRkvLock`,
+`canonical_config_hash`); (6) the MATH-500 dataset revision
+(`6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be`, verified directly against the
+HF Hub API) and a one-example manifest
+(`configs/discovery/b2a_one_example_manifest.json`,
+`kvcot.discovery.manifest`) are now frozen — the tokenized-prompt hash is
+honestly left unresolved (requires a live tokenizer, out of scope); (7)
+branch-count accounting (`kvcot.discovery.constants`) is now a single
+source of truth read by both `plan-discovery` and the new `b2a-calibrate`:
+`12 x 3 x 4 = 144` real branches, no-op excluded, matching what
+`plan-discovery` already printed correctly; (8) `B2AGateResult`
+(`kvcot.discovery.b2a_contract`) now has 21 mandatory, non-optional fields
+(19 from the task brief plus the 2 pre-existing measurement-based
+conditions) and cannot be hand-constructed as passing with any field
+`False` (`__post_init__` re-derives `passed`/`failed_conditions`).
+
+**New:** `kvcot b2a-calibrate` (`--dry-run`, fully exercised; `--execute`,
+code path implemented via `kvcot.discovery.b2a_execute`/
+`kvcot.discovery.real_model_adapter` but never invoked — every precondition
+fails closed on this build). Help text: "B2A is a one-example engineering
+calibration. It does not authorize the 12-example pilot."
+
 ## 2026-07-20 — Phase B1B-R1: B1A defect repairs and B1B CPU harness architecture integration (no GPU used, no model inference, no model weights or datasets downloaded, no manifest/result directory created; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; PR #16 merge not undone)
 
 Run on branch `research/b1b-cpu-harness-and-b1a-repairs`, cut from

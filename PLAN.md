@@ -1,6 +1,23 @@
 # Plan and status
 
-## Current status: Phase B1B-R1 — B1A defect repairs and B1B CPU harness architecture integration — IMPLEMENTED FOR REVIEW; GPU STILL BLOCKED
+## Current status: Phase B1B-R2 — real-model boundary and B2A preflight — IMPLEMENTED FOR REVIEW; GPU/B2A/B2B STILL BLOCKED
+
+**Phase B1B-R2 (2026-07-20, CHANGELOG.md) repairs eight defects found
+during independent review of B1B-R1** (device/dtype parity, target-only
+bounded capture, complete-`ModelStateSnapshot` branching, exact
+prefill/decode call boundaries, a fully frozen/hashed discovery
+configuration, a frozen MATH-500 dataset revision plus one-example
+manifest, corrected 144-branch accounting, and a mandatory-field B2A gate),
+and adds the one-example-only `kvcot b2a-calibrate` command
+(`--dry-run` fully exercised; `--execute`'s code path is implemented but
+never invoked — every precondition fails closed on this CPU-only, no-model
+build). No new `CLAUDE.md` exception was needed — this pass stays inside
+the CPU-side harness architecture §1b/§4b already authorized. Full detail:
+`docs/B1B_R2_REAL_MODEL_BOUNDARY_AND_B2A_PREFLIGHT.md`. **Status: B1B-R2
+implemented for review. GPU, B2A, and B2B remain blocked. No discovery
+result exists. No method exists.**
+
+## Prior status: Phase B1B-R1 — B1A defect repairs and B1B CPU harness architecture integration — IMPLEMENTED FOR REVIEW; GPU STILL BLOCKED
 
 **Phase B1B-R1 (2026-07-20, CHANGELOG.md) repairs six B1A defects found
 during independent review of PR #16, and adds a new, dated `CLAUDE.md`
