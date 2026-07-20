@@ -29,11 +29,15 @@ def _trace(full_len: int, final_lens: dict[int, int], compaction_events=(), prom
     )
 
 
-def _example_result(pair_records, *, attempted_real=0, completed_real=0, attempted_no_op=0, completed_no_op=0):
+def _example_result(
+    pair_records, *, attempted_real=0, completed_real=0, attempted_no_op=0, completed_no_op=0, selected_event_ids=(),
+    pair_failure_details=(),
+):
     return SimpleNamespace(
         pair_records=tuple(pair_records), attempted_real_pair_count=attempted_real,
         completed_real_pair_count=completed_real, attempted_no_op_pair_count=attempted_no_op,
-        completed_no_op_pair_count=completed_no_op,
+        completed_no_op_pair_count=completed_no_op, selected_event_ids=tuple(selected_event_ids),
+        pair_failure_details=tuple(pair_failure_details),
     )
 
 
@@ -139,7 +143,9 @@ def test_pair_completion_counts_real_and_no_op_independently():
     ]
     trace = _trace(1000, {0: 800}, compaction_events=events)
     pairs = [_pair(0), _pair(0), _pair(0), _pair(0), _pair(0, is_noop=True)]
-    result = _example_result(pairs, attempted_real=4, completed_real=4, attempted_no_op=1, completed_no_op=1)
+    result = _example_result(
+        pairs, attempted_real=4, completed_real=4, attempted_no_op=1, completed_no_op=1, selected_event_ids=(0,)
+    )
     evidence = derive_pair_completion_evidence(trace=trace, example_result=result)
     assert evidence.attempted_real_pair_count == 4
     assert evidence.completed_real_pair_count == 4
@@ -147,13 +153,14 @@ def test_pair_completion_counts_real_and_no_op_independently():
     assert evidence.attempted_no_op_pair_count == 1
     assert evidence.completed_no_op_pair_count == 1
     assert evidence.selected_compaction_events == 1
+    assert evidence.events_with_at_least_one_completed_real_pair == 1
     assert evidence.events_with_all_four_real_pairs_completed == 1
 
 
 def test_failed_real_pair_count_reflects_attempted_minus_completed():
     trace = _trace(1000, {0: 800})
     pairs = [_pair(0), _pair(0)]  # only 2 of 4 attempted real pairs succeeded
-    result = _example_result(pairs, attempted_real=4, completed_real=2)
+    result = _example_result(pairs, attempted_real=4, completed_real=2, selected_event_ids=(0,))
     evidence = derive_pair_completion_evidence(trace=trace, example_result=result)
     assert evidence.failed_real_pair_count == 2
     assert evidence.events_with_all_four_real_pairs_completed == 0  # only 2/4 for this event
@@ -162,9 +169,27 @@ def test_failed_real_pair_count_reflects_attempted_minus_completed():
 def test_event_count_is_distinct_events_not_pair_count():
     trace = _trace(1000, {0: 800})
     pairs = [_pair(0), _pair(0), _pair(0), _pair(0), _pair(0)]  # 5 pair attempts, all for the SAME event
-    result = _example_result(pairs, attempted_real=5, completed_real=5)
+    result = _example_result(pairs, attempted_real=5, completed_real=5, selected_event_ids=(0,))
     evidence = derive_pair_completion_evidence(trace=trace, example_result=result)
     assert evidence.selected_compaction_events == 1
+
+
+def test_selected_event_count_comes_from_the_frozen_plan_not_surviving_pair_records():
+    """B1B-R4.1 §14 regression: an event selected by Pass 1's frozen plan
+    whose EVERY pair failed (zero surviving records) must still count as
+    SELECTED -- the prior derivation (`len({distinct event ids in
+    pair_records})`) would have silently reported 2 here instead of the
+    true planned count of 3, conflating "selected" with "has a surviving
+    pair"."""
+    trace = _trace(1000, {0: 800})
+    # Only events 0 and 1 have any surviving pair record; event 2 was
+    # SELECTED by the plan but every one of its pairs failed attrition.
+    pairs = [_pair(0), _pair(0), _pair(0), _pair(0), _pair(1)]
+    result = _example_result(pairs, attempted_real=9, completed_real=5, selected_event_ids=(0, 1, 2))
+    evidence = derive_pair_completion_evidence(trace=trace, example_result=result)
+    assert evidence.selected_compaction_events == 3  # from the plan, not from pair_records
+    assert evidence.events_with_at_least_one_completed_real_pair == 2  # the weaker, completion-based count
+    assert evidence.events_with_all_four_real_pairs_completed == 1  # only event 0 reached 4
 
 
 def test_missing_trace_reports_zero_observed_and_eligible():

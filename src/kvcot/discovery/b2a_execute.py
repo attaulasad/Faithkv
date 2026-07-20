@@ -174,6 +174,7 @@ def run_b2a_calibration(
         per_real_pair_projection_seconds,
         project_complete_pilot_gpu_hours,
     )
+    from kvcot.discovery.attrition import STAGE_SEMANTIC_SWAP_PARITY_FAILURE
     from kvcot.discovery.b2a_workers import WorkerFailedError, run_both_workers_via_subprocess
     from kvcot.discovery.constants import (
         B2A_NOOP_PAIR_EVALUATIONS_TOTAL,
@@ -273,6 +274,17 @@ def run_b2a_calibration(
             capture_gather_parity=rkv.capture_gather_parity,
             absolute_position_parity=rkv.absolute_position_parity,
             no_op_numerical_parity=rkv.no_op_numerical_parity,
+            # B1B-R4.1 §18/§30: a dedicated, explicitly-named condition --
+            # a pair whose real record was constructed but whose semantic
+            # swap failed to update provenance/kept-index bookkeeping is
+            # recorded as a `semantic_swap_parity_failure` pair-failure
+            # detail (`kvcot.discovery.pipeline.build_swap_pair_record`,
+            # `kvcot.discovery.orchestrator.run_example`) -- never allowed
+            # to pass silently under the coarser
+            # `all_required_pair_evaluations_completed` umbrella alone.
+            semantic_swap_parity=not any(
+                d.stage == STAGE_SEMANTIC_SWAP_PARITY_FAILURE for d in rkv.pair_failure_details
+            ),
             dataset_revision_match=dataset_revision_match,
             dataset_row_identity_match=dataset_row_identity_match,
             manifest_hash_match=manifest_hash_match,

@@ -1,6 +1,35 @@
 # Plan and status
 
-## Current status: Phase B1B-R4 — final executable, measurement, and worker-evidence closure — IMPLEMENTED FOR REVIEW; GPU/B2A/B2B STILL BLOCKED
+## Current status: Phase B1B-R4.1 — focused completion amendment on B1B-R4 — INCOMPLETE; GPU/B2A/B2B STILL BLOCKED
+
+**Phase B1B-R4.1 (2026-07-20, CHANGELOG.md) is a forward completion pass on
+top of the already-pushed B1B-R4 commit** (`4d7971b7b09c004c4670bfde
+3939416ab550ea71`), fixing seven concrete defects an evidence-based audit
+of the actual current code found (not the full list a much larger task
+brief assumed — several assumed defects, e.g. non-Pydantic schemas, turned
+out to already be fixed): one authoritative Pass-1/Pass-2 provenance state
+(removing a Pass-2 shadow `LayerProvenance` track); selected-event count
+now derived from the frozen Pass-1 plan instead of surviving pair records;
+structured per-pair failure evidence actually populated (was always empty
+in production); the capture-minimization bound now enforced in production,
+not only in its own test file; baseline/swapped branch snapshots now
+released sequentially, proven via `weakref`, instead of both live at once;
+semantic-swap parity/byte-delta evidence now derived from the real
+mutation report instead of hard-coded `True`/`0`; `PYTHONHASHSEED` now set
+on the subprocess environment before worker launch instead of ineffectively
+inside the already-running process. One new gate condition
+(`semantic_swap_parity`) was added. Every repair has a new CPU test (25 new
+tests total); full non-GPU suite: 950 passed, 0 failed. Full detail,
+including an HONEST, itemized list of everything the originating task
+brief asked for that this pass did NOT implement (CUDA-synchronized
+timing, model-load VRAM phases, a strict single-GPU load path, a Hub
+snapshot identity resolver, an immutable attempt-directory architecture,
+the remaining gate conditions, and more):
+`docs/B1B_R4_1_FINAL_CLOSURE.md`. **Status: B1 FINAL CLOSURE VERDICT:
+INCOMPLETE — B2A/GPU REMAIN BLOCKED. No discovery result exists. No method
+exists.**
+
+## Prior status: Phase B1B-R4 — final executable, measurement, and worker-evidence closure — IMPLEMENTED FOR REVIEW; GPU/B2A/B2B STILL BLOCKED
 
 **Phase B1B-R4 (2026-07-20, CHANGELOG.md) repairs the remaining defects
 found during an independent audit of the merged PR #19 (B1B-R3, commit

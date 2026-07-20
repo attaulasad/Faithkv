@@ -79,6 +79,7 @@ def _rkv_payload(**overrides) -> dict:
         pass1_call_boundary={"prefill_call_count": 1, "prefill_token_count": 200, "decode_call_count": 300, "ordered_trace_hash": "a" * 64},
         pass2_call_boundary={"prefill_call_count": 1, "prefill_token_count": 200, "decode_call_count": 300, "ordered_trace_hash": "a" * 64},
         observed_total_compaction_events=5, eligible_compaction_events=3, selected_compaction_events=3,
+        events_with_at_least_one_completed_real_pair=3,
         events_with_all_four_real_pairs_completed=3, attempted_real_pair_count=12, completed_real_pair_count=12,
         failed_real_pair_count=0, attempted_no_op_pair_count=1, completed_no_op_pair_count=1,
         pair_failure_details=[],
@@ -120,6 +121,49 @@ def _make_fake_runner(fullkv_payload: dict | None, rkv_payload: dict | None, *, 
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     return runner
+
+
+# --------------------------------------------------------------------------
+# B1B-R4.1 §28: PYTHONHASHSEED set on the subprocess ENVIRONMENT before
+# launch (random.seed() inside the already-running worker cannot do this)
+# --------------------------------------------------------------------------
+
+
+def test_framework_seed_for_env_reads_the_real_frozen_config():
+    from kvcot.discovery.b2a_workers import _framework_seed_for_env
+
+    assert _framework_seed_for_env("configs/discovery/llama8b_math500_b1024.yaml") == 13
+
+
+def test_framework_seed_for_env_falls_back_to_schema_default_for_an_unloadable_path():
+    from kvcot.discovery.b2a_workers import _framework_seed_for_env
+    from kvcot.discovery.discovery_config import DiscoveryGenerationLock
+
+    assert _framework_seed_for_env("this/path/does/not/exist.yaml") == (
+        DiscoveryGenerationLock.model_fields["framework_seed"].default
+    )
+
+
+def test_launch_worker_sets_pythonhashseed_and_tokenizers_parallelism_on_the_subprocess_env(tmp_path):
+    from kvcot.discovery.b2a_workers import _launch_worker
+
+    captured_env: dict[str, object] = {}
+
+    def _runner(argv, **kwargs):
+        captured_env.update(kwargs.get("env") or {})
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    _launch_worker(
+        "fullkv", "configs/discovery/llama8b_math500_b1024.yaml", "manifest.json", tmp_path / "out.json",
+        "fake-python", _runner, 60,
+    )
+    assert captured_env["PYTHONHASHSEED"] == "13"
+    assert captured_env["TOKENIZERS_PARALLELISM"] == "false"
+    # The subprocess environment must still inherit the parent's own
+    # environment (PATH etc.), never a stripped-down replacement.
+    import os
+
+    assert captured_env.get("PATH") == os.environ.get("PATH")
 
 
 def test_coordinator_combines_both_workers_successfully():

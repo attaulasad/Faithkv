@@ -44,6 +44,24 @@ survivor mismatch (either the within-Pass-2 recomputed-vs-observed parity
 `capture_update_kv` itself performs, or a cross-pass mismatch against Pass
 1's own recorded survivors for the same event/layer/head), or a missing
 pristine snapshot for a selected target.
+
+## One authoritative provenance state (B1B-R4.1 §4)
+
+`capture_update_kv`'s `pre_event_position_map_fn` needs a fresh
+pre-event position map immediately before every real `update_kv` call --
+this function used to build and hand-maintain its OWN
+`dict[int, LayerProvenance]` for that purpose, in lockstep with the state's
+own bookkeeping via two independently-written call sites (a real risk of
+silent divergence). When `initial_state` exposes
+`projected_pre_event_position_map` (`kvcot.discovery.real_model_adapter
+.RealModelState`'s new B1B-R4.1 §4 method -- the real-model path), this
+function builds NO parallel provenance track of its own at all: the map
+comes directly from the state's own single authoritative
+`model_provenance`, projected forward by the pending fed positions the real
+adapter registers on it immediately before each forward call. The CPU
+synthetic harness state (`tests/unit/discovery/_synthetic_harness.py
+.HarnessState`) does not implement this method, so its code path through
+this function is completely unchanged from before this repair.
 """
 from __future__ import annotations
 
@@ -115,6 +133,13 @@ def run_pass2_capture(
     target_position_layer_pairs = {(ev.absolute_event_position, ev.layer_index) for ev in pass1_plan.events}
     event_positions = {ev.absolute_event_position for ev in pass1_plan.events}
 
+    # B1B-R4.1 §4: when `initial_state` owns its own authoritative
+    # provenance projection (the real-model path), this function builds no
+    # parallel `LayerProvenance` track of its own -- `layer_provenance`
+    # stays an empty, unused dict on that path (never populated, never
+    # read). On the synthetic-harness path (no such method), behavior is
+    # byte-for-byte what it was before this repair.
+    uses_authoritative_provenance = hasattr(initial_state, "projected_pre_event_position_map")
     layer_provenance: dict[int, LayerProvenance] = {}
     sinks: dict[int, list[UpdateKvCaptureRecord]] = {layer: [] for layer in target_layers}
     records_by_position: dict[int, dict[int, UpdateKvCaptureRecord]] = {layer: {} for layer in target_layers}
@@ -133,6 +158,8 @@ def run_pass2_capture(
             kv_clusters[layer_index] = kv_cluster
 
             def _map_fn(_layer_index=layer_index):
+                if uses_authoritative_provenance:
+                    return state.projected_pre_event_position_map(_layer_index)
                 lp = layer_provenance.get(_layer_index)
                 return lp.positions if lp is not None else None
 
@@ -147,15 +174,17 @@ def run_pass2_capture(
                 )
             )
 
-        for layer_index in target_layers:
-            layer_provenance[layer_index] = LayerProvenance.empty(kv_clusters[layer_index].num_key_value_heads)
+        if not uses_authoritative_provenance:
+            # (1)/reset: a fresh LayerProvenance per targeted layer, built
+            # entirely from THIS replay, never carried over from Pass 1 --
+            # synthetic-harness path only; the real-model path derives
+            # everything from `state.model_provenance` instead.
+            for layer_index in target_layers:
+                layer_provenance[layer_index] = LayerProvenance.empty(kv_clusters[layer_index].num_key_value_heads)
 
-        # (1)/reset: a fresh LayerProvenance per targeted layer, built
-        # entirely from THIS replay, never carried over from Pass 1.
-
-        # ---- prefill: exactly one call for the complete prompt ----
-        for layer_index in target_layers:
-            layer_provenance[layer_index].append_new_tokens_prefill(list(range(prompt_length)))
+            # ---- prefill: exactly one call for the complete prompt ----
+            for layer_index in target_layers:
+                layer_provenance[layer_index].append_new_tokens_prefill(list(range(prompt_length)))
 
         prefill_result = prefill_fn(state, prompt_tokens)
         if (
@@ -165,22 +194,27 @@ def run_pass2_capture(
             return Pass2Result(False, INVALID_PREFILL_SHAPE_MISMATCH, replay_token_ids, ())
         state = prefill_result.new_state
 
-        # Provenance bookkeeping only -- no target event can ever fall
-        # inside the prefill (decode-phase-only eligibility), so no capture
-        # record is expected here regardless of whether a compaction fired.
-        for pos in range(prompt_length):
-            obs_by_layer = prefill_result.per_position_layer_observations[pos]
-            for layer_index in target_layers:
-                obs = obs_by_layer.get(layer_index)
-                if obs is not None and obs.had_compaction:
-                    layer_provenance[layer_index].adopt_upstream_kept_indices(obs.observed_kept_absolute_positions)
+        if not uses_authoritative_provenance:
+            # Provenance bookkeeping only (synthetic-harness path) -- no
+            # target event can ever fall inside the prefill (decode-phase-only
+            # eligibility), so no capture record is expected here regardless
+            # of whether a compaction fired. On the real-model path this is a
+            # no-op: `state.model_provenance` was already updated by
+            # `advance_after_forward` inside `prefill_fn` itself.
+            for pos in range(prompt_length):
+                obs_by_layer = prefill_result.per_position_layer_observations[pos]
+                for layer_index in target_layers:
+                    obs = obs_by_layer.get(layer_index)
+                    if obs is not None and obs.had_compaction:
+                        layer_provenance[layer_index].adopt_upstream_kept_indices(obs.observed_kept_absolute_positions)
 
         # ---- decode: one single-token call per continuation token ----
         for offset, token_id in enumerate(continuation_tokens):
             pos = prompt_length + offset
             current_position["pos"] = pos
-            for layer_index in target_layers:
-                layer_provenance[layer_index].append_new_token(pos)
+            if not uses_authoritative_provenance:
+                for layer_index in target_layers:
+                    layer_provenance[layer_index].append_new_token(pos)
 
             sink_lengths_before = {layer_index: len(sinks[layer_index]) for layer_index in target_layers}
             result = decode_one_fn(state, token_id)
@@ -189,9 +223,10 @@ def run_pass2_capture(
             for layer_index in target_layers:
                 if len(sinks[layer_index]) > sink_lengths_before[layer_index]:
                     records_by_position[layer_index][pos] = sinks[layer_index][-1]
-                obs = result.layer_observations.get(layer_index)
-                if obs is not None and obs.had_compaction:
-                    layer_provenance[layer_index].adopt_upstream_kept_indices(obs.observed_kept_absolute_positions)
+                if not uses_authoritative_provenance:
+                    obs = result.layer_observations.get(layer_index)
+                    if obs is not None and obs.had_compaction:
+                        layer_provenance[layer_index].adopt_upstream_kept_indices(obs.observed_kept_absolute_positions)
 
             if pos in event_positions:
                 pristine_snapshot_by_position[pos] = snapshot_fn(state)

@@ -35,7 +35,7 @@ from dataclasses import dataclass
 
 import torch
 
-from kvcot.discovery.branch_eval import SCORED_HORIZON, StepFn as BranchStepFn, evaluate_swap_branches
+from kvcot.discovery.branch_eval import SCORED_HORIZON, StepFn as BranchStepFn, SwapBranchComparison, evaluate_branch
 from kvcot.discovery.nll import mean_nll
 from kvcot.discovery.pass1 import NaturalRunTrace
 from kvcot.discovery.pass2 import TargetCapture
@@ -55,6 +55,18 @@ def _find_physical_index(positions_1d: torch.Tensor, absolute_position: int) -> 
     if matches.numel() == 0:
         return None
     return int(matches[0].item())
+
+
+def _cache_total_bytes(key_cache: list[torch.Tensor], value_cache: list[torch.Tensor]) -> int:
+    """Total physical bytes across every layer's K and V cache tensors --
+    used to derive `net_physical_bytes_changed` from a real before/after
+    comparison (B1B-R4.1 §18) instead of the literal `0` this module used to
+    hard-code. `apply_within_head_swap` already raises on any shape
+    mismatch, so this always computes to 0 for a successful swap -- the
+    point is that it is COMPUTED, so a future regression that actually
+    changed a shape would be caught here rather than silently reported as
+    zero regardless."""
+    return sum(t.numel() * t.element_size() for t in key_cache) + sum(t.numel() * t.element_size() for t in value_cache)
 
 
 @dataclass(frozen=True)
@@ -137,14 +149,31 @@ def build_swap_pair_record(
 
     # Branch from a COMPLETE, independently-cloned post-event
     # ModelStateSnapshot (B1B-R2 §5) -- never one layer's returned K/V
-    # tensors standing in for the whole model's continuation state. Two
-    # separate clones of the SAME pristine snapshot give baseline and
-    # swapped their own independent, non-aliased storage; only the swapped
-    # copy's targeted (layer, kv_head, slot) is mutated.
+    # tensors standing in for the whole model's continuation state.
+    #
+    # B1B-R4.1 §17 repair: baseline and swapped are cloned and evaluated
+    # SEQUENTIALLY, never both live at once -- baseline is cloned from
+    # `pristine`, fully evaluated, and its clone reference dropped BEFORE
+    # the swapped clone is even created. The prior version cloned both
+    # up front and held both local variables for the rest of this function
+    # (both still reachable through `evaluate_swap_branches`'s combined
+    # call), doubling peak branch-construction memory for no reason -- on a
+    # real model this is a full multi-layer K/V cache clone, not a toy
+    # tensor. `pristine` itself is never mutated by either clone.
     pristine = target_capture.pristine_snapshot
-    baseline_snapshot = pristine.clone()
-    swapped_snapshot = pristine.clone()
 
+    baseline_snapshot = pristine.clone()
+    try:
+        baseline_result = evaluate_branch(branch_step_fn, baseline_snapshot, bridge_token_id, reference_token_ids)
+    except Exception as exc:
+        return PairBuildResult(None, STAGE_BRANCH_EVALUATION_FAILURE, f"branch_eval_raised: {type(exc).__name__}: {exc}")
+    finally:
+        # Drop the local reference the moment baseline evaluation is done,
+        # whether it succeeded or raised -- the swapped clone below must
+        # never coexist with a still-reachable baseline clone.
+        del baseline_snapshot
+
+    swapped_snapshot = pristine.clone()
     try:
         semantic_swap = apply_semantic_within_head_swap(
             swapped_snapshot,
@@ -157,22 +186,72 @@ def build_swap_pair_record(
             candidate_absolute_position=evicted_absolute_position,
         )
     except (SwapIndexError, SwapAliasingError) as exc:
+        del swapped_snapshot
         return PairBuildResult(None, STAGE_BRANCH_EVALUATION_FAILURE, f"swap_failed: {exc}")
 
-    # Evaluation order (baseline first, here) cannot contaminate results:
-    # `baseline_snapshot`/`swapped_snapshot` are independent clones with no
-    # shared storage, and `branch_step_fn` is expected to treat its state
-    # argument functionally (never a shared global) -- see
-    # `docs/B1B_R2_REAL_MODEL_BOUNDARY_AND_B2A_PREFLIGHT.md` §5, requirement 7.
     try:
-        comparison = evaluate_swap_branches(
-            branch_step_fn, baseline_snapshot, swapped_snapshot, bridge_token_id, reference_token_ids
-        )
+        swapped_result = evaluate_branch(branch_step_fn, swapped_snapshot, bridge_token_id, reference_token_ids)
     except Exception as exc:
         return PairBuildResult(None, STAGE_BRANCH_EVALUATION_FAILURE, f"branch_eval_raised: {type(exc).__name__}: {exc}")
+    finally:
+        del swapped_snapshot
+
+    comparison = SwapBranchComparison(
+        baseline_per_token_nll=baseline_result.per_token_nll,
+        swapped_per_token_nll=swapped_result.per_token_nll,
+        baseline_mean_nll=baseline_result.mean_nll,
+        swapped_mean_nll=swapped_result.mean_nll,
+        swap_gain=baseline_result.mean_nll - swapped_result.mean_nll,
+        baseline_final_cache_state=baseline_result.final_cache_state,
+        swapped_final_cache_state=swapped_result.final_cache_state,
+        baseline_per_token_logits=baseline_result.per_token_logits,
+        swapped_per_token_logits=swapped_result.per_token_logits,
+    )
 
     reference_horizon_sha256 = sha256_int_ids(reference_token_ids)
     is_noop_control = evicted_absolute_position == donor_absolute_position
+
+    # B1B-R4.1 §18: derive parity_check_passed/net_physical_bytes_changed
+    # from the real mutation report instead of hard-coding True/0.
+    # `record.parity_check_passed` (this target's within-Pass-2 capture
+    # parity) is already required True for ANY target capture to have
+    # survived into `Pass2Result.target_captures` -- re-checked here
+    # defensively, never assumed silently. For a snapshot that carries full
+    # provenance (every real-model snapshot does, per
+    # `kvcot.discovery.swap.apply_semantic_within_head_swap`'s own
+    # docstring; a synthetic/CPU-test snapshot without provenance
+    # legitimately skips those updates), both the provenance update and the
+    # kept-index bookkeeping update are mandatory -- missing either is a
+    # hard parity failure, never silently ignored.
+    # Provenance and kept-index bookkeeping are independent pieces of
+    # snapshot state (`apply_semantic_within_head_swap`'s own docstring
+    # scopes each to its own presence check, never a single combined flag)
+    # -- a real-model snapshot always carries both together in practice, but
+    # the CPU synthetic harness snapshot deliberately carries bookkeeping
+    # without provenance (`tests/unit/discovery/_synthetic_harness.py
+    # .build_snapshot_from_state` sets `provenance=None`), so each mandatory
+    # update is gated on its OWN presence signal, matching the swap
+    # primitive's own logic exactly, never a shared proxy for both.
+    provenance_present = pristine.provenance is not None
+    layer_bookkeeping = (
+        pristine.kv_cluster_bookkeeping_per_layer[ev.layer_index] if pristine.kv_cluster_bookkeeping_per_layer else None
+    )
+    kept_index_bookkeeping_present = bool(layer_bookkeeping and layer_bookkeeping.get("kept_token_indices"))
+
+    swap_parity_failures: list[str] = []
+    if not record.parity_check_passed:
+        swap_parity_failures.append("capture_parity_check_failed")
+    if provenance_present and not semantic_swap.provenance_updated:
+        swap_parity_failures.append("semantic_swap_parity_provenance_not_updated")
+    if kept_index_bookkeeping_present and not semantic_swap.kept_index_bookkeeping_updated:
+        swap_parity_failures.append("semantic_swap_parity_kept_index_bookkeeping_not_updated")
+
+    parity_check_passed = not swap_parity_failures
+    parity_failure_reason = ",".join(swap_parity_failures) if swap_parity_failures else None
+
+    net_physical_bytes_changed = _cache_total_bytes(
+        semantic_swap.swap_result.key_cache, semantic_swap.swap_result.value_cache
+    ) - _cache_total_bytes(pristine.key_cache, pristine.value_cache)
 
     uncertainty_signals = compute_pair_uncertainty_signals(
         entropy_e=_uncertainty_signal_at(trace, evicted_absolute_position, "entropy"),
@@ -219,13 +298,13 @@ def build_swap_pair_record(
             logit_margin_r=uncertainty_signals.logit_margin_r.value,
             logit_margin_r_missing_reason=uncertainty_signals.logit_margin_r.missing_reason,
             logit_margin_diff=uncertainty_signals.logit_margin_diff,
-            parity_check_passed=True,
-            parity_failure_reason=None,
+            parity_check_passed=parity_check_passed,
+            parity_failure_reason=parity_failure_reason,
             is_noop_control=is_noop_control,
-            net_physical_bytes_changed=0,
+            net_physical_bytes_changed=net_physical_bytes_changed,
             cap_hit_flag=trace.cap_hit,
-            valid_flag=True,
-            invalid_reason=None,
+            valid_flag=parity_check_passed,
+            invalid_reason=parity_failure_reason,
             reference_horizon_sha256=reference_horizon_sha256,
             swap_gain=comparison.swap_gain,
             baseline_per_token_nll=comparison.baseline_per_token_nll,

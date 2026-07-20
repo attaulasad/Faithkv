@@ -5,6 +5,107 @@ Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
 
+## 2026-07-20 — Phase B1B-R4.1: focused completion amendment on B1B-R4 (no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; prior commit `4d7971b7...` not reset/rebased/amended)
+
+Run on branch `research/b1b-r4-final-b2a-closure`, a forward completion
+commit on top of `4d7971b7b09c004c4670bfde3939416ab550ea71` ("Complete
+B1B-R4 final B2A closure", already pushed). Full detail:
+`docs/B1B_R4_1_FINAL_CLOSURE.md`.
+
+**Authorization.** No new `CLAUDE.md` exception — stays inside the
+CPU-side harness architecture already authorized by §1b/§4b. No model
+weights, no CUDA, no Vast.ai activity of any kind.
+
+An evidence-based audit of the ACTUAL current code (not the assumed defect
+list of the originating task brief — several assumed defects, e.g.
+non-Pydantic worker-result schemas, turned out already fixed) found and
+this pass repaired **seven confirmed defects**, each with a new CPU test:
+(1) `kvcot.discovery.pass2.run_pass2_capture` no longer maintains its own
+mutable `LayerProvenance` shadow track for the real-model path —
+`kvcot.discovery.real_model_adapter.RealModelState` is now the sole
+authoritative provenance owner, exposing a `projected_pre_event_position_
+map` derived via a disposable `LayerProvenance.clone()` (never
+re-implementing position arithmetic) from pending-position registration
+(`register_pending_fed_positions`/`clear_pending`, cleared on any forward
+exception before a partial commit); the CPU synthetic-harness path is
+unchanged. This pass's own hostile review of its new integration test
+found (and documented, not silently papered over) a genuine pre-existing
+boundary-condition ambiguity in the ported R-KV bookkeeping formula
+(`evicted_token_num` staying 0 across a reorder-without-shrink eviction),
+orthogonal to the repair. (2) `selected_compaction_events` (feeding the
+`selected_event_count_exact` gate) is now derived from the frozen Pass-1
+plan (`ExampleResult.selected_event_ids`, populated once, right after
+`build_pass1_plan` succeeds) instead of counting distinct event IDs across
+surviving pair records — the prior derivation silently under-counted
+whenever every pair for a selected event failed attrition; a new
+`events_with_at_least_one_completed_real_pair` field keeps the weaker,
+completion-based quantity separately named. (3) `pair_failure_details` was
+always an empty tuple in the production R-KV worker path (a parameter
+existed but was never actually threaded through) — `kvcot.discovery
+.orchestrator.run_example` now builds one structured
+`kvcot.discovery.attrition.PairFailureDetail` (event/layer/head/candidate/
+donor/kind/stage/detail/elapsed-time) per failed pair, live. (4)
+`kvcot.discovery.capture_minimize.assert_minimized_bound` had zero call
+sites outside its own test file — `run_example` now calls it on every
+target it builds. (5) Baseline and swapped branch snapshot clones are now
+released sequentially (baseline cloned, evaluated, explicitly `del`eted in
+a `finally` — covering the exception path — BEFORE the swapped clone is
+even created) instead of both being held live for the whole pair-build
+call; proven via a `weakref` to the actual clone object. (6)
+`kvcot.discovery.pipeline.build_swap_pair_record`'s `parity_check_passed`/
+`net_physical_bytes_changed` were literal `True`/`0` despite
+`apply_semantic_within_head_swap` already returning a real, unused
+`SemanticSwapResult` — a direct instance of this project's own forbidden-
+pattern list; both are now derived from that report (provenance/kept-index
+bookkeeping updates mandatory whenever present, gated independently since
+the CPU synthetic harness's snapshots carry one without the other; byte
+delta genuinely computed, not asserted). (7) `PYTHONHASHSEED` is now set on
+the worker subprocess's environment BEFORE launch
+(`kvcot.discovery.b2a_workers._worker_subprocess_env`/`_launch_worker`,
+reading `framework_seed` off the same frozen config the worker itself
+loads) — `random.seed()` inside the already-running worker process cannot
+retroactively change that process's already-fixed hash seed.
+
+**One gate-condition addition:** `semantic_swap_parity`, a new named
+`MANDATORY_GATE_CONDITIONS` entry, derived from whether the R-KV worker
+reported any `pair_failure_details` entry with the new
+`STAGE_SEMANTIC_SWAP_PARITY_FAILURE` stage — proven (in
+`test_b2a_execute_coordinator.py`) to fail the gate independently, with
+every count-based condition still passing.
+
+Hostile self-audit (`docs/B1B_R4_1_FINAL_CLOSURE.md` §4): a forbidden-
+pattern grep over only the newly-ADDED lines found two hits, both
+justified and documented at their call sites (a descriptive comment, and
+one deliberately narrow `except Exception:` for an auxiliary env-var
+fallback whose authoritative check still happens moments later inside the
+worker itself). No new instance of a hard-coded parity/count literal,
+`device_map="auto"`, or a bare `except:` was introduced.
+
+`python -m pytest -m "not gpu" -q`: 950 passed, 0 failed, 14 deselected
+(gpu-marked); 964 tests collected total. Both `kvcot prepare-b2a-manifest
+--dry-run` and `kvcot b2a-calibrate --dry-run` still run to completion
+unchanged (no model loaded, no CUDA required).
+
+**This pass explicitly did NOT close the full 41-section task brief it was
+given** — `docs/B1B_R4_1_FINAL_CLOSURE.md` §5 lists every remaining gap
+plainly: no CUDA-synchronized timing or model-load-inclusive projection
+(§5/§6 of that brief), no distinct model-load-phase VRAM checkpoint or
+pre-branch memory guard (§7), no discovery-only strict single-GPU load path
+(§8, `device_map="auto"` still in the exercised path), no Hub snapshot
+identity resolver and no real-tokenizer network validation was run this
+pass (§9/§35), batch size still derived from an independently-constructed
+tensor rather than the actually-observed call (§11), no NLL/cache-state
+hashes for the no-op control (§19), the full 12-real+1-no-op
+`run_rkv_worker`-level CPU success path is still not exercised (§21, an
+already-existing B1B-R4 deferral), no immutable attempt-directory
+architecture and the worker envelope is still non-atomic and still never
+cross-referenced into the final artifact (§22-§26), and most of the
+remaining requested gate conditions (§30: `git_clean_verified`,
+`rkv_submodule_match`, `single_rtx3090_verified`, and others) were not
+added. **Status: B1 FINAL CLOSURE VERDICT: INCOMPLETE — B2A/GPU REMAIN
+BLOCKED.** No discovery result exists. No method exists. GPU, B2A, and B2B
+remain fully unauthorized by this entry.
+
 ## 2026-07-20 — Phase B1B-R4: final executable, measurement, and worker-evidence closure (no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; PR #19 merge not undone)
 
 Run on branch `research/b1b-r4-final-b2a-closure`, cut from `main` at

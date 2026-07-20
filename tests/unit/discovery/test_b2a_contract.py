@@ -43,6 +43,7 @@ def _good_evidence_kwargs(**overrides) -> dict:
         capture_gather_parity=True,
         absolute_position_parity=True,
         no_op_numerical_parity=True,
+        semantic_swap_parity=True,
         dataset_revision_match=True,
         dataset_row_identity_match=True,
         manifest_hash_match=True,

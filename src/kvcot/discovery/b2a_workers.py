@@ -51,6 +51,7 @@ from typing import Any, Callable, Sequence
 
 from pydantic import BaseModel, Field
 
+from kvcot.discovery.attrition import PairFailureDetail
 from kvcot.discovery.call_trace import CallBoundaryEvent, CallTraceRecorder, compare_call_boundary_traces
 from kvcot.discovery.constants import B2A_REAL_PAIR_EVALUATIONS_TOTAL, B2A_SELECTED_EVENTS
 
@@ -155,13 +156,18 @@ class RKVWorkerResult(BaseModel):
     observed_total_compaction_events: int = Field(ge=0)
     eligible_compaction_events: int = Field(ge=0)
     selected_compaction_events: int = Field(ge=0)
+    events_with_at_least_one_completed_real_pair: int = Field(ge=0)
     events_with_all_four_real_pairs_completed: int = Field(ge=0)
     attempted_real_pair_count: int = Field(ge=0)
     completed_real_pair_count: int = Field(ge=0)
     failed_real_pair_count: int = Field(ge=0)
     attempted_no_op_pair_count: int = Field(ge=0)
     completed_no_op_pair_count: int = Field(ge=0)
-    pair_failure_details: list[str]
+    # B1B-R4.1 §15: one structured `PairFailureDetail` per failed pair
+    # attempt (event/layer/head/candidate/donor/kind/stage/detail/elapsed
+    # time), built live by `kvcot.discovery.orchestrator.run_example` --
+    # never an always-empty placeholder.
+    pair_failure_details: list[PairFailureDetail]
 
     # B1B-R4 §7/§21: exact-count mandatory gate conditions, derived (never
     # hard-coded) from the counts above.
@@ -229,6 +235,51 @@ def _default_python_executable() -> str:
     return sys.executable
 
 
+def _framework_seed_for_env(config_path: str) -> int:
+    """Reads `framework_seed` off the SAME frozen config the worker itself
+    will load -- never an independently chosen value. Falls back to
+    `DiscoveryGenerationLock`'s own schema default (also `13`, and the
+    value every real frozen discovery config in this repository sets
+    explicitly -- `configs/discovery/llama8b_math500_b1024.yaml`) only when
+    `config_path` cannot be loaded at all (e.g. coordinator-level CPU tests
+    that intentionally pass a non-existent path to exercise orchestration
+    logic without real file I/O) -- a genuine production config load
+    failure still fails loudly at the worker itself moments later, this
+    fallback never masks that."""
+    from kvcot.discovery.discovery_config import DiscoveryGenerationLock, load_discovery_config
+
+    try:
+        return load_discovery_config(config_path).generation.framework_seed
+    except Exception:
+        # Deliberately broad: this function only computes an auxiliary env
+        # var value for the child process about to be launched -- the REAL,
+        # authoritative config load/validation happens moments later INSIDE
+        # that worker subprocess (`kvcot.discovery.b2a_worker_entry`), which
+        # still fails loudly on a genuinely malformed config. Swallowing a
+        # load failure here never masks that.
+        return DiscoveryGenerationLock.model_fields["framework_seed"].default
+
+
+def _worker_subprocess_env(config_path: str) -> dict[str, str]:
+    """B1B-R4.1 §28 repair: `random.seed()` (called INSIDE the already-
+    running worker process, `kvcot.discovery.framework_seed
+    .apply_framework_seed`) cannot control Python's hash-randomization seed
+    -- that is fixed once, at interpreter startup, from the
+    `PYTHONHASHSEED` environment variable, before any of this repository's
+    own code ever runs. The only place this can actually be set is on the
+    ENVIRONMENT the child interpreter is launched into, here, before
+    `subprocess_runner` starts it. `TOKENIZERS_PARALLELISM=false` silences a
+    known tokenizers-library fork-safety warning under multi-worker
+    subprocess launches; harmless and frozen, not a defect being repaired,
+    but recorded here for completeness (CLAUDE.md §28's own wording)."""
+    import os
+
+    env = dict(os.environ)
+    env["PYTHONHASHSEED"] = str(_framework_seed_for_env(config_path))
+    env["TOKENIZERS_PARALLELISM"] = "false"
+    return env
+
+
 def _launch_worker(
     role: str,
     config_path: str,
@@ -243,12 +294,17 @@ def _launch_worker(
     stdout/stderr are always captured (never lost), a hung worker raises
     `subprocess.TimeoutExpired` rather than blocking forever, and a nonzero
     exit is handled explicitly by the caller (never an uncaught
-    `CalledProcessError` from `check=True`)."""
+    `CalledProcessError` from `check=True`). B1B-R4.1 §28: `env` is built by
+    `_worker_subprocess_env` -- `PYTHONHASHSEED` is fixed BEFORE this child
+    interpreter starts, the only point at which it can take effect."""
     argv = [
         python_executable, "-m", "kvcot.discovery.b2a_worker_entry",
         "--role", role, "--config", config_path, "--manifest", manifest_path, "--output", str(output_path),
     ]
-    return subprocess_runner(argv, capture_output=True, text=True, timeout=timeout_seconds, check=False)
+    return subprocess_runner(
+        argv, capture_output=True, text=True, timeout=timeout_seconds, check=False,
+        env=_worker_subprocess_env(config_path),
+    )
 
 
 def run_both_workers_via_subprocess(
@@ -869,6 +925,7 @@ def run_rkv_worker(
         observed_total_compaction_events=pair_completion.observed_total_compaction_events,
         eligible_compaction_events=pair_completion.eligible_compaction_events,
         selected_compaction_events=pair_completion.selected_compaction_events,
+        events_with_at_least_one_completed_real_pair=pair_completion.events_with_at_least_one_completed_real_pair,
         events_with_all_four_real_pairs_completed=pair_completion.events_with_all_four_real_pairs_completed,
         attempted_real_pair_count=pair_completion.attempted_real_pair_count,
         completed_real_pair_count=pair_completion.completed_real_pair_count,

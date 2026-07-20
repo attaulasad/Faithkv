@@ -2,6 +2,30 @@
 
 ## Current status (read this first)
 
+**Phase B1B-R4.1 (2026-07-20)** is a forward completion pass on top of the
+already-pushed B1B-R4 commit, repairing seven concrete defects an
+evidence-based audit of the ACTUAL current code found (not B1B-R4's own
+assumed gaps — several, e.g. non-Pydantic schemas, turned out already
+fixed): a Pass-2 shadow provenance track removed in favor of one
+authoritative `RealModelState`; selected-event count now derived from the
+frozen Pass-1 plan instead of surviving pair records; structured per-pair
+failure evidence that was always empty in production, now actually
+populated; the capture-minimization memory bound now enforced in
+production, not only in its own test file; baseline/swapped branch
+snapshots now released sequentially (proven via `weakref`) instead of both
+live at once; semantic-swap parity/byte-delta evidence now derived from
+the real mutation report instead of hard-coded `True`/`0`; `PYTHONHASHSEED`
+now set on the subprocess environment before worker launch, where it can
+actually take effect. One new gate condition (`semantic_swap_parity`) was
+added. 25 new CPU tests; full non-GPU suite: 950 passed, 0 failed. Full
+detail, including an HONEST itemized list of everything this pass did NOT
+implement (CUDA-synchronized timing, model-load VRAM phases, a strict
+single-GPU load path, a Hub snapshot identity resolver, an immutable
+attempt-directory architecture, most remaining gate conditions, and more):
+`docs/B1B_R4_1_FINAL_CLOSURE.md`. **Status: B1 FINAL CLOSURE VERDICT:
+INCOMPLETE — B2A/GPU REMAIN BLOCKED. No discovery result exists. No method
+exists.**
+
 **Phase B1B-R4 (2026-07-20)** repairs the remaining defects found during an
 independent audit of the merged PR #19 (B1B-R3, commit
 `fa117046bea2a2c492e17cd91276b2e3c6d59f7f` — merged before this pass, not

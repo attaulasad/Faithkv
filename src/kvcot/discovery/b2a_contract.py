@@ -123,6 +123,17 @@ MANDATORY_GATE_CONDITIONS: tuple[str, ...] = (
     "capture_gather_parity",
     "absolute_position_parity",
     "no_op_numerical_parity",
+    # B1B-R4.1 §18/§30: named separately from the five trajectory/parity
+    # conditions above -- those are all Pass-2-level (capture correctness,
+    # evaluated before any pair is ever attempted); this one is swap-level
+    # (did the semantic swap actually update provenance/kept-index
+    # bookkeeping for every completed real pair,
+    # `kvcot.discovery.pipeline.build_swap_pair_record`'s own parity
+    # derivation). A worker reporting a pair-level `semantic_swap_parity_
+    # failure` (`kvcot.discovery.attrition.STAGE_SEMANTIC_SWAP_PARITY_
+    # FAILURE`) must fail this condition specifically, never only the
+    # coarser `all_required_pair_evaluations_completed`.
+    "semantic_swap_parity",
     "dataset_revision_match",
     "dataset_row_identity_match",
     "manifest_hash_match",
@@ -170,6 +181,7 @@ class B2AGateEvidence(BaseModel):
     capture_gather_parity: bool
     absolute_position_parity: bool
     no_op_numerical_parity: bool
+    semantic_swap_parity: bool
     dataset_revision_match: bool
     dataset_row_identity_match: bool
     manifest_hash_match: bool
@@ -201,6 +213,7 @@ def build_gate_evidence_from_measurement(
     capture_gather_parity: bool,
     absolute_position_parity: bool,
     no_op_numerical_parity: bool,
+    semantic_swap_parity: bool,
     dataset_revision_match: bool,
     dataset_row_identity_match: bool,
     manifest_hash_match: bool,
@@ -231,6 +244,7 @@ def build_gate_evidence_from_measurement(
         capture_gather_parity=capture_gather_parity,
         absolute_position_parity=absolute_position_parity,
         no_op_numerical_parity=no_op_numerical_parity,
+        semantic_swap_parity=semantic_swap_parity,
         dataset_revision_match=dataset_revision_match,
         dataset_row_identity_match=dataset_row_identity_match,
         manifest_hash_match=manifest_hash_match,
@@ -271,6 +285,7 @@ class B2AGateResult:
     capture_gather_parity: bool
     absolute_position_parity: bool
     no_op_numerical_parity: bool
+    semantic_swap_parity: bool
     dataset_revision_match: bool
     dataset_row_identity_match: bool
     manifest_hash_match: bool
@@ -329,6 +344,7 @@ def evaluate_b2a_gate(evidence: B2AGateEvidence) -> B2AGateResult:
         "capture_gather_parity": evidence.capture_gather_parity,
         "absolute_position_parity": evidence.absolute_position_parity,
         "no_op_numerical_parity": evidence.no_op_numerical_parity,
+        "semantic_swap_parity": evidence.semantic_swap_parity,
         "dataset_revision_match": evidence.dataset_revision_match,
         "dataset_row_identity_match": evidence.dataset_row_identity_match,
         "manifest_hash_match": evidence.manifest_hash_match,

@@ -32,8 +32,10 @@ from kvcot.discovery.attrition import (
     STAGE_PASS2_TOKEN_MISMATCH,
     STAGE_PREFILL_CONTRACT_VIOLATION,
     STAGE_SCHEMA_VALIDATION_FAILURE,
+    STAGE_SEMANTIC_SWAP_PARITY_FAILURE,
     STAGE_UNCERTAINTY_MISSING,
     AttritionCounters,
+    PairFailureDetail,
 )
 from kvcot.discovery.constants import NoOpMode
 from kvcot.discovery.harness_types import DecodeOneFn, PrefillFn, SnapshotFn
@@ -132,6 +134,22 @@ class ExampleResult:
     # RETURNS never carries a full-layer/full-cache tensor anywhere,
     # regardless of what a caller does with it afterward.
     minimized_target_evidence: tuple[Any, ...] = ()  # kvcot.discovery.capture_minimize.MinimizedTargetEvidence
+    # B1B-R4.1 §15: one structured `PairFailureDetail` per FAILED pair
+    # attempt (never populated from an aggregate counter after the fact) --
+    # empty for a fully-successful example, by construction.
+    pair_failure_details: tuple[PairFailureDetail, ...] = ()
+    # B1B-R4.1 §14: the FROZEN Pass-1 plan's own selected compaction-event
+    # IDs -- always exactly `len(plan.events)` (3) for any example that
+    # reached this far, populated once, right after `build_pass1_plan`
+    # succeeds, and never re-derived from which events happen to still have
+    # a surviving pair record later. This is the authoritative "planned"
+    # count `kvcot.discovery.b2a_evidence.derive_pair_completion_evidence`
+    # must read -- counting distinct event IDs across `pair_records` instead
+    # silently UNDER-counts whenever every pair for a selected event fails
+    # (that event then has zero surviving records, even though it WAS
+    # selected), conflating "selected by Pass 1" with "at least one pair
+    # survived attrition."
+    selected_event_ids: tuple[int, ...] = ()
 
 
 def run_example(
@@ -214,13 +232,23 @@ def run_example(
     # HERE, while `pass2_result.target_captures` (which holds full-layer/
     # full-cache tensors) is still in scope -- the object this function
     # returns never needs a full tensor again after this point.
-    from kvcot.discovery.capture_minimize import build_minimized_target_evidence
+    #
+    # B1B-R4.1 §16 repair: `assert_minimized_bound` used to be exercised
+    # only by `tests/unit/discovery/test_capture_minimize.py` -- never
+    # called from any production code path, so a future regression growing
+    # persistent per-target storage with model size would have gone
+    # undetected outside that one test file. Called here, unconditionally,
+    # for every target this function ever builds.
+    from kvcot.discovery.capture_minimize import assert_minimized_bound, build_minimized_target_evidence
 
     minimized_target_evidence = tuple(
         build_minimized_target_evidence(tc.event_plan, tc.capture_record) for tc in pass2_result.target_captures
     )
+    for evidence in minimized_target_evidence:
+        assert_minimized_bound(evidence)
 
     pair_records: list[SwapPairRecord] = []
+    pair_failure_details: list[PairFailureDetail] = []
     attempted_real = 0
     attempted_no_op = 0
     completed_real = 0
@@ -276,11 +304,36 @@ def run_example(
                 branch_step_fn=branch_step_fn,
             )
             pair_elapsed = clock_fn() - pair_start
+            ev = target_capture.event_plan
+
+            def _record_pair_failure(stage: str, detail: str | None) -> None:
+                pair_attrition.record_dropped(stage)
+                pair_failure_details.append(
+                    PairFailureDetail(
+                        compaction_event_id=ev.compaction_event_id,
+                        layer_index=ev.layer_index,
+                        kv_head_index=ev.kv_head_index,
+                        evicted_absolute_position=evicted_pos,
+                        donor_absolute_position=donor_pos,
+                        pair_kind=kind,
+                        stage=stage,
+                        detail=detail,
+                        elapsed_seconds=pair_elapsed,
+                    )
+                )
+
             if result.record is None:
-                pair_attrition.record_dropped(_PAIR_STAGE_MAP[result.failure_stage])
+                _record_pair_failure(_PAIR_STAGE_MAP[result.failure_stage], result.failure_detail)
+                continue
+            if not result.record.valid_flag:
+                # B1B-R4.1 §18: a pair whose record WAS constructed but
+                # whose derived parity check failed (e.g. a real snapshot's
+                # semantic swap did not update provenance/kept-index
+                # bookkeeping) -- schema-valid, but not a success.
+                _record_pair_failure(STAGE_SEMANTIC_SWAP_PARITY_FAILURE, result.record.invalid_reason)
                 continue
             if _has_no_recorded_uncertainty_anywhere(result.record):
-                pair_attrition.record_dropped(STAGE_UNCERTAINTY_MISSING)
+                _record_pair_failure(STAGE_UNCERTAINTY_MISSING, "uncertainty_missing")
                 continue
             pair_attrition.record_passed()
             pair_records.append(result.record)
@@ -301,6 +354,8 @@ def run_example(
         no_op_pair_wall_seconds=tuple(no_op_pair_wall_seconds),
         pass2_invalid_reason=None,
         minimized_target_evidence=minimized_target_evidence,
+        selected_event_ids=tuple(ev.compaction_event_id for ev in plan.events),
+        pair_failure_details=tuple(pair_failure_details),
     )
 
 

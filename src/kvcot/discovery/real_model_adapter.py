@@ -56,11 +56,52 @@ for every subsequent call in that same branch (when it receives the
 .evaluate_branch`'s existing functional `(state, token_id) ->
 (logits, new_state)` contract is unchanged, so no other module needs to
 change to get this fix; only the concrete real-model closure does.
+
+## B1B-R4.1 §4 repair: one authoritative provenance state, pending-position
+projection instead of a Pass-2 shadow tracker
+
+Before this pass, `kvcot.discovery.pass2.run_pass2_capture` maintained its
+OWN mutable `dict[int, LayerProvenance]` for the real-model path, hand-kept
+in lockstep with `advance_after_forward`'s appends purely by parallel,
+independently-written code at two call sites -- a real risk of silent
+divergence with no structural guarantee the two tracks agree. Pass 2 needs
+this because `capture_update_kv`'s `pre_event_position_map_fn` is read
+DURING the real forward call (from inside `update_kv`, called by
+`state.model(...)`), i.e. strictly BEFORE `advance_after_forward` (called
+AFTER the forward call returns) has appended this call's fed positions to
+`state.model_provenance` -- so the map available at that instant must
+reflect a PROJECTED state ("if this in-flight call's fed positions were
+already appended"), not yet the committed one.
+
+`RealModelState.projected_pre_event_position_map` is the fix:
+`register_pending_fed_positions` is called by every real forward-call site
+below (`prefill_fn`, `decode_one_fn`, the branch step function) BEFORE the
+actual `state.model(...)`/`decode_step(...)` call; the projection method
+derives the pre-event map on demand from `state.model_provenance` (the one
+authoritative owner) plus the still-pending fed positions, via a disposable
+`LayerProvenance.clone()` mutated with the SAME `append_new_token`/
+`append_new_tokens_prefill` methods `advance_after_forward` itself uses
+(never a second, independently-written position-arithmetic implementation)
+-- the clone is discarded immediately after; `state.model_provenance` is
+never touched by the projection. `advance_after_forward` remains the only
+function that ever commits a real transition; pending state is cleared
+after it succeeds, or immediately (before `advance_after_forward` is even
+attempted) if the forward call itself raises -- never a partial commit.
+
+`kvcot.discovery.pass2.run_pass2_capture` now detects (via
+`hasattr(state, "projected_pre_event_position_map")`) whether it has been
+handed a state that owns its own authoritative projection; when it has
+(the real-model path), Pass 2 builds no parallel `LayerProvenance` dict of
+its own at all and reads the projection directly. The CPU synthetic harness
+state (`tests/unit/discovery/_synthetic_harness.py`'s `HarnessState`) does
+not implement this method, so its code path through Pass 2 is completely
+unchanged -- this repair touches only the real-model path.
 """
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
 
 from kvcot.discovery.harness_types import (
     DecodeOneFn,
@@ -80,18 +121,26 @@ class RealModelState:
     apply unchanged. `kv_cluster_for_layer` is the one method
     `kvcot.discovery.pass2.run_pass2_capture` requires of any state object.
 
-    Single authoritative owner (B1B-R3 §8) of: the live model/cache, the
-    complete `ModelProvenance` (every layer, not just Pass 2's separately-
-    scoped per-target `LayerProvenance` -- see the module-level docstring of
-    `kvcot.discovery.pass2` for why that one stays intentionally separate:
-    it is a freshly-built, target-layer-only projection used solely to feed
-    `capture_update_kv`'s position-map thunk, never a second copy of this
-    state meant to replace it), the `CompactionTracker`, the absolute
-    position, and the device. `kept_indices_lengths` is NOT persisted here
-    deliberately -- every call site recomputes it fresh from the live
+    Single authoritative owner (B1B-R3 §8, tightened by B1B-R4.1 §4) of:
+    the live model/cache, the complete `ModelProvenance` (every layer --
+    Pass 2 no longer keeps any second, independently-mutated per-target
+    provenance track of its own; it reads `projected_pre_event_position_map`
+    below instead), the `CompactionTracker`, the absolute position, and the
+    device. `kept_indices_lengths` is NOT persisted here deliberately --
+    every call site recomputes it fresh from the live
     `kv_cluster.kept_token_indices` length at the start of each call
     (self-correcting from the model's own ground truth, never threaded
-    state that could drift)."""
+    state that could drift).
+
+    `pending_fed_absolute_positions`/`pending_call_kind` (B1B-R4.1 §4) are
+    the one piece of NOT-YET-COMMITTED state this class carries: the
+    positions a real forward call currently in flight is about to feed,
+    registered by the caller immediately before that call via
+    `register_pending_fed_positions` and cleared via `clear_pending` either
+    after `advance_after_forward` commits them for real, or immediately if
+    the forward call itself raised -- never left set across two different
+    calls, and never used to mutate `model_provenance` directly (only
+    `advance_after_forward` ever does that)."""
 
     model: Any
     cache: Any
@@ -99,9 +148,34 @@ class RealModelState:
     compaction: Any  # kvcot.generation.replay.CompactionTracker
     absolute_position: int
     device: str
+    pending_fed_absolute_positions: list[int] | None = field(default=None)
+    pending_call_kind: Literal["prefill", "decode"] | None = field(default=None)
 
     def kv_cluster_for_layer(self, layer_index: int):
         return self.model.model.layers[layer_index].self_attn.kv_cluster
+
+    def register_pending_fed_positions(self, positions: list[int], call_kind: Literal["prefill", "decode"]) -> None:
+        """Must be called immediately before the real forward call that will
+        feed `positions` -- makes them visible to `projected_pre_event_position_map`
+        for the duration of that call, without touching `model_provenance`."""
+        self.pending_fed_absolute_positions = list(positions)
+        self.pending_call_kind = call_kind
+
+    def clear_pending(self) -> None:
+        self.pending_fed_absolute_positions = None
+        self.pending_call_kind = None
+
+    def projected_pre_event_position_map(self, layer_index: int) -> "Any":
+        """The pre-event absolute-position map for `layer_index`, as it
+        would read AT THIS INSTANT from inside the in-flight forward call's
+        `update_kv` hook -- `model_provenance`'s own committed positions plus
+        any still-pending fed positions for this call, computed via a
+        disposable `LayerProvenance.clone()` (never mutating
+        `model_provenance` itself, and never re-deriving append semantics
+        independently of `LayerProvenance.append_new_token`/
+        `append_new_tokens_prefill`, the same methods `advance_after_forward`
+        uses for the real commit)."""
+        return _project_pre_event_position_map(self, layer_index)
 
 
 def compute_kept_indices_lengths(model: Any) -> dict[int, int]:
@@ -118,6 +192,49 @@ def compute_kept_indices_lengths(model: Any) -> dict[int, int]:
         i: (len(kv_cluster.kept_token_indices) if (kv_cluster := _has_kv_cluster(model, i)) is not None else 0)
         for i in range(num_layers)
     }
+
+
+def _project_pre_event_position_map(state: Any, layer_index: int) -> "Any":
+    """Module-level implementation backing `RealModelState
+    .projected_pre_event_position_map` (kept free-standing, not just a
+    method, so `build_real_branch_step_fn_restore_once`'s `_LiveBranchState`
+    -- which also owns a `model_provenance` and can also have pending
+    positions mid-call, even though nothing currently reads its projection
+    -- can share the identical implementation without duplicating it)."""
+    lp = state.model_provenance.layers.get(layer_index)
+    if lp is None:
+        return None
+    pending = state.pending_fed_absolute_positions
+    if not pending:
+        return lp.positions
+    projected = lp.clone()
+    call_kind = state.pending_call_kind
+    if call_kind == "prefill":
+        projected.append_new_tokens_prefill(pending)
+    elif call_kind == "decode":
+        projected.append_new_token(pending[0])
+    else:
+        raise ValueError(
+            f"pending_call_kind must be 'prefill' or 'decode' when pending positions are set, got {call_kind!r}"
+        )
+    return projected.positions
+
+
+@contextlib.contextmanager
+def _pending_positions_scope(state: Any, positions: list[int], call_kind: Literal["prefill", "decode"]) -> Iterator[None]:
+    """B1B-R4.1 §4: registers `positions` as pending on `state` before the
+    real forward call the caller is about to make, and guarantees they are
+    cleared if that call raises -- so a failed forward call never leaves
+    stale pending state visible to a later, unrelated call. Does NOT clear
+    pending state on the successful path (the caller does that explicitly,
+    after `advance_after_forward` has actually committed the transition) --
+    this context manager only ever owns the exception path."""
+    state.register_pending_fed_positions(positions, call_kind)
+    try:
+        yield
+    except BaseException:
+        state.clear_pending()
+        raise
 
 
 def advance_after_forward(
@@ -251,11 +368,12 @@ def build_real_prefill_fn(device: str) -> PrefillFn:
         input_ids = torch.tensor([prompt_token_ids], dtype=torch.long, device=device)
         position_ids = torch.arange(0, n, device=device).unsqueeze(0)
         cache_position = torch.arange(0, n, device=device)
-        with torch.no_grad():
-            out = state.model(
-                input_ids=input_ids, position_ids=position_ids, past_key_values=state.cache,
-                use_cache=True, cache_position=cache_position,
-            )
+        with _pending_positions_scope(state, list(range(n)), "prefill"):
+            with torch.no_grad():
+                out = state.model(
+                    input_ids=input_ids, position_ids=position_ids, past_key_values=state.cache,
+                    use_cache=True, cache_position=cache_position,
+                )
         all_position_logits = out.logits[0, :, :]  # (n, vocab) -- one row per prompt position
 
         observations = advance_after_forward(
@@ -265,6 +383,7 @@ def build_real_prefill_fn(device: str) -> PrefillFn:
             kept_indices_lengths_before_call=kept_indices_lengths_before_call,
             call_kind="prefill",
         )
+        state.clear_pending()
 
         # Per-position observations: intra-prompt attribution is not
         # available from one opaque call (see docstring) -- every position
@@ -304,8 +423,9 @@ def build_real_decode_one_fn(device: str) -> DecodeOneFn:
         }
         kept_indices_lengths_before_call = compute_kept_indices_lengths(state.model)
 
-        logits = decode_step(state.model, state.cache, token_id, state.absolute_position, device)
         fed_position = state.absolute_position
+        with _pending_positions_scope(state, [fed_position], "decode"):
+            logits = decode_step(state.model, state.cache, token_id, state.absolute_position, device)
         state.absolute_position += 1
 
         observations = advance_after_forward(
@@ -315,6 +435,7 @@ def build_real_decode_one_fn(device: str) -> DecodeOneFn:
             kept_indices_lengths_before_call=kept_indices_lengths_before_call,
             call_kind="decode",
         )
+        state.clear_pending()
         return NaturalStepResult(next_token_logits=logits, new_state=state, layer_observations=observations)
 
     return decode_one_fn
@@ -374,12 +495,33 @@ class _LiveBranchState:
     the restore-once step function after its first call, and passed back in
     unchanged (mutated in place) on every subsequent call within the same
     branch. Never constructed by any caller outside this module; a caller
-    that wants a NEW branch always starts from a `ModelStateSnapshot`."""
+    that wants a NEW branch always starts from a `ModelStateSnapshot`.
+
+    Carries the same pending-position fields/methods as `RealModelState`
+    (B1B-R4.1 §4) purely for exception-safety uniformity across every real
+    forward-call site in this module -- no capture instrumentation reads a
+    branch's projection today (`capture_update_kv` is Pass-2-only), but a
+    branch's own `advance_after_forward` call still needs the identical
+    register-before/clear-after-or-on-exception discipline, so this class
+    does not get a second, differently-shaped lifecycle."""
 
     cache: Any
     model_provenance: Any
     compaction: Any
     absolute_position: int
+    pending_fed_absolute_positions: list[int] | None = field(default=None)
+    pending_call_kind: Literal["prefill", "decode"] | None = field(default=None)
+
+    def register_pending_fed_positions(self, positions: list[int], call_kind: Literal["prefill", "decode"]) -> None:
+        self.pending_fed_absolute_positions = list(positions)
+        self.pending_call_kind = call_kind
+
+    def clear_pending(self) -> None:
+        self.pending_fed_absolute_positions = None
+        self.pending_call_kind = None
+
+    def projected_pre_event_position_map(self, layer_index: int) -> "Any":
+        return _project_pre_event_position_map(self, layer_index)
 
 
 def build_real_branch_step_fn_restore_once(model: Any, device: str):
@@ -418,8 +560,9 @@ def build_real_branch_step_fn_restore_once(model: Any, device: str):
         expected_len_if_no_evict = {i: int(live.cache.key_cache[i].shape[-2]) + 1 for i in range(num_layers)}
         kept_indices_lengths_before_call = compute_kept_indices_lengths(model)
 
-        logits = decode_step(model, live.cache, token_id, live.absolute_position, device)
         fed_position = live.absolute_position
+        with _pending_positions_scope(live, [fed_position], "decode"):
+            logits = decode_step(model, live.cache, token_id, live.absolute_position, device)
         live.absolute_position += 1
 
         advance_after_forward(
@@ -429,6 +572,7 @@ def build_real_branch_step_fn_restore_once(model: Any, device: str):
             kept_indices_lengths_before_call=kept_indices_lengths_before_call,
             call_kind="decode",
         )
+        live.clear_pending()
         return logits, live
 
     return branch_step_fn

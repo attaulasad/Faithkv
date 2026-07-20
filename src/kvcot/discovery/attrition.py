@@ -13,6 +13,7 @@ code exactly like `kvcot.discovery.sampling`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 # Every stage a single example can be dropped at, IN THE ORDER an example
 # passes through them. `AttritionCounters.stage_order` is this exact tuple
@@ -32,6 +33,16 @@ STAGE_CAPTURE_GATHER_PARITY_FAILURE = "capture_gather_parity_failure"
 STAGE_UNCERTAINTY_MISSING = "uncertainty_missing"
 STAGE_BRANCH_EVALUATION_FAILURE = "branch_evaluation_failure"
 STAGE_SCHEMA_VALIDATION_FAILURE = "schema_validation_failure"
+# B1B-R4.1 §15/§18: a pair whose `SwapPairRecord` was successfully
+# CONSTRUCTED (so it is not one of `build_swap_pair_record`'s own
+# `PairBuildResult(None, stage, detail)` failure paths above) but whose
+# derived `valid_flag` is `False` -- e.g. a real-model snapshot where the
+# semantic swap failed to update provenance/kept-index bookkeeping
+# (`kvcot.discovery.pipeline.build_swap_pair_record`'s parity derivation).
+# A distinct stage from `STAGE_SCHEMA_VALIDATION_FAILURE` (that one means
+# construction itself raised) and from `STAGE_CAPTURE_GATHER_PARITY_FAILURE`
+# (that one is Pass-2-level, evaluated before any pair is ever attempted).
+STAGE_SEMANTIC_SWAP_PARITY_FAILURE = "semantic_swap_parity_failure"
 
 STAGE_ORDER: tuple[str, ...] = (
     STAGE_NATURAL_RUN_INVALID,
@@ -48,6 +59,7 @@ STAGE_ORDER: tuple[str, ...] = (
     STAGE_UNCERTAINTY_MISSING,
     STAGE_BRANCH_EVALUATION_FAILURE,
     STAGE_SCHEMA_VALIDATION_FAILURE,
+    STAGE_SEMANTIC_SWAP_PARITY_FAILURE,
 )
 
 
@@ -101,3 +113,28 @@ class AttritionCounters:
             remaining -= dropped_here
         assert remaining == self.passed_all
         return rows
+
+
+@dataclass(frozen=True)
+class PairFailureDetail:
+    """B1B-R4.1 §15 repair: a structured per-pair failure record --
+    `kvcot.discovery.b2a_evidence.derive_pair_completion_evidence`'s
+    `pair_failure_details` used to be an always-empty tuple in the
+    production R-KV worker path (`pair_attrition_dropped_stages` was never
+    actually populated from the real `AttritionCounters` that
+    `kvcot.discovery.orchestrator.run_example` filled), and even that
+    parameter's shape was a thin `str` (the stage name only) rather than a
+    record identifying WHICH pair failed and why. Built once per failed
+    pair attempt, right where `kvcot.discovery.orchestrator.run_example`
+    already has every field in scope -- never reconstructed after the fact
+    from an aggregate counter."""
+
+    compaction_event_id: int
+    layer_index: int
+    kv_head_index: int
+    evicted_absolute_position: int
+    donor_absolute_position: int
+    pair_kind: Literal["real", "no_op"]
+    stage: str
+    detail: str | None
+    elapsed_seconds: float

@@ -86,6 +86,7 @@ def _passing_payloads(manifest, config):
         pass1_call_boundary={"prefill_call_count": 1, "prefill_token_count": 3, "decode_call_count": 300, "ordered_trace_hash": "a" * 64},
         pass2_call_boundary={"prefill_call_count": 1, "prefill_token_count": 3, "decode_call_count": 300, "ordered_trace_hash": "a" * 64},
         observed_total_compaction_events=5, eligible_compaction_events=3, selected_compaction_events=3,
+        events_with_at_least_one_completed_real_pair=3,
         events_with_all_four_real_pairs_completed=3, attempted_real_pair_count=12, completed_real_pair_count=12,
         failed_real_pair_count=0, attempted_no_op_pair_count=1, completed_no_op_pair_count=1,
         pair_failure_details=[],
@@ -185,6 +186,40 @@ def test_gate_fails_when_pair_counts_are_not_exact(config, manifest, monkeypatch
     assert artifact.gate_result.passed is False
     assert "real_pair_count_exact" in artifact.gate_result.failed_conditions
     assert "all_required_pair_evaluations_completed" in artifact.gate_result.failed_conditions
+
+
+def test_gate_fails_on_a_reported_semantic_swap_parity_failure_even_with_every_count_exact(config, manifest, monkeypatch, tmp_path):
+    """B1B-R4.1 §18/§30 regression: a worker reporting one
+    `semantic_swap_parity_failure` entry in `pair_failure_details` must fail
+    the gate's dedicated `semantic_swap_parity` condition -- proven with
+    every OTHER condition (including the exact-count ones) left passing, so
+    this is not merely riding on `all_required_pair_evaluations_completed`
+    already being false for an unrelated reason."""
+    monkeypatch.setattr(b2a_execute, "_verify_resolved_prompt_identity", lambda c, m: None)
+    fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
+    rkv_payload["pair_failure_details"] = [
+        {
+            "compaction_event_id": 0, "layer_index": 1, "kv_head_index": 0,
+            "evicted_absolute_position": 10, "donor_absolute_position": 20,
+            "pair_kind": "real", "stage": "semantic_swap_parity_failure",
+            "detail": "semantic_swap_parity_provenance_not_updated", "elapsed_seconds": 0.1,
+        }
+    ]
+    runner = _fake_runner_writing(fullkv_payload, rkv_payload)
+    monkeypatch.setattr("kvcot.discovery.b2a_artifact.build_and_write_b2a_artifact", _patched_writer(tmp_path))
+
+    artifact = b2a_execute.run_b2a_calibration(
+        config, manifest, config_path=CONFIG_PATH, manifest_path=MANIFEST_PATH,
+        python_executable="fake-python", subprocess_runner=runner,
+    )
+
+    assert artifact.gate_result.passed is False
+    assert "semantic_swap_parity" in artifact.gate_result.failed_conditions
+    # Every count-based condition is untouched by this failure mode --
+    # proving `semantic_swap_parity` is independently derived, not a proxy
+    # for a count mismatch that would already fail the gate on its own.
+    assert "real_pair_count_exact" not in artifact.gate_result.failed_conditions
+    assert "all_required_pair_evaluations_completed" not in artifact.gate_result.failed_conditions
 
 
 def test_worker_failure_still_writes_a_fail_artifact(config, manifest, monkeypatch, tmp_path):

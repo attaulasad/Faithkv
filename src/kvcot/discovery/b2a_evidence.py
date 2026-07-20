@@ -35,25 +35,47 @@ class PairCompletionEvidence:
     """B1B-R4 §8/§22: exact, independently-countable selection and
     pair-completion accounting -- never derived from `len(pair_records)`
     alone (which conflates real and no-op pairs) and never a single
-    umbrella boolean."""
+    umbrella boolean.
+
+    B1B-R4.1 §14 repair: `selected_compaction_events` (and the
+    `selected_event_count_exact` gate condition it feeds) is now read from
+    `example_result.selected_event_ids` -- the FROZEN Pass-1 plan's own
+    selection, populated once by `kvcot.discovery.orchestrator.run_example`
+    right after `build_pass1_plan` succeeds -- never re-derived by counting
+    distinct event IDs across `pair_records`. That prior derivation
+    conflated "selected by Pass 1" with "at least one pair survived
+    attrition": an event every one of whose pairs failed would silently
+    vanish from the count instead of being reported as a selected-but-failed
+    event. `events_with_at_least_one_completed_real_pair` is the NEW,
+    separately-named field for that weaker, completion-based quantity, so
+    the two are never conflated under one name again."""
 
     observed_total_compaction_events: int
     eligible_compaction_events: int
     selected_compaction_events: int
+    events_with_at_least_one_completed_real_pair: int
     events_with_all_four_real_pairs_completed: int
     attempted_real_pair_count: int
     completed_real_pair_count: int
     failed_real_pair_count: int
     attempted_no_op_pair_count: int
     completed_no_op_pair_count: int
-    pair_failure_details: tuple[str, ...]
+    pair_failure_details: tuple["PairFailureDetail", ...]
 
 
-def derive_pair_completion_evidence(
-    *, trace, example_result, pair_attrition_dropped_stages: tuple[str, ...] = ()
-) -> PairCompletionEvidence:
+def derive_pair_completion_evidence(*, trace, example_result) -> PairCompletionEvidence:
     """Derive every count from `example_result`/`trace` directly -- never
-    from a re-run or a second independently-maintained counter."""
+    from a re-run or a second independently-maintained counter.
+
+    B1B-R4.1 §15 repair: `pair_failure_details` is read directly off
+    `example_result.pair_failure_details` -- the structured records
+    `kvcot.discovery.orchestrator.run_example` builds live, one per failed
+    pair attempt. The prior `pair_attrition_dropped_stages` parameter was
+    never actually threaded through by `kvcot.discovery.b2a_workers
+    .run_rkv_worker`, so this field was always an empty tuple in the
+    production R-KV worker path regardless of how many pairs actually
+    failed -- removed rather than left as a silently-unused parameter that
+    a future caller could pass without effect."""
     from kvcot.discovery.pass1 import eligible_event_ids
 
     observed_total = len(trace.compaction_events) if trace is not None else 0
@@ -63,7 +85,8 @@ def derive_pair_completion_evidence(
     by_event: dict[int, int] = {}
     for r in real_records:
         by_event[r.compaction_event_id] = by_event.get(r.compaction_event_id, 0) + 1
-    selected_events = len({r.compaction_event_id for r in example_result.pair_records})
+    selected_events = len(example_result.selected_event_ids)
+    events_with_at_least_one = len(by_event)
     events_with_all_four = sum(1 for count in by_event.values() if count >= 4)
 
     attempted_real = example_result.attempted_real_pair_count
@@ -75,13 +98,14 @@ def derive_pair_completion_evidence(
         observed_total_compaction_events=observed_total,
         eligible_compaction_events=eligible,
         selected_compaction_events=selected_events,
+        events_with_at_least_one_completed_real_pair=events_with_at_least_one,
         events_with_all_four_real_pairs_completed=events_with_all_four,
         attempted_real_pair_count=attempted_real,
         completed_real_pair_count=completed_real,
         failed_real_pair_count=attempted_real - completed_real,
         attempted_no_op_pair_count=attempted_no_op,
         completed_no_op_pair_count=completed_no_op,
-        pair_failure_details=pair_attrition_dropped_stages,
+        pair_failure_details=example_result.pair_failure_details,
     )
 
 
