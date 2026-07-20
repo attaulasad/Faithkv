@@ -1,0 +1,31 @@
+{
+  "asset_type": "tokenizer_only",
+  "repository_id": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+  "requested_revision": "6a6f4aa4197940add57724a7707d069478df56b1",
+  "resolved_revision": "6a6f4aa4197940add57724a7707d069478df56b1",
+  "isolated_cache": "C:/Users/Wasim/AppData/Local/Temp/faithkv-tokenizer-only-copy-imqwdbl3",
+  "download_mode": "isolated local-dir copy; tokenizer/config allow-list only",
+  "tokenizer_class": "LlamaTokenizerFast",
+  "eos_token_id": 128001,
+  "chat_template_sha256": "56a1447ad31926fdc21fb07e56e5642bd9c850c4f52d8c8af7bbe5f079a84f5f",
+  "rendered_prompt_sha256": "8784d22791190f4a42a43fd6508368718c75683bdb323a83c0767cb3fb672fe5",
+  "prompt_token_count": 105,
+  "prompt_token_sha256": "57c824e6f41bc098507f3a40b9784b8d17dddc000c24334e8d209133771ee465",
+  "before_inventory": [],
+  "after_inventory": [
+    {"path": "snapshot/.cache/huggingface/.gitignore", "size_bytes": 1, "sha256": "684888c0ebb17f374298b65ee2807526c066094c701bcc7ebbe1c1095f494fc1"},
+    {"path": "snapshot/.cache/huggingface/download/config.json.metadata", "size_bytes": 103, "sha256": "9c79530806aaf1c69b1c737e759e6184d417f6aa1ec6d58593342bc3981cad03"},
+    {"path": "snapshot/.cache/huggingface/download/tokenizer.json.metadata", "size_bytes": 104, "sha256": "883d4642776d0ab80bf56e28acc111b9f53f825b3d11bd1d0ab576ba968afed4"},
+    {"path": "snapshot/.cache/huggingface/download/tokenizer_config.json.metadata", "size_bytes": 104, "sha256": "d93539c9215253544bfabd61306871bcb5af7f0dd0882de31cde86b39521f960"},
+    {"path": "snapshot/config.json", "size_bytes": 826, "sha256": "54acfad3cffe057640904ca8a1e83525e6551c70c7a04c641f5a9eda0bbf64bd"},
+    {"path": "snapshot/tokenizer.json", "size_bytes": 9084480, "sha256": "b9c9eb63a8e03059914880f918cd28a880dec8b6e15e4461e1ff677e3743dbb8"},
+    {"path": "snapshot/tokenizer_config.json", "size_bytes": 3071, "sha256": "8ac8c85fb242563c2260baec0909debd69d718af6a0b3d90e6cab62b4d341cd5"}
+  ],
+  "forbidden_weight_files": [],
+  "weight_download_occurred": false,
+  "notes": [
+    "The first isolated-cache attempt failed because Windows symlink creation was unavailable.",
+    "The successful validation used copy mode and retained the complete isolated file inventory above.",
+    "No .safetensors, .bin, weight index, or model-weight shard appears in the isolated cache."
+  ]
+}

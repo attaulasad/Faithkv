@@ -311,7 +311,9 @@ def capture_snapshot(
     )
 
 
-def _populate_fresh_cache(cache, snapshot: ModelStateSnapshot, num_layers: int) -> None:
+def _populate_fresh_cache(
+    cache, snapshot: ModelStateSnapshot, num_layers: int, *, consume_owned_snapshot: bool = False
+) -> None:
     """Fill a *freshly constructed* Cache with the snapshot's per-layer
     key/value tensors, via the public `cache.update(...)` path.
 
@@ -331,11 +333,26 @@ def _populate_fresh_cache(cache, snapshot: ModelStateSnapshot, num_layers: int) 
     `DynamicCache()`, which is the contract.
     """
     for i in range(num_layers):
-        cache.update(snapshot.key_cache[i].clone(), snapshot.value_cache[i].clone(), i)
-    cache.query_cache = {i: t.clone() for i, t in snapshot.query_cache.items()}
+        key = snapshot.key_cache[i] if consume_owned_snapshot else snapshot.key_cache[i].clone()
+        value = snapshot.value_cache[i] if consume_owned_snapshot else snapshot.value_cache[i].clone()
+        cache.update(key, value, i)
+    cache.query_cache = (
+        dict(snapshot.query_cache)
+        if consume_owned_snapshot
+        else {i: t.clone() for i, t in snapshot.query_cache.items()}
+    )
+    if consume_owned_snapshot:
+        # The branch owns this working snapshot exclusively.  Drop its tensor
+        # references immediately after the fresh cache adopts them so restore
+        # never overlaps two mutable complete tensor sets.
+        snapshot.key_cache.clear()
+        snapshot.value_cache.clear()
+        snapshot.query_cache.clear()
 
 
-def restore_snapshot(model, cache, snapshot: ModelStateSnapshot) -> ModelProvenance:
+def restore_snapshot(
+    model, cache, snapshot: ModelStateSnapshot, *, consume_owned_snapshot: bool = False
+) -> ModelProvenance:
     """Restore live model/cache state from a deep-cloned snapshot, for
     branching (§6 step 8). `cache` must be a *freshly constructed* Cache (see
     `_populate_fresh_cache`). Always restores from a *fresh clone* of the
@@ -346,7 +363,9 @@ def restore_snapshot(model, cache, snapshot: ModelStateSnapshot) -> ModelProvena
     every reuse of a snapshot.
     """
     num_layers = len(model.model.layers)
-    _populate_fresh_cache(cache, snapshot, num_layers)
+    _populate_fresh_cache(
+        cache, snapshot, num_layers, consume_owned_snapshot=consume_owned_snapshot
+    )
 
     for i in range(num_layers):
         model.model.layers[i].self_attn.config.compression = _compression_flag_from_str(

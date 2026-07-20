@@ -2379,8 +2379,49 @@ def cmd_b2a_calibrate(args: argparse.Namespace) -> int:
     )
     from kvcot.discovery.manifest import load_b2a_one_example_manifest
 
-    config = load_discovery_config(args.config)
-    manifest = load_b2a_one_example_manifest()
+    attempt = None
+    if args.execute:
+        import os
+        import sys
+        from kvcot.discovery.attempt_artifacts import atomic_write_json, create_attempt_directory
+
+        attempt = create_attempt_directory()
+        atomic_write_json(
+            attempt.path / "invocation.json",
+            {
+                "attempt_id": attempt.attempt_id,
+                "argv": [arg for arg in sys.argv if "token" not in arg.lower() and "secret" not in arg.lower()],
+                "working_directory": str(Path.cwd()),
+                "pid": os.getpid(),
+                "config_path": str(args.config),
+                "manifest_path": "configs/discovery/b2a_one_example_manifest.json",
+                "environment": {
+                    "PYTHONHASHSEED": os.environ.get("PYTHONHASHSEED"),
+                    "TOKENIZERS_PARALLELISM": os.environ.get("TOKENIZERS_PARALLELISM"),
+                },
+            },
+        )
+
+    try:
+        config = load_discovery_config(args.config)
+        manifest = load_b2a_one_example_manifest()
+    except Exception as exc:
+        if attempt is not None:
+            from kvcot.discovery.attempt_artifacts import atomic_write_json
+
+            atomic_write_json(
+                attempt.path / "failure.json",
+                {"stage": "config_or_manifest_validation", "error_type": type(exc).__name__, "error": str(exc)},
+            )
+        raise
+
+    if attempt is not None:
+        from kvcot.discovery.attempt_artifacts import collect_execution_provenance
+
+        provenance = collect_execution_provenance(
+            repository=Path.cwd(), expected_rkv_sha=config.rkv.upstream_revision, artifact_root=attempt.path,
+        )
+        atomic_write_json(attempt.path / "provenance.json", provenance)
 
     blockers: list[str] = []
     if not config.dataset.revision_is_frozen:
@@ -2435,6 +2476,22 @@ def cmd_b2a_calibrate(args: argparse.Namespace) -> int:
             f"x {PAIR_BRANCHES_PER_EVENT} real pair evaluations = 12 real pair evaluations, PLUS exactly 1 no-op "
             "pair evaluation -- reported separately, never added to the 144 B2B total"
         )
+        print("  strict hardware boundary: exactly one visible NVIDIA RTX 3090 at explicit cuda:0")
+        print("  immutable snapshots: exact 40-SHA local model/tokenizer paths; local_files_only=True; no offload")
+        print("  compact capture: full Pass-2 records convert to selected-only CompactBranchTarget objects")
+        print("  capture-release boundary: full captured K/V, returned K/V, and score tensors released before pair 1")
+        print("  branch-memory guard: synchronized, shape/dtype-derived estimate before every real pair and no-op")
+        print("  pair topology: 3 unique selected events; 4 unique real pairs/event; 12 total; 1 deterministic no-op")
+        print("  branch scoring: one bridge token plus exactly 48 scored targets; NLL scalars retained, logits/cache released")
+        print("  timing: synchronized startup/load/pass1/pass2/compact/per-pair phases; load-inclusive projection")
+        print("  memory: before-load, model-load, post-load, inference/pass/capture/compact/pair/no-op/worker phases")
+        print("  artifacts: immutable b2a_attempt_<UTC>_<UUID>/ with atomic results/envelopes/logs/journals/hashes")
+        print("  mandatory gates: identity, expected generation, actual batch, complete traces, raw pair/no-op,")
+        print("    semantic swap, timings, memory phases, runtime/VRAM, envelopes, and attempt artifacts all fail closed")
+        from kvcot.discovery.final_contract import FINAL_MANDATORY_GATE_CONDITIONS
+
+        for gate_name in FINAL_MANDATORY_GATE_CONDITIONS:
+            print(f"    - {gate_name}")
         print(f"  canonical_config_hash={canonical_config_hash(config)}")
         print(f"  generation_config_hash={generation_config_hash(config.generation)}")
         print(f"  rkv_config_hash={rkv_config_hash(config.rkv)}")
@@ -2446,7 +2503,7 @@ def cmd_b2a_calibrate(args: argparse.Namespace) -> int:
                 print(f"    - {blocker}")
         else:
             print("  no unresolved/inconsistent identity fields detected")
-        print("  no result files created; no model loaded; no CUDA required")
+        print("  dry-run only: no CUDA/model execution performed; no result files created; no model loaded; no CUDA required")
         return 0 if not blockers else 2
 
     # ---- explicit GPU execution mode ----
@@ -2461,11 +2518,27 @@ def cmd_b2a_calibrate(args: argparse.Namespace) -> int:
             "manifest example runs, never a range, multiple ids, or unrestricted dataset iteration."
         )
     if blockers:
+        if attempt is not None:
+            from kvcot.discovery.attempt_artifacts import atomic_write_json
+            atomic_write_json(attempt.path / "failure.json", {"stage": "preflight", "blockers": blockers})
         raise SystemExit("b2a-calibrate --execute refused:\n" + "\n".join(f"  - {b}" for b in blockers))
+
+    if attempt is not None:
+        from kvcot.discovery.attempt_artifacts import atomic_write_json
+
+        atomic_write_json(
+            attempt.path / "preflight.json",
+            {"passed": True, "blockers": [], "config_hash": canonical_config_hash(config), "manifest_hash": manifest.manifest_hash()},
+        )
 
     import torch
 
     if not torch.cuda.is_available():
+        if attempt is not None:
+            from kvcot.discovery.attempt_artifacts import atomic_write_json
+            atomic_write_json(
+                attempt.path / "failure.json", {"stage": "cuda_preflight", "reason": "CUDA unavailable"}
+            )
         raise SystemExit("b2a-calibrate --execute requires CUDA; none is available on this machine.")
 
     from kvcot.discovery.b2a_execute import run_b2a_calibration
@@ -2476,11 +2549,18 @@ def cmd_b2a_calibrate(args: argparse.Namespace) -> int:
     # config/manifest from these same paths independently.
     artifact = run_b2a_calibration(
         config, manifest, config_path=str(args.config), manifest_path=str(DEFAULT_MANIFEST_PATH),
+        attempt_directory=attempt.path,
     )
-    print(f"b2a-calibrate result: passed={artifact.gate_result.passed}")
+    final_passed = bool(artifact.final_gate_result is not None and artifact.final_gate_result.passed)
+    overall_passed = bool(artifact.gate_result.passed and final_passed)
+    print(f"b2a-calibrate result: passed={overall_passed}")
     print(f"  artifact written: {artifact.artifact_path}")
-    if not artifact.gate_result.passed:
+    if not overall_passed:
         print(f"  failed_conditions={artifact.gate_result.failed_conditions}")
+        if artifact.final_gate_result is None:
+            print("  final_failed_conditions=['final_gate_result_missing']")
+        elif not artifact.final_gate_result.passed:
+            print(f"  final_failed_conditions={artifact.final_gate_result.failed_conditions}")
         return 2
 
     print("  stop: B2B pilot NOT started by this command.")

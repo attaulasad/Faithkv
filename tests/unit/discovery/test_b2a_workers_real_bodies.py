@@ -30,8 +30,14 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from kvcot.discovery.b2a_workers import FullKVWorkerResult, RKVWorkerResult, run_fullkv_worker, run_rkv_worker
+from kvcot.discovery.final_contract import (
+    FULLKV_REQUIRED_TIMING_PHASES,
+    PAIR_REQUIRED_TIMING_SUBPHASES,
+    RKV_REQUIRED_TIMING_PHASES,
+)
 
 NUM_LAYERS = 2
+CONTROLLED_NUM_LAYERS = 3
 NUM_HEADS = 1
 HEAD_DIM = 4
 VOCAB_SIZE = 8
@@ -136,7 +142,7 @@ class _FakeModel:
         else:
             layers = [SimpleNamespace(self_attn=SimpleNamespace(config=SimpleNamespace(compression=None))) for _ in range(num_layers)]
         self.model = SimpleNamespace(layers=layers)
-        config_kwargs = dict(num_key_value_heads=NUM_HEADS)
+        config_kwargs = dict(num_key_value_heads=NUM_HEADS, vocab_size=VOCAB_SIZE)
         if rkv_lock is not None:
             config_kwargs.update(
                 divide_method=rkv_lock.divide_method, divide_length=rkv_lock.divide_length,
@@ -167,6 +173,56 @@ class _FakeTokenizer:
         return "no boxed answer here"
 
 
+class _ControlledTokenizer:
+    eos_token_id = 7
+
+    def decode(self, ids, skip_special_tokens=True):
+        return r"The computation is complete. \boxed{0}"
+
+
+class _ControlledModel(_FakeModel):
+    """CPU causal-LM fake that drives the complete R-KV success path."""
+
+    def __init__(self, rkv_lock, *, stop_length=130):
+        from _fake_rkv_fixtures import FakeR1KV
+
+        super().__init__(rkv_lock=rkv_lock, num_layers=CONTROLLED_NUM_LAYERS)
+        self.stop_length = stop_length
+        for layer in self.model.layers:
+            layer.self_attn.kv_cluster = FakeR1KV(
+                budget=rkv_lock.budget,
+                window_size=rkv_lock.window_size,
+                kernel_size=rkv_lock.kernel_size,
+                mix_lambda=rkv_lock.mix_lambda,
+                retain_ratio=rkv_lock.retain_ratio,
+                retain_direction=rkv_lock.retain_direction,
+            )
+
+    def __call__(self, input_ids, position_ids=None, past_key_values=None, use_cache=None, cache_position=None):
+        cache = past_key_values
+        seq_len = input_ids.shape[1]
+        if not hasattr(self, "length"):
+            self.length = 0
+        fed_positions = torch.arange(self.length, self.length + seq_len, dtype=torch.float32)
+        self.length += seq_len
+        for layer_index, layer in enumerate(self.model.layers):
+            offsets = torch.arange(HEAD_DIM, dtype=torch.float32).view(1, 1, 1, -1)
+            new_k = fed_positions.view(1, 1, -1, 1) + offsets + layer_index * 0.01
+            new_v = new_k + 0.5
+            key = torch.cat([cache.key_cache[layer_index], new_k], dim=-2)
+            value = torch.cat([cache.value_cache[layer_index], new_v], dim=-2)
+            # Compact at a controlled cadence.  Several positions accumulate
+            # between events, yielding at least two genuine evictions per
+            # event and therefore a valid 2x2 candidate/donor pool.
+            if self.length % 8 == 0 and key.shape[-2] >= layer.self_attn.kv_cluster.budget:
+                key, value = layer.self_attn.kv_cluster.update_kv(key, new_k, value)
+            cache.key_cache[layer_index] = key
+            cache.value_cache[layer_index] = value
+        logits = torch.full((1, seq_len, VOCAB_SIZE), -20.0)
+        logits[:, :, 7 if self.length >= self.stop_length else 1] = 20.0
+        return SimpleNamespace(logits=logits)
+
+
 def _build_fake_discovery_config():
     """A REAL `kvcot.discovery.discovery_config.DiscoveryConfig` (pydantic),
     not a hand-rolled stand-in -- `canonical_config_hash`/`NaturalRunProvenance
@@ -191,6 +247,16 @@ def _build_fake_discovery_config():
         dataset=DiscoveryDatasetLock(name="MATH-500", config="default", split="test", revision="c3" * 20),
         rkv=DiscoveryRkvLock(budget=1_000_000, upstream_revision=PINNED_RKV_UPSTREAM_REVISION),
         generation=DiscoveryGenerationLock(max_new_tokens=12, framework_seed=13),
+    )
+
+
+def _build_controlled_discovery_config():
+    config = _build_fake_discovery_config()
+    return config.model_copy(
+        update={
+            "rkv": config.rkv.model_copy(update={"budget": 12, "window_size": 4, "divide_length": 8}),
+            "generation": config.generation.model_copy(update={"max_new_tokens": 160}),
+        }
     )
 
 
@@ -227,6 +293,10 @@ def test_run_fullkv_worker_executes_the_real_body_end_to_end():
     assert result.decode_call_count == config.generation.max_new_tokens
     assert len(result.natural_generated_token_ids) == config.generation.max_new_tokens
     assert result.batch_size == 1
+    assert result.actual_batch_size_verified is True
+    assert result.actual_call_evidence[0]["call_kind"] == "prefill"
+    assert result.actual_call_evidence[0]["input_ids_shape"] == [1, 3]
+    assert all(event["batch_size"] == 1 for event in result.actual_call_evidence)
     assert result.every_parameter_on_cuda is True  # derived from the fake param's device.type == "cuda"
     assert result.peak_cuda_allocated_bytes == 12345
     assert result.peak_cuda_reserved_bytes == 23456
@@ -235,8 +305,15 @@ def test_run_fullkv_worker_executes_the_real_body_end_to_end():
     assert result.runtime_generation["do_sample"] is False
     # B1 execution-boundary closure §4: `reset_patched_state` (called here
     # to build the natural-generation state) must not add a second, hidden
-    # peak-memory reset on top of the worker's own explicit one.
-    assert fake_cuda.reset_peak_memory_stats_call_count == 1
+    # peak-memory reset on top of the worker's explicit phase-owned resets.
+    assert fake_cuda.reset_peak_memory_stats_call_count == len(result.memory_phase_evidence)
+    assert set(FULLKV_REQUIRED_TIMING_PHASES).issubset(
+        {record["phase"] for record in result.timing_evidence}
+    )
+    assert {phase["phase"] for phase in result.memory_phase_evidence} >= {
+        "before_model_load", "model_load", "post_load_baseline",
+        "fullkv_complete_natural_generation", "fullkv_complete_worker",
+    }
 
 
 def test_run_fullkv_worker_requires_cuda_when_no_fake_backend_injected():
@@ -285,7 +362,95 @@ def test_run_rkv_worker_executes_the_real_body_through_pass1():
     # reset -- `reset_patched_state`, called here to build Pass 1's initial
     # state, must not add a second, hidden one now that it owns model/cache
     # state only.
-    assert fake_cuda.reset_peak_memory_stats_call_count == 1
+    assert fake_cuda.reset_peak_memory_stats_call_count == len(result.memory_phase_evidence)
+
+
+def test_run_rkv_worker_executes_complete_twelve_pair_success_path(monkeypatch):
+    from _fake_rkv_fixtures import install_fake_rkv_compression_module
+
+    install_fake_rkv_compression_module(monkeypatch)
+    config = _build_controlled_discovery_config()
+    manifest = _FakeManifest()
+    model = _ControlledModel(config.rkv)
+    fake_cuda = _FakeCudaFacade()
+
+    # The production branch restorer intentionally creates DynamicCache
+    # itself.  Replace that dependency with the same real-tensor CPU cache
+    # used by the injected initial-state factory; orchestration is untouched.
+    import sys
+    import types
+
+    fake_transformers = types.ModuleType("transformers")
+    fake_cache_utils = types.ModuleType("transformers.cache_utils")
+    fake_cache_utils.DynamicCache = lambda: _FakeCache(CONTROLLED_NUM_LAYERS)
+    fake_transformers.cache_utils = fake_cache_utils
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    monkeypatch.setitem(sys.modules, "transformers.cache_utils", fake_cache_utils)
+    result = RKVWorkerResult.model_validate(
+        run_rkv_worker(
+            config,
+            manifest,
+            _load_model=lambda: model,
+            _load_tokenizer=lambda: _ControlledTokenizer(),
+            _fresh_cache_factory=lambda: _FakeCache(CONTROLLED_NUM_LAYERS),
+            _cuda=fake_cuda,
+            _device="cpu",
+        )
+    )
+    assert result.example_valid is True
+    assert result.natural_answer_status == "correct"
+    assert result.eligible_compaction_events >= 3
+    assert result.selected_compaction_events == 3
+    assert result.attempted_real_pair_count == 12
+    assert result.completed_real_pair_count == 12
+    assert result.failed_real_pair_count == 0
+    assert result.unique_completed_real_pair_count == 12
+    assert result.events_with_exactly_four_unique_real_pairs == 3
+    assert result.has_duplicate_real_pair_identity is False
+    assert result.attempted_no_op_pair_count == 1
+    assert result.completed_no_op_pair_count == 1
+    assert result.has_duplicate_no_op_pair_identity is False
+    assert result.semantic_swap_checks_required == 12
+    assert result.semantic_swap_checks_attempted == 12
+    assert result.semantic_swap_checks_passed == 12
+    assert result.semantic_swap_checks_failed == 0
+    assert result.no_op_numerical_parity is True
+    assert len(result.selected_event_evidence) == 3
+    assert len({item["compaction_event_id"] for item in result.selected_event_evidence}) == 3
+    real_attempts = [item for item in result.attempted_pair_identities if item["pair_kind"] == "real"]
+    assert len(real_attempts) == 12
+    assert len({tuple(sorted(item.items())) for item in real_attempts}) == 12
+    assert len(result.completed_pair_identities) == 13
+    assert result.failed_pair_identities == []
+    assert result.no_op_identity["pair_kind"] == "no_op"
+    assert len(result.semantic_mutation_reports) == 13
+    assert result.no_op_evidence["baseline_nll"] == result.no_op_evidence["no_op_nll"]
+    assert result.no_op_evidence["baseline_nll_sha256"] == result.no_op_evidence["no_op_nll_sha256"]
+    assert result.no_op_evidence["maximum_absolute_per_token_difference"] == 0.0
+    assert result.no_op_evidence["starting_snapshot_sha256"]
+    assert result.replay_evidence["pass1_token_sha256"] == result.replay_evidence["pass2_token_sha256"]
+    assert result.replay_evidence["complete_compaction_trace_match"] is True
+    memory_phases = [item["phase"] for item in result.memory_phase_evidence]
+    assert "model_load" in memory_phases
+    assert "rkv_complete_pass1" in memory_phases
+    assert "rkv_complete_pass2" in memory_phases
+    assert sum(phase.startswith("real_pair:") for phase in memory_phases) == 12
+    assert sum(phase.startswith("no_op_pair:") for phase in memory_phases) == 1
+    timing_phases = {item["phase"] for item in result.timing_evidence}
+    assert set(RKV_REQUIRED_TIMING_PHASES).issubset(timing_phases)
+    complete_pairs = [
+        phase for phase in timing_phases
+        if (phase.startswith("real_pair:") or phase.startswith("no_op_pair:")) and phase.count(":") == 3
+    ]
+    assert len(complete_pairs) == 13
+    for complete in complete_pairs:
+        assert all(f"{complete}:{subphase}" in timing_phases for subphase in PAIR_REQUIRED_TIMING_SUBPHASES)
+    assert result.actual_batch_size_verified is True
+    assert all(event["batch_size"] == 1 for event in result.actual_call_evidence)
+    assert any(event["call_kind"] == "prefill" for event in result.actual_call_evidence)
+    assert any(event["call_kind"] == "decode" for event in result.actual_call_evidence)
+    assert all(value > 0 for value in result.real_pair_wall_seconds)
+    assert all(value > 0 for value in result.no_op_pair_wall_seconds)
 
 
 def test_run_rkv_worker_requires_cuda_when_no_fake_backend_injected():
@@ -336,3 +501,88 @@ def test_production_call_shape_never_passes_injection_kwargs():
     assert "run_rkv_worker(config, manifest)" in source
     assert "_load_model" not in source
     assert "_cuda" not in source
+
+
+def test_actual_worker_bodies_flow_through_envelopes_coordinator_and_artifact(monkeypatch, tmp_path):
+    """CPU end-to-end: canonical bodies -> entry envelopes -> coordinator -> artifact."""
+    import contextlib
+    import io
+    import sys
+    import types
+    from types import SimpleNamespace
+
+    from _fake_rkv_fixtures import install_fake_rkv_compression_module
+    from kvcot.discovery import b2a_execute, b2a_worker_entry, b2a_workers
+    from kvcot.discovery.attempt_artifacts import atomic_write_json, create_attempt_directory
+
+    install_fake_rkv_compression_module(monkeypatch)
+    config = _build_controlled_discovery_config()
+    manifest = _FakeManifest()
+    manifest.dataset_config = "default"
+    manifest.dataset_split = "test"
+    manifest.raw_content_hash = "r" * 64
+    manifest.rendered_user_message_sha256 = "u" * 64
+    manifest.chat_template_source_sha256 = "t" * 64
+
+    fake_transformers = types.ModuleType("transformers")
+    fake_cache_utils = types.ModuleType("transformers.cache_utils")
+    fake_cache_utils.DynamicCache = lambda: _FakeCache(CONTROLLED_NUM_LAYERS)
+    fake_transformers.cache_utils = fake_cache_utils
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    monkeypatch.setitem(sys.modules, "transformers.cache_utils", fake_cache_utils)
+
+    real_full = run_fullkv_worker
+    real_rkv = run_rkv_worker
+
+    def tokenizer():
+        value = _ControlledTokenizer()
+        value._commit_hash = config.model.tokenizer_revision
+        return value
+
+    def model():
+        value = _ControlledModel(config.rkv)
+        value.config._commit_hash = config.model.revision
+        return value
+
+    monkeypatch.setattr(
+        b2a_workers, "run_fullkv_worker",
+        lambda cfg, man: real_full(
+            cfg, man, _load_model=model, _load_tokenizer=tokenizer,
+            _fresh_cache_factory=lambda: _FakeCache(CONTROLLED_NUM_LAYERS), _cuda=_FakeCudaFacade(), _device="cpu",
+        ),
+    )
+    monkeypatch.setattr(
+        b2a_workers, "run_rkv_worker",
+        lambda cfg, man: real_rkv(
+            cfg, man, _load_model=model, _load_tokenizer=tokenizer,
+            _fresh_cache_factory=lambda: _FakeCache(CONTROLLED_NUM_LAYERS), _cuda=_FakeCudaFacade(), _device="cpu",
+        ),
+    )
+    monkeypatch.setattr("kvcot.discovery.discovery_config.load_discovery_config", lambda path: config)
+    monkeypatch.setattr("kvcot.discovery.manifest.load_b2a_one_example_manifest", lambda path: manifest)
+    monkeypatch.setattr(b2a_execute, "_verify_resolved_prompt_identity", lambda cfg, man: None)
+
+    def runner(argv, **kwargs):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            returncode = b2a_worker_entry.main(argv[3:])
+        return SimpleNamespace(returncode=returncode, stdout=stdout.getvalue(), stderr=stderr.getvalue())
+
+    attempt = create_attempt_directory(root=tmp_path, attempt_id="cpu-e2e")
+    atomic_write_json(attempt.path / "invocation.json", {"attempt_id": attempt.attempt_id})
+    atomic_write_json(attempt.path / "preflight.json", {"passed": True})
+    atomic_write_json(attempt.path / "provenance.json", {"git": {"dirty": False, "rkv_submodule_match": True}})
+    artifact = b2a_execute.run_b2a_calibration(
+        config, manifest, config_path="controlled.yaml", manifest_path="controlled-manifest.json",
+        python_executable="fake-python", subprocess_runner=runner, attempt_directory=attempt.path,
+    )
+    assert artifact.gate_result.passed is True
+    assert artifact.artifact_path == attempt.path / "final.json"
+    assert artifact.artifact_path.is_file()
+    assert (attempt.path / "fullkv" / "envelope.json").is_file()
+    assert (attempt.path / "rkv" / "envelope.json").is_file()
+    assert (attempt.path / "rkv" / "pair_identities.json").is_file()
+    # CPU fakes are deliberately not accepted as RTX-3090/snapshot evidence.
+    assert artifact.final_gate_result.passed is False
+    assert "single_rtx3090_verified" in artifact.final_gate_result.failed_conditions

@@ -236,6 +236,26 @@ def test_coordinator_raises_on_worker_timeout():
         run_both_workers_via_subprocess("cfg.yaml", "manifest.json", python_executable="fake-python", subprocess_runner=runner)
 
 
+def test_attempt_timeout_preserves_command_and_partial_logs(tmp_path):
+    from kvcot.discovery.attempt_artifacts import create_attempt_directory
+
+    attempt = create_attempt_directory(root=tmp_path, attempt_id="timeout-test")
+
+    def runner(argv, **kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd=argv, timeout=kwargs.get("timeout", 0), output="partial stdout", stderr="partial stderr"
+        )
+
+    with pytest.raises(WorkerFailedError, match="timed out"):
+        run_both_workers_via_subprocess(
+            "cfg.yaml", "manifest.json", python_executable="fake-python", subprocess_runner=runner,
+            attempt_directory=attempt.path,
+        )
+    assert (attempt.path / "fullkv" / "command.json").is_file()
+    assert (attempt.path / "fullkv" / "stdout.log").read_text(encoding="utf-8") == "partial stdout"
+    assert (attempt.path / "fullkv" / "stderr.log").read_text(encoding="utf-8") == "partial stderr"
+
+
 def test_coordinator_raises_if_worker_reports_success_but_writes_no_file():
     def runner(argv, **kwargs):
         return SimpleNamespace(returncode=0, stdout="", stderr="")  # never writes the output file

@@ -92,7 +92,7 @@ def derive_pair_completion_evidence(*, trace, example_result) -> PairCompletionE
         by_event[r.compaction_event_id] = by_event.get(r.compaction_event_id, 0) + 1
     selected_events = len(example_result.selected_event_ids)
     events_with_at_least_one = len(by_event)
-    events_with_all_four = sum(1 for count in by_event.values() if count >= 4)
+    events_with_all_four = sum(1 for count in by_event.values() if count == 4)
 
     attempted_real = example_result.attempted_real_pair_count
     completed_real = example_result.completed_real_pair_count
@@ -133,6 +133,7 @@ def derive_trajectory_parity_evidence(
     call_boundary_all_match: bool,
     target_capture_gather_parities: tuple[bool | None, ...],
     target_capture_absolute_parities: tuple[bool | None, ...],
+    compaction_lists_match: bool | None = None,
 ) -> TrajectoryParityEvidence:
     """`token_identical_replay` comes from `Pass2Result`'s own token-by-
     token comparison against Pass 1's frozen trace
@@ -172,7 +173,11 @@ def derive_trajectory_parity_evidence(
     return TrajectoryParityEvidence(
         token_identical_replay=token_identical,
         prefill_decode_boundary_parity=ran_to_completion and call_boundary_all_match,
-        compaction_position_equality=ran_to_completion and pass2_invalid_reason is None,
+        compaction_position_equality=(
+            ran_to_completion
+            and pass2_invalid_reason is None
+            and (compaction_lists_match is True if compaction_lists_match is not None else True)
+        ),
         capture_gather_parity=ran_to_completion and _all_true(target_capture_gather_parities),
         absolute_position_parity=ran_to_completion and _all_true(target_capture_absolute_parities),
     )
@@ -196,7 +201,7 @@ class PairIdentityEvidence:
     identity accounting -- a stable identity tuple `(compaction_event_id,
     layer_index, kv_head_index, evicted_absolute_position,
     donor_absolute_position, pair_kind)` per completed pair, never a bare
-    per-event COUNT (`count >= 4`, the prior derivation) that cannot tell
+    prior at-least-four per-event count that cannot tell
     four genuinely distinct pairs apart from the same pair counted (or
     somehow recorded) four times. Computed entirely from
     `example_result.pair_records` -- no new per-pair state needed beyond

@@ -2,6 +2,20 @@
 
 ## Current status (read this first)
 
+**B1 FINAL CPU CLOSURE VERDICT: READY FOR INDEPENDENT AUDIT — B2A/GPU
+REMAIN BLOCKED (2026-07-20).** The repository now contains the
+compact capture/release boundary, full controlled CPU worker success path,
+synchronized timing and phase-owned memory architecture, strict one-3090 and
+immutable-local-snapshot loaders, raw fail-closed scientific evidence, and
+immutable attempt artifacts. Final non-GPU suite: 998 passed, 14 deselected.
+See `docs/B1_FINAL_CPU_CLOSURE.md`.
+
+No B2A result exists. No B2B result exists. No RTX 3090 timing exists. No
+FaithKV method exists. Independent audit is required before any GPU
+authorization.
+
+### Historical status
+
 **Phase B1 execution-boundary closure (2026-07-20)** is a forward
 completion pass on top of the already-pushed, already-self-recorded-
 INCOMPLETE B1B-R4.1 commit, repairing five concrete defects a fresh

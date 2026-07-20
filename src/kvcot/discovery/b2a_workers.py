@@ -31,8 +31,8 @@ prior version of this module had `run_rkv_worker` raise
 `NotImplementedError` while the real R-KV body lived in
 `kvcot.discovery.b2a_execute.run_rkv_worker_body` and the worker entry
 point called THAT function directly for the "rkv" role, a misleading split
-this repair removes. Both are GPU-only and never invoked by any test in
-this pass except via injected fake backends
+this repair removes. Both are GPU-only in production and are exercised by
+tests only via injected fake backends
 (`tests/unit/discovery/test_b2a_workers_real_bodies.py`, B1B-R4 §20) --
 every `import torch`/`transformers` reference stays deferred, matching this
 repository's existing discipline.
@@ -40,6 +40,7 @@ repository's existing discipline.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -52,7 +53,12 @@ from typing import Any, Callable, Sequence
 from pydantic import BaseModel, Field
 
 from kvcot.discovery.attrition import PairFailureDetail
-from kvcot.discovery.call_trace import CallBoundaryEvent, CallTraceRecorder, compare_call_boundary_traces
+from kvcot.discovery.call_trace import (
+    ActualModelCallRecorder,
+    CallBoundaryEvent,
+    CallTraceRecorder,
+    compare_call_boundary_traces,
+)
 from kvcot.discovery.constants import B2A_REAL_PAIR_EVALUATIONS_TOTAL, B2A_SELECTED_EVENTS
 
 SubprocessRunner = Callable[..., "subprocess.CompletedProcess"]
@@ -60,6 +66,48 @@ SubprocessRunner = Callable[..., "subprocess.CompletedProcess"]
 
 class WorkerFailedError(RuntimeError):
     pass
+
+
+def _production_progress_callback(role: str):
+    """Recover the durable attempt journal configured by the worker entry.
+
+    This is environment-scoped because the public production worker call
+    deliberately remains exactly ``run_*_worker(config, manifest)``.  Test
+    dependency-injection parameters therefore cannot leak into production,
+    while crashes inside the body still leave the last completed phase on
+    disk rather than materializing progress only after a successful return.
+    """
+    attempt_id = os.environ.get("KVCOT_B2A_ATTEMPT_ID")
+    progress_path = os.environ.get("KVCOT_B2A_PROGRESS_PATH")
+    if not attempt_id or not progress_path:
+        return None
+
+    from kvcot.discovery.attempt_artifacts import append_progress
+
+    def emit(stage: str, status: str, counters=None) -> None:
+        append_progress(
+            Path(progress_path), attempt_id=attempt_id, worker_role=role,
+            stage=stage, status=status, counters=counters,
+        )
+
+    return emit
+
+
+def _progress_stage_for_phase(phase: str) -> str:
+    exact = {
+        "snapshot_tokenizer_resolution": "snapshot resolution",
+        "tokenizer_load": "tokenizer load",
+        "model_load": "model-load completion",
+        "post_load_validation": "runtime verification",
+        "rkv_complete_pass1": "Pass 1",
+        "rkv_complete_pass2": "Pass 2",
+        "compact_target_conversion": "compact-target conversion",
+    }
+    if phase.startswith("real_pair:"):
+        return "each real pair"
+    if phase.startswith("no_op_pair:"):
+        return "no-op"
+    return exact.get(phase, phase)
 
 
 # --------------------------------------------------------------------------
@@ -118,6 +166,13 @@ class FullKVWorkerResult(BaseModel):
     peak_cuda_reserved_bytes: int = Field(ge=0)
     every_parameter_on_cuda: bool
     batch_size: int = Field(ge=1)
+    actual_batch_size_verified: bool = False
+    actual_call_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    snapshot_evidence: dict[str, Any] = Field(default_factory=dict)
+    device_evidence: dict[str, Any] = Field(default_factory=dict)
+    dataset_row_identity: dict[str, Any] = Field(default_factory=dict)
+    timing_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    memory_phase_evidence: list[dict[str, Any]] = Field(default_factory=list)
     software_versions: dict[str, str]
 
 
@@ -214,6 +269,21 @@ class RKVWorkerResult(BaseModel):
     peak_cuda_reserved_bytes: int = Field(ge=0)
     every_parameter_on_cuda: bool
     batch_size: int = Field(ge=1)
+    actual_batch_size_verified: bool = False
+    actual_call_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    snapshot_evidence: dict[str, Any] = Field(default_factory=dict)
+    device_evidence: dict[str, Any] = Field(default_factory=dict)
+    selected_event_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    attempted_pair_identities: list[dict[str, Any]] = Field(default_factory=list)
+    completed_pair_identities: list[dict[str, Any]] = Field(default_factory=list)
+    failed_pair_identities: list[dict[str, Any]] = Field(default_factory=list)
+    no_op_identity: dict[str, Any] | None = None
+    semantic_mutation_reports: list[dict[str, Any]] = Field(default_factory=list)
+    no_op_evidence: dict[str, Any] = Field(default_factory=dict)
+    replay_evidence: dict[str, Any] = Field(default_factory=dict)
+    dataset_row_identity: dict[str, Any] = Field(default_factory=dict)
+    timing_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    memory_phase_evidence: list[dict[str, Any]] = Field(default_factory=list)
     software_versions: dict[str, str]
 
 
@@ -243,6 +313,10 @@ class WorkerCoordinationResult:
     rkv: RKVWorkerResult
     shared_identity_ok: bool
     shared_identity_mismatches: tuple[str, ...]
+    attempt_directory: str | None = None
+    return_codes: dict[str, int] | None = None
+    timeout_state: dict[str, bool] | None = None
+    partial_success: bool = False
 
 
 def _default_python_executable() -> str:
@@ -302,6 +376,7 @@ def _launch_worker(
     python_executable: str,
     subprocess_runner: SubprocessRunner,
     timeout_seconds: int,
+    attempt_id: str | None = None,
 ) -> subprocess.CompletedProcess:
     """B1B-R4 §16: every worker subprocess is launched with `capture_output
     =True, text=True, timeout=B2A_WORKER_TIMEOUT_SECONDS, check=False` --
@@ -315,6 +390,8 @@ def _launch_worker(
         python_executable, "-m", "kvcot.discovery.b2a_worker_entry",
         "--role", role, "--config", config_path, "--manifest", manifest_path, "--output", str(output_path),
     ]
+    if attempt_id is not None:
+        argv.extend(["--attempt-id", attempt_id])
     return subprocess_runner(
         argv, capture_output=True, text=True, timeout=timeout_seconds, check=False,
         env=_worker_subprocess_env(config_path),
@@ -327,6 +404,7 @@ def run_both_workers_via_subprocess(
     *,
     python_executable: str | None = None,
     subprocess_runner: SubprocessRunner = subprocess.run,
+    attempt_directory: Path | None = None,
 ) -> WorkerCoordinationResult:
     """The coordinator's one entry point: creates a unique temp directory,
     launches the FullKV and R-KV workers as SEPARATE subprocess invocations
@@ -345,21 +423,56 @@ def run_both_workers_via_subprocess(
     from kvcot.discovery.constants import B2A_WORKER_TIMEOUT_SECONDS
 
     python_executable = python_executable or _default_python_executable()
-    tmp_dir = Path(tempfile.mkdtemp(prefix="kvcot-b2a-workers-"))
+    tmp_dir = attempt_directory or Path(tempfile.mkdtemp(prefix="kvcot-b2a-workers-"))
+    preserve = attempt_directory is not None
+    attempt_id = tmp_dir.name.rsplit("_", 1)[-1] if preserve else None
     try:
-        fullkv_output = tmp_dir / "fullkv_result.json"
-        rkv_output = tmp_dir / "rkv_result.json"
+        fullkv_output = tmp_dir / "fullkv" / "result.json" if preserve else tmp_dir / "fullkv_result.json"
+        rkv_output = tmp_dir / "rkv" / "result.json" if preserve else tmp_dir / "rkv_result.json"
+
+        def preserve_command(role: str, output: Path) -> None:
+            if not preserve:
+                return
+            from kvcot.discovery.attempt_artifacts import atomic_write_json
+
+            atomic_write_json(
+                tmp_dir / role / "command.json",
+                {
+                    "argv": [python_executable, "-m", "kvcot.discovery.b2a_worker_entry", "--role", role,
+                             "--config", config_path, "--manifest", manifest_path, "--output", str(output),
+                             "--attempt-id", attempt_id],
+                    "timeout_seconds": B2A_WORKER_TIMEOUT_SECONDS,
+                    "check": False,
+                    "capture_output": True,
+                },
+            )
+
+        def preserve_timeout_logs(role: str, exc: subprocess.TimeoutExpired) -> None:
+            if not preserve:
+                return
+            from kvcot.discovery.attempt_artifacts import atomic_write_text
+
+            stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            atomic_write_text(tmp_dir / role / "stdout.log", stdout)
+            atomic_write_text(tmp_dir / role / "stderr.log", stderr)
 
         try:
+            preserve_command("fullkv", fullkv_output)
             fullkv_proc = _launch_worker(
                 "fullkv", config_path, manifest_path, fullkv_output, python_executable, subprocess_runner,
-                B2A_WORKER_TIMEOUT_SECONDS,
+                B2A_WORKER_TIMEOUT_SECONDS, attempt_id,
             )
         except subprocess.TimeoutExpired as exc:
+            preserve_timeout_logs("fullkv", exc)
             err = WorkerFailedError(f"fullkv worker timed out after {B2A_WORKER_TIMEOUT_SECONDS}s: {exc}")
             err.partial_fullkv_result = None  # type: ignore[attr-defined]
             err.timed_out = True  # type: ignore[attr-defined]
             raise err from exc
+        if preserve:
+            from kvcot.discovery.attempt_artifacts import atomic_write_text
+            atomic_write_text(tmp_dir / "fullkv" / "stdout.log", getattr(fullkv_proc, "stdout", "") or "")
+            atomic_write_text(tmp_dir / "fullkv" / "stderr.log", getattr(fullkv_proc, "stderr", "") or "")
         if fullkv_proc.returncode != 0:
             err = WorkerFailedError(
                 f"fullkv worker exited with code {fullkv_proc.returncode}: "
@@ -371,17 +484,25 @@ def run_both_workers_via_subprocess(
         if not fullkv_output.exists():
             raise WorkerFailedError(f"fullkv worker reported success but wrote no output file at {fullkv_output}")
         fullkv_result = FullKVWorkerResult.model_validate_json(fullkv_output.read_text(encoding="utf-8"))
+        if preserve:
+            _validate_atomic_worker_envelope(fullkv_output, "fullkv", fullkv_result.model_dump(mode="json"))
 
         try:
+            preserve_command("rkv", rkv_output)
             rkv_proc = _launch_worker(
                 "rkv", config_path, manifest_path, rkv_output, python_executable, subprocess_runner,
-                B2A_WORKER_TIMEOUT_SECONDS,
+                B2A_WORKER_TIMEOUT_SECONDS, attempt_id,
             )
         except subprocess.TimeoutExpired as exc:
+            preserve_timeout_logs("rkv", exc)
             err = WorkerFailedError(f"rkv worker timed out after {B2A_WORKER_TIMEOUT_SECONDS}s: {exc}")
             err.partial_fullkv_result = fullkv_result  # type: ignore[attr-defined]
             err.timed_out = True  # type: ignore[attr-defined]
             raise err from exc
+        if preserve:
+            from kvcot.discovery.attempt_artifacts import atomic_write_text
+            atomic_write_text(tmp_dir / "rkv" / "stdout.log", getattr(rkv_proc, "stdout", "") or "")
+            atomic_write_text(tmp_dir / "rkv" / "stderr.log", getattr(rkv_proc, "stderr", "") or "")
         if rkv_proc.returncode != 0:
             err = WorkerFailedError(
                 f"rkv worker exited with code {rkv_proc.returncode}: "
@@ -396,14 +517,54 @@ def run_both_workers_via_subprocess(
             raise err
 
         rkv_result = RKVWorkerResult.model_validate_json(rkv_output.read_text(encoding="utf-8"))
+        if preserve:
+            _validate_atomic_worker_envelope(rkv_output, "rkv", rkv_result.model_dump(mode="json"))
+
+            from kvcot.discovery.attempt_artifacts import atomic_write_json
+
+            for role, output, result in (("fullkv", fullkv_output, fullkv_result), ("rkv", rkv_output, rkv_result)):
+                envelope_path = output.with_suffix(output.suffix + ".envelope.json")
+                atomic_write_json(tmp_dir / role / "envelope.json", __import__("json").loads(envelope_path.read_text("utf-8")))
+                atomic_write_json(tmp_dir / role / "timing.json", result.timing_evidence)
+                atomic_write_json(tmp_dir / role / "memory.json", result.memory_phase_evidence)
+            atomic_write_json(tmp_dir / "rkv" / "pair_identities.json", {
+                "attempted": rkv_result.attempted_pair_identities,
+                "completed": rkv_result.completed_pair_identities,
+                "failed": rkv_result.failed_pair_identities,
+                "no_op": rkv_result.no_op_identity,
+            })
+            atomic_write_json(tmp_dir / "rkv" / "semantic_swaps.json", rkv_result.semantic_mutation_reports)
+            atomic_write_json(tmp_dir / "rkv" / "replay_evidence.json", rkv_result.replay_evidence)
 
         shared_ok, mismatches = validate_shared_identity(fullkv_result, rkv_result)
         return WorkerCoordinationResult(
             fullkv=fullkv_result, rkv=rkv_result, shared_identity_ok=shared_ok,
             shared_identity_mismatches=tuple(mismatches),
+            attempt_directory=str(tmp_dir) if preserve else None,
+            return_codes={"fullkv": int(fullkv_proc.returncode), "rkv": int(rkv_proc.returncode)},
+            timeout_state={"fullkv": False, "rkv": False},
+            partial_success=False,
         )
     finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        if not preserve:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _validate_atomic_worker_envelope(output_path: Path, role: str, result_payload: dict[str, Any]) -> None:
+    from kvcot.discovery.worker_envelope import WorkerEnvelope
+    from kvcot.utils.hashing import sha256_json
+
+    envelope_path = output_path.with_suffix(output_path.suffix + ".envelope.json")
+    if not envelope_path.is_file():
+        raise WorkerFailedError(f"{role} worker result has no valid atomic envelope")
+    envelope = WorkerEnvelope.model_validate_json(envelope_path.read_text(encoding="utf-8"))
+    if not envelope.success or envelope.role != role:
+        raise WorkerFailedError(f"{role} worker envelope does not attest successful role-matched completion")
+    expected_hash = sha256_json(result_payload)
+    if envelope.result_sha256 != expected_hash:
+        raise WorkerFailedError(
+            f"{role} worker envelope result hash mismatch: {envelope.result_sha256} != {expected_hash}"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -428,7 +589,7 @@ class _RkvHarnessInstrumentation:
     `prefill_decode_boundary_parity` compares two genuinely independently-
     observed traces."""
 
-    def __init__(self, prefill_fn, decode_one_fn, snapshot_fn):
+    def __init__(self, prefill_fn, decode_one_fn, snapshot_fn, timer=None):
         self._prefill_fn = prefill_fn
         self._decode_one_fn = decode_one_fn
         self._snapshot_fn = snapshot_fn
@@ -438,6 +599,15 @@ class _RkvHarnessInstrumentation:
         self.pass1_wall_seconds = 0.0
         self.pass2_wall_seconds = 0.0
         self.targeted_capture_wall_seconds = 0.0
+        self.timer = timer
+
+    def _timed(self, phase, operation):
+        if self.timer is None:
+            start = time.perf_counter()
+            result = operation()
+            return result, time.perf_counter() - start
+        result = self.timer.measure(phase, operation)
+        return result, self.timer.records[-1].duration_seconds
 
     def _active_recorder(self) -> CallTraceRecorder:
         return self.pass1_trace if self._prefill_call_count <= 1 else self.pass2_trace
@@ -447,9 +617,10 @@ class _RkvHarnessInstrumentation:
         recorder = self._active_recorder()
         prompt_token_ids = list(prompt_token_ids)
         recorder.events.append(CallBoundaryEvent(kind="prefill", token_ids=tuple(prompt_token_ids)))
-        start = time.monotonic()
-        result = self._prefill_fn(state, prompt_token_ids)
-        elapsed = time.monotonic() - start
+        pass_name = "pass1" if self._prefill_call_count <= 1 else "pass2"
+        result, elapsed = self._timed(
+            f"rkv_{pass_name}_prefill", lambda: self._prefill_fn(state, prompt_token_ids)
+        )
         if self._prefill_call_count <= 1:
             self.pass1_wall_seconds += elapsed
         else:
@@ -459,9 +630,10 @@ class _RkvHarnessInstrumentation:
     def decode_one(self, state, token_id):
         recorder = self._active_recorder()
         recorder.events.append(CallBoundaryEvent(kind="decode", token_ids=(token_id,)))
-        start = time.monotonic()
-        result = self._decode_one_fn(state, token_id)
-        elapsed = time.monotonic() - start
+        pass_name = "pass1" if self._prefill_call_count <= 1 else "pass2"
+        result, elapsed = self._timed(
+            f"rkv_{pass_name}_decode", lambda: self._decode_one_fn(state, token_id)
+        )
         if self._prefill_call_count <= 1:
             self.pass1_wall_seconds += elapsed
         else:
@@ -478,17 +650,15 @@ class _RkvHarnessInstrumentation:
         # contained in Pass 2 total") -- `targeted_capture_wall_seconds`
         # remains a diagnostic BREAKDOWN of that same time, never a second,
         # additional measurement the coordinator's projection also sums.
-        start = time.monotonic()
-        result = self._snapshot_fn(state)
-        elapsed = time.monotonic() - start
+        result, elapsed = self._timed("snapshot_creation", lambda: self._snapshot_fn(state))
         self.targeted_capture_wall_seconds += elapsed
         self.pass2_wall_seconds += elapsed
         return result
 
 
 # --------------------------------------------------------------------------
-# Canonical worker bodies (B1B-R4 §19). GPU-only -- never invoked by any
-# test or code path in this pass except via injected fake backends
+# Canonical worker bodies (B1B-R4 §19). GPU-only in production; CPU tests
+# exercise these bodies only via injected fake backends
 # (`tests/unit/discovery/test_b2a_workers_real_bodies.py`). Called only from
 # `kvcot.discovery.b2a_worker_entry`'s `__main__` block, itself only ever
 # launched as a subprocess by `run_both_workers_via_subprocess` above.
@@ -503,7 +673,9 @@ def run_fullkv_worker(
     _load_tokenizer: Callable[[], Any] | None = None,
     _fresh_cache_factory: Callable[[], Any] | None = None,
     _cuda: Any | None = None,
-    _device: str = "cuda",
+    _device: str = "cuda:0",
+    _clock: Callable[[], float] | None = None,
+    _progress: Callable[[str, str, dict[str, Any] | None], None] | None = None,
 ) -> dict:
     """Runs exactly one frozen example through stock FullKV using the
     IDENTICAL greedy natural-run loop R-KV's Pass 1 uses
@@ -513,8 +685,8 @@ def run_fullkv_worker(
     `temperature`/`top_p`/`generator`), argmax token selection, EOS never
     appended or fed, exactly one prefill call, one decode call per
     generated token. Reports identity/timing/memory/answer/call-boundary
-    evidence (B1B-R4 §6/§9/§10/§11/§14). Requires CUDA; never invoked in
-    this pass except via an injected fake backend in a CPU test.
+    evidence (B1B-R4 §6/§9/§10/§11/§14). Requires CUDA in production;
+    CPU tests use an injected fake backend.
 
     B1B-R4 §20: `_load_model`/`_load_tokenizer`/`_fresh_cache_factory`/
     `_cuda`/`_device` are internal, underscore-prefixed dependency-injection
@@ -530,6 +702,7 @@ def run_fullkv_worker(
     import torch
 
     from kvcot.discovery.discovery_config import canonical_config_hash
+    from kvcot.discovery.execution_measurement import CudaMemoryMeasurer, SynchronizedTimer
     from kvcot.discovery.framework_seed import apply_framework_seed
     from kvcot.discovery.math500_verification import build_math500_answer_fn
     from kvcot.discovery.no_offload import assert_no_offloaded_parameters
@@ -543,7 +716,6 @@ def run_fullkv_worker(
         RESET_POINT_AFTER_LOAD_BEFORE_INFERENCE,
         MemoryEvidence,
         build_runtime_generation_record,
-        derive_batch_size_from_input_ids,
         derive_parameter_placement,
         derive_runtime_identity,
     )
@@ -552,6 +724,7 @@ def run_fullkv_worker(
     from kvcot.generation.state import reset_patched_state
 
     cuda = _cuda if _cuda is not None else torch.cuda
+    _progress = _progress or _production_progress_callback("fullkv")
     cuda_available = bool(cuda.is_available())
     if not cuda_available and _load_model is None:
         # Only the REAL (unfaked) production path requires CUDA -- a CPU
@@ -560,39 +733,85 @@ def run_fullkv_worker(
         # ran anything.
         raise WorkerFailedError("run_fullkv_worker requires CUDA; none is available.")
 
+    timer = SynchronizedTimer(cuda, _clock or time.perf_counter)
+    memory_meter = CudaMemoryMeasurer(cuda)
+    complete_worker_started_at = timer.begin_span()
+
+    def measured(phase, operation):
+        result = timer.measure(phase, lambda: memory_meter.observe(phase, operation))
+        if _progress is not None:
+            _progress(_progress_stage_for_phase(phase), "completed", {"timing_phase": phase})
+        return result
+
+    measured("before_model_load", lambda: None)
+
     # B1B-R4 §6: applied independently in THIS worker's own process, before
     # any model inference -- never assumed shared with the R-KV worker
     # process (a separate OS process, per B1B-R3 §11's process-separation
     # requirement).
-    determinism_policy = apply_framework_seed(
-        config.generation.framework_seed, config.generation.attention_backend, cuda_available=cuda_available,
+    determinism_policy = timer.measure(
+        "fullkv_worker_startup",
+        lambda: apply_framework_seed(
+            config.generation.framework_seed, config.generation.attention_backend, cuda_available=cuda_available,
+        ),
     )
 
-    if _load_model is not None:
-        model = _load_model()
-    else:
-        from kvcot.generation.policies import FullKVPolicy
+    model_snapshot = None
+    tokenizer_snapshot = None
+    device_evidence: dict[str, Any] = {"verified": False, "reason": "injected test backend"}
+    if _load_model is None:
+        from kvcot.discovery.snapshot_boundary import resolve_local_snapshot
+        from kvcot.discovery.strict_device import verify_single_rtx3090
 
-        policy = FullKVPolicy()
-        model = policy.load(
-            config.model.name, config.model.revision, getattr(torch, config.model.dtype),
-            config.generation.attention_backend,
-        )
-    assert_no_offloaded_parameters(model)
-    parameter_placement = derive_parameter_placement(model)
+        device = verify_single_rtx3090(cuda, torch_module=torch)
+        device_evidence = {"verified": True, **device.__dict__}
+
+        def resolve_snapshots():
+            return (
+                resolve_local_snapshot(config.model.name, config.model.revision, "model"),
+                resolve_local_snapshot(config.model.tokenizer_name, config.model.tokenizer_revision, "tokenizer"),
+            )
+
+        model_snapshot, tokenizer_snapshot = timer.measure("snapshot_tokenizer_resolution", resolve_snapshots)
+        if _progress is not None:
+            _progress("snapshot resolution", "completed", None)
+        if model_snapshot.free_bytes < model_snapshot.total_bytes:
+            raise WorkerFailedError("insufficient free disk relative to verified local model snapshot size")
+    else:
+        timer.measure("snapshot_tokenizer_resolution", lambda: (None, None))
 
     if _load_tokenizer is not None:
-        tokenizer = _load_tokenizer()
+        tokenizer = measured("tokenizer_load", _load_tokenizer)
     else:
         from transformers import AutoTokenizer
 
-        tokenizer = AutoTokenizer.from_pretrained(
-            config.model.tokenizer_name, revision=config.model.tokenizer_revision, use_fast=True
+        tokenizer = measured(
+            "tokenizer_load",
+            lambda: AutoTokenizer.from_pretrained(
+                tokenizer_snapshot.local_path, local_files_only=True, use_fast=True
+            ),
+        )
+    if _progress is not None:
+        _progress("model-load start", "started", None)
+    if _load_model is not None:
+        model = measured("model_load", _load_model)
+    else:
+        from kvcot.discovery.strict_device import load_fullkv_discovery_model
+
+        model = measured(
+            "model_load", lambda: load_fullkv_discovery_model(config, model_snapshot.local_path, _device)
         )
     runtime_identity = derive_runtime_identity(
         model=model, tokenizer=tokenizer, requested_model_revision=config.model.revision,
         requested_tokenizer_revision=config.model.tokenizer_revision,
+        verified_model_revision=None if model_snapshot is None else model_snapshot.resolved_revision,
+        verified_tokenizer_revision=None if tokenizer_snapshot is None else tokenizer_snapshot.resolved_revision,
     )
+    def validate_post_load():
+        assert_no_offloaded_parameters(model)
+        return derive_parameter_placement(model)
+
+    parameter_placement = timer.measure("post_load_validation", validate_post_load)
 
     num_layers = len(model.model.layers)
     num_kv_heads = model.config.num_key_value_heads
@@ -600,10 +819,7 @@ def run_fullkv_worker(
     # B1B-R4 §14: reset peak memory stats AFTER load, BEFORE measured
     # inference -- current model allocation is therefore included in the
     # reset baseline, matching the R-KV worker's identical reset point.
-    cuda.synchronize()
-    allocated_before = int(cuda.memory_allocated())
-    reserved_before = int(cuda.memory_reserved())
-    cuda.reset_peak_memory_stats()
+    measured("post_load_baseline", lambda: None)
 
     if _fresh_cache_factory is not None:
         cache_factory = _fresh_cache_factory
@@ -620,10 +836,23 @@ def run_fullkv_worker(
     )
 
     prompt_token_ids = list(manifest.prompt_token_ids)
-    batch_size = derive_batch_size_from_input_ids(torch.tensor([prompt_token_ids]))
+    actual_calls = ActualModelCallRecorder()
+    raw_prefill = build_real_prefill_fn(_device, actual_calls)
+    raw_decode = build_real_decode_one_fn(_device, actual_calls)
 
-    recorder = CallTraceRecorder(build_real_prefill_fn(_device), build_real_decode_one_fn(_device))
-    answer_fn = build_math500_answer_fn(tokenizer, manifest.gold_answer)
+    def timed_prefill(state, tokens):
+        return timer.measure("fullkv_prefill", lambda: raw_prefill(state, tokens))
+
+    def timed_decode(state, token):
+        return timer.measure("fullkv_decode", lambda: raw_decode(state, token))
+
+    recorder = CallTraceRecorder(
+        timed_prefill, timed_decode
+    )
+    raw_answer_fn = build_math500_answer_fn(tokenizer, manifest.gold_answer)
+
+    def answer_fn(ids):
+        return timer.measure("answer_verification", lambda: raw_answer_fn(ids))
     provenance_record = NaturalRunProvenance(
         model_name=config.model.name, model_revision=config.model.revision,
         tokenizer_name=config.model.tokenizer_name, tokenizer_revision=config.model.tokenizer_revision,
@@ -631,20 +860,32 @@ def run_fullkv_worker(
         dataset_name=manifest.dataset_repo, example_id=manifest.unique_id,
     )
 
-    start = time.monotonic()
-    trace = run_natural_pass1(
-        provenance_record, prompt_token_ids, state, recorder.prefill, recorder.decode_one,
-        config.generation.max_new_tokens, tokenizer.eos_token_id, answer_fn,
+    trace = measured(
+        "fullkv_complete_natural_generation",
+        lambda: run_natural_pass1(
+            provenance_record, prompt_token_ids, state, recorder.prefill, recorder.decode_one,
+            config.generation.max_new_tokens, tokenizer.eos_token_id, answer_fn,
+        ),
     )
-    wall_seconds = time.monotonic() - start
+    wall_seconds = next(
+        record.duration_seconds for record in timer.records
+        if record.phase == "fullkv_complete_natural_generation"
+    )
 
-    cuda.synchronize()
-    peak_allocated = int(cuda.max_memory_allocated())
-    peak_reserved = int(cuda.max_memory_reserved())
+    if not actual_calls.batch_size_verified:
+        raise WorkerFailedError("no valid actual model-call batch evidence was recorded")
+    batch_size = actual_calls.events[0].batch_size
+
+    memory_meter.observe("fullkv_complete_worker", lambda: None)
+    timer.finish_span("fullkv_complete_worker", complete_worker_started_at)
+    peak_allocated = memory_meter.maximum_peak_allocated
+    peak_reserved = memory_meter.maximum_peak_reserved
+    first_memory = memory_meter.records[0]
     memory = MemoryEvidence(
-        allocated_before_reset_bytes=allocated_before, reserved_before_reset_bytes=reserved_before,
+        allocated_before_reset_bytes=first_memory.allocated_before,
+        reserved_before_reset_bytes=first_memory.reserved_before,
         peak_allocated_bytes=peak_allocated, peak_reserved_bytes=peak_reserved,
-        reset_point=RESET_POINT_AFTER_LOAD_BEFORE_INFERENCE,
+        reset_point="explicit_phase_owned_resets",
     )
 
     runtime_generation = build_runtime_generation_record(
@@ -680,6 +921,28 @@ def run_fullkv_worker(
         peak_cuda_reserved_bytes=peak_reserved,
         every_parameter_on_cuda=parameter_placement.every_parameter_on_cuda,
         batch_size=batch_size,
+        actual_batch_size_verified=actual_calls.batch_size_verified,
+        actual_call_evidence=actual_calls.export(),
+        snapshot_evidence={
+            "verified": model_snapshot is not None and tokenizer_snapshot is not None,
+            "model": None if model_snapshot is None else model_snapshot.__dict__,
+            "tokenizer": None if tokenizer_snapshot is None else tokenizer_snapshot.__dict__,
+        },
+        device_evidence=device_evidence,
+        dataset_row_identity={
+            "dataset_repo": manifest.dataset_repo,
+            "dataset_revision": manifest.dataset_revision,
+            "example_index": manifest.example_index,
+            "unique_id": manifest.unique_id,
+            "raw_content_hash": getattr(manifest, "raw_content_hash", None),
+            "manifest_canonical_hash": manifest.manifest_hash(),
+            "rendered_user_message_sha256": getattr(manifest, "rendered_user_message_sha256", None),
+            "chat_template_source_sha256": getattr(manifest, "chat_template_source_sha256", None),
+            "prompt_token_ids_sha256": manifest.prompt_token_ids_sha256,
+            "prompt_token_count": len(prompt_token_ids),
+        },
+        timing_evidence=timer.export(),
+        memory_phase_evidence=memory_meter.export(),
         software_versions={"torch": torch.__version__},
     ).model_dump(mode="json")
 
@@ -692,15 +955,17 @@ def run_rkv_worker(
     _load_tokenizer: Callable[[], Any] | None = None,
     _fresh_cache_factory: Callable[[], Any] | None = None,
     _cuda: Any | None = None,
-    _device: str = "cuda",
+    _device: str = "cuda:0",
+    _clock: Callable[[], float] | None = None,
+    _progress: Callable[[str, str, dict[str, Any] | None], None] | None = None,
 ) -> dict:
     """Runs Pass 1, Pass 2, targeted capture, branch evaluation, and the
     B2A single no-op calibration for exactly one example under R-KV, and
     reports the resulting evidence (B1B-R4 §19: the ONE canonical R-KV
     worker body -- supersedes the B1B-R3 split between a `NotImplementedError`
     stub here and the real body in `kvcot.discovery.b2a_execute
-    .run_rkv_worker_body`). Requires CUDA; never invoked in this pass except
-    via an injected fake backend in a CPU test. Delegates the actual pass/
+    .run_rkv_worker_body`). Requires CUDA in production; CPU tests use an
+    injected fake backend. Delegates the actual pass/
     branch machinery entirely to `kvcot.discovery.orchestrator.run_example`
     -- never a second, independently-written execution path.
 
@@ -729,6 +994,11 @@ def run_rkv_worker(
     from kvcot.discovery.constants import B2A_NOOP_PAIR_EVALUATIONS_TOTAL, NoOpMode
     from kvcot.discovery.discovery_config import canonical_config_hash
     from kvcot.discovery.framework_seed import apply_framework_seed
+    from kvcot.discovery.execution_measurement import (
+        CudaMemoryMeasurer,
+        SynchronizedTimer,
+        check_pre_branch_memory,
+    )
     from kvcot.discovery.math500_verification import build_math500_answer_fn
     from kvcot.discovery.no_offload import assert_no_offloaded_parameters
     from kvcot.discovery.orchestrator import PairExecutionPolicy, run_example
@@ -744,7 +1014,6 @@ def run_rkv_worker(
         RESET_POINT_AFTER_LOAD_BEFORE_INFERENCE,
         MemoryEvidence,
         build_runtime_generation_record,
-        derive_batch_size_from_input_ids,
         derive_parameter_placement,
         derive_runtime_identity,
     )
@@ -755,56 +1024,99 @@ def run_rkv_worker(
     from kvcot.generation.state import reset_patched_state
 
     cuda = _cuda if _cuda is not None else torch.cuda
+    _progress = _progress or _production_progress_callback("rkv")
     cuda_available = bool(cuda.is_available())
     if not cuda_available and _load_model is None:
         raise WorkerFailedError("run_rkv_worker requires CUDA; none is available.")
 
-    determinism_policy = apply_framework_seed(
-        config.generation.framework_seed, config.generation.attention_backend, cuda_available=cuda_available,
+    timer = SynchronizedTimer(cuda, _clock or time.perf_counter)
+    memory_meter = CudaMemoryMeasurer(cuda)
+    complete_worker_started_at = timer.begin_span()
+
+    def measured(phase, operation):
+        result = timer.measure(phase, lambda: memory_meter.observe(phase, operation))
+        if _progress is not None:
+            _progress(_progress_stage_for_phase(phase), "completed", {"timing_phase": phase})
+        return result
+
+    measured("before_model_load", lambda: None)
+
+    determinism_policy = timer.measure(
+        "rkv_worker_startup",
+        lambda: apply_framework_seed(
+            config.generation.framework_seed, config.generation.attention_backend, cuda_available=cuda_available,
+        ),
     )
 
-    if _load_model is not None:
-        model = _load_model()
+    model_snapshot = None
+    tokenizer_snapshot = None
+    device_evidence: dict[str, Any] = {"verified": False, "reason": "injected test backend"}
+    if _load_model is None:
+        from kvcot.discovery.snapshot_boundary import resolve_local_snapshot
+        from kvcot.discovery.strict_device import verify_single_rtx3090
+
+        device = verify_single_rtx3090(cuda, torch_module=torch)
+        device_evidence = {"verified": True, **device.__dict__}
+
+        def resolve_snapshots():
+            return (
+                resolve_local_snapshot(config.model.name, config.model.revision, "model"),
+                resolve_local_snapshot(config.model.tokenizer_name, config.model.tokenizer_revision, "tokenizer"),
+            )
+
+        model_snapshot, tokenizer_snapshot = timer.measure("snapshot_tokenizer_resolution", resolve_snapshots)
+        if _progress is not None:
+            _progress("snapshot resolution", "completed", None)
+        if model_snapshot.free_bytes < model_snapshot.total_bytes:
+            raise WorkerFailedError("insufficient free disk relative to verified local model snapshot size")
     else:
-        from kvcot.generation.policies import RKVPolicy
+        timer.measure("snapshot_tokenizer_resolution", lambda: (None, None))
 
-        policy = RKVPolicy(
-            budget=config.rkv.budget, window_size=config.rkv.window_size, mix_lambda=config.rkv.mix_lambda,
-            retain_ratio=config.rkv.retain_ratio, retain_direction=config.rkv.retain_direction,
-            divide_method=config.rkv.divide_method, divide_length=config.rkv.divide_length,
-            compression_content=config.rkv.compression_content, kernel_size=config.rkv.kernel_size,
+    if _load_tokenizer is not None:
+        tokenizer = measured("tokenizer_load", _load_tokenizer)
+    else:
+        from transformers import AutoTokenizer
+
+        tokenizer = measured(
+            "tokenizer_load",
+            lambda: AutoTokenizer.from_pretrained(
+                tokenizer_snapshot.local_path, local_files_only=True, use_fast=True
+            ),
         )
-        dtype = getattr(torch, config.model.dtype)
-        model = policy.load(config.model.name, config.model.revision, dtype, config.generation.attention_backend)
-    assert_no_offloaded_parameters(model)
-    parameter_placement = derive_parameter_placement(model)
+    if _progress is not None:
+        _progress("model-load start", "started", None)
+    if _load_model is not None:
+        model = measured("model_load", _load_model)
+    else:
+        from kvcot.discovery.strict_device import load_rkv_discovery_model
 
+        model = measured(
+            "model_load",
+            lambda: load_rkv_discovery_model(
+                config, model_snapshot.local_path, tokenizer_snapshot.local_path, _device
+            ),
+        )
     runtime_check = verify_runtime_matches_frozen(config.rkv, model)
     if not runtime_check.passed:
         raise WorkerFailedError(
             f"runtime R-KV configuration disagrees with the frozen config on: {runtime_check.mismatched_fields} "
             f"(frozen_hash={runtime_check.frozen_hash}, runtime_hash={runtime_check.runtime_hash})"
         )
-
-    if _load_tokenizer is not None:
-        tokenizer = _load_tokenizer()
-    else:
-        from transformers import AutoTokenizer
-
-        tokenizer = AutoTokenizer.from_pretrained(
-            config.model.tokenizer_name, revision=config.model.tokenizer_revision, use_fast=True
-        )
     runtime_identity = derive_runtime_identity(
         model=model, tokenizer=tokenizer, requested_model_revision=config.model.revision,
         requested_tokenizer_revision=config.model.tokenizer_revision,
+        verified_model_revision=None if model_snapshot is None else model_snapshot.resolved_revision,
+        verified_tokenizer_revision=None if tokenizer_snapshot is None else tokenizer_snapshot.resolved_revision,
     )
+    def validate_post_load():
+        assert_no_offloaded_parameters(model)
+        return derive_parameter_placement(model)
+
+    parameter_placement = timer.measure("post_load_validation", validate_post_load)
     num_layers = len(model.model.layers)
     num_kv_heads = model.config.num_key_value_heads
 
-    cuda.synchronize()
-    allocated_before = int(cuda.memory_allocated())
-    reserved_before = int(cuda.memory_reserved())
-    cuda.reset_peak_memory_stats()
+    measured("post_load_baseline", lambda: None)
 
     if _fresh_cache_factory is not None:
         cache_factory = _fresh_cache_factory
@@ -821,8 +1133,12 @@ def run_rkv_worker(
             absolute_position=0, device=_device,
         )
 
+    actual_calls = ActualModelCallRecorder()
     instrumented = _RkvHarnessInstrumentation(
-        build_real_prefill_fn(_device), build_real_decode_one_fn(_device), build_real_snapshot_fn(),
+        build_real_prefill_fn(_device, actual_calls),
+        build_real_decode_one_fn(_device, actual_calls),
+        build_real_snapshot_fn(),
+        timer,
     )
 
     identity = IdentitySeedParts(
@@ -831,6 +1147,9 @@ def run_rkv_worker(
         rkv_revision=config.rkv.upstream_revision,
     )
     answer_verifier = build_math500_answer_fn(tokenizer, manifest.gold_answer)
+
+    def timed_answer_verifier(ids):
+        return timer.measure("answer_verification", lambda: answer_verifier(ids))
     provenance_record = NaturalRunProvenance(
         model_name=config.model.name, model_revision=config.model.revision,
         tokenizer_name=config.model.tokenizer_name, tokenizer_revision=config.model.tokenizer_revision,
@@ -840,10 +1159,25 @@ def run_rkv_worker(
 
     prompt_token_ids = list(manifest.prompt_token_ids)
     assert len(prompt_token_ids) > 0, "structurally impossible: an empty prompt must never reach Pass 1"
-    batch_size = derive_batch_size_from_input_ids(torch.tensor([prompt_token_ids]))
 
     example_attrition = AttritionCounters()
     pair_attrition = AttritionCounters()
+
+    vocab_size = int(getattr(model.config, "vocab_size", 0))
+    if vocab_size <= 0:
+        raise WorkerFailedError("model.config.vocab_size must be positive for the pre-branch memory guard")
+
+    def _pre_branch_guard(target, kind):
+        # log-softmax materializes float32 output alongside the current
+        # vocabulary logits; account for both using the actual vocabulary.
+        known_temporary_bytes = 2 * vocab_size * 4
+        return check_pre_branch_memory(
+            phase=f"{kind}:{target.event_plan.compaction_event_id}",
+            cuda=cuda,
+            snapshot=target.pristine_snapshot,
+            selected_vector_bytes=target.persistent_tensor_bytes,
+            known_temporary_bytes=known_temporary_bytes,
+        )
 
     example_result = run_example(
         example_id=manifest.unique_id, model_revision=config.model.revision,
@@ -852,15 +1186,36 @@ def run_rkv_worker(
         pass2_initial_state_factory=_fresh_state, prefill_fn=instrumented.prefill,
         decode_one_fn=instrumented.decode_one, snapshot_fn=instrumented.snapshot,
         max_new_tokens=config.generation.max_new_tokens, eos_token_id=tokenizer.eos_token_id,
-        answer_fn=answer_verifier, num_hidden_layers=num_layers, num_key_value_heads=num_kv_heads,
-        identity=identity, branch_step_fn=build_real_branch_step_fn_restore_once(model, _device),
+        answer_fn=timed_answer_verifier, num_hidden_layers=num_layers, num_key_value_heads=num_kv_heads,
+        identity=identity,
+        branch_step_fn=build_real_branch_step_fn_restore_once(
+            model, _device, actual_calls, consume_owned_snapshot=True
+        ),
         example_attrition=example_attrition, pair_attrition=pair_attrition,
         # B1B-R4 §7: exactly ONE no-op pair evaluation for the whole B2A
         # example, not one per selected event.
         pair_execution_policy=PairExecutionPolicy(no_op_mode=NoOpMode.B2A_SINGLE_CALIBRATION),
+        pre_branch_guard=_pre_branch_guard,
+        operation_runner=measured,
+        pair_phase_runner=timer.measure,
+        # The generic CPU harness retains a monotonic diagnostic default;
+        # execute mode overrides it. Authoritative B2A timing is the
+        # synchronized `measured`/`timer.measure` evidence above.
+        clock_fn=_clock or time.perf_counter,
     )
 
-    call_boundary_comparison = compare_call_boundary_traces(instrumented.pass1_trace, instrumented.pass2_trace)
+    call_boundary_comparison = timer.measure(
+        "capture_and_parity",
+        lambda: compare_call_boundary_traces(instrumented.pass1_trace, instrumented.pass2_trace),
+    )
+    if not actual_calls.batch_size_verified:
+        raise WorkerFailedError("no valid actual model-call batch evidence was recorded")
+    batch_size = actual_calls.events[0].batch_size
+    from kvcot.utils.hashing import sha256_int_ids, sha256_json
+
+    pass1_compaction_positions = [event.absolute_event_position for event in example_result.trace.compaction_events]
+    pass2_compaction_positions = list(example_result.pass2_compaction_event_positions)
+    compaction_lists_match = pass1_compaction_positions == pass2_compaction_positions
     trajectory = derive_trajectory_parity_evidence(
         pass2_result_valid=example_result.valid,
         pass2_invalid_reason=example_result.pass2_invalid_reason,
@@ -871,12 +1226,121 @@ def run_rkv_worker(
         target_capture_absolute_parities=tuple(
             ev.absolute_position_parity_passed for ev in example_result.minimized_target_evidence
         ),
+        compaction_lists_match=compaction_lists_match,
     )
     pair_completion = derive_pair_completion_evidence(trace=example_result.trace, example_result=example_result)
     semantic_swap_checks = derive_semantic_swap_check_evidence(example_result)
     pair_identity = derive_pair_identity_evidence(example_result)
     observed_retention_ratio = derive_observed_retention_ratio(example_result)
     no_op_parity = derive_no_op_numerical_parity(example_result)
+
+    attempted_identities = list(example_result.attempted_pair_identities)
+    completed_identities = list(example_result.completed_pair_identities)
+    completed_keys = {tuple(sorted(identity.items())) for identity in completed_identities}
+    failed_identities = []
+    for identity in attempted_identities:
+        if tuple(sorted(identity.items())) in completed_keys:
+            continue
+        detail = next(
+            (
+                item for item in pair_completion.pair_failure_details
+                if item.compaction_event_id == identity["compaction_event_id"]
+                and item.layer_index == identity["layer_index"]
+                and item.kv_head_index == identity["kv_head_index"]
+                and item.evicted_absolute_position == identity["candidate_absolute_position"]
+                and item.donor_absolute_position == identity["donor_absolute_position"]
+                and item.pair_kind == identity["pair_kind"]
+            ),
+            None,
+        )
+        failed_identities.append({
+            **identity,
+            "failure_stage": None if detail is None else detail.stage,
+            "failure_detail": None if detail is None else detail.detail,
+        })
+    no_op_records = [record for record in example_result.pair_records if record.is_noop_control]
+    no_op_reports = [
+        report for report in example_result.semantic_mutation_reports
+        if report["pair_identity"]["pair_kind"] == "no_op"
+    ]
+    no_op_evidence = {}
+    if len(no_op_records) == 1 and len(no_op_reports) == 1:
+        record = no_op_records[0]
+        report = no_op_reports[0]
+        differences = [abs(a - b) for a, b in zip(record.baseline_per_token_nll, record.swapped_per_token_nll)]
+        no_op_evidence = {
+            "baseline_nll": list(record.baseline_per_token_nll),
+            "no_op_nll": list(record.swapped_per_token_nll),
+            "baseline_nll_sha256": sha256_json(list(record.baseline_per_token_nll)),
+            "no_op_nll_sha256": sha256_json(list(record.swapped_per_token_nll)),
+            "baseline_mean_nll": sum(record.baseline_per_token_nll) / len(record.baseline_per_token_nll),
+            "no_op_mean_nll": sum(record.swapped_per_token_nll) / len(record.swapped_per_token_nll),
+            "mean_difference": record.swap_gain,
+            "maximum_absolute_per_token_difference": max(differences),
+            "starting_snapshot_sha256": report.get("starting_snapshot_sha256"),
+            "semantic_mutation_report": report,
+            "physical_byte_delta": record.net_physical_bytes_changed,
+            "provenance_before_sha256": report.get("provenance_before_sha256"),
+            "provenance_after_sha256": report.get("provenance_after_sha256"),
+            "kept_index_before_sha256": report.get("kept_index_before_sha256"),
+            "kept_index_after_sha256": report.get("kept_index_after_sha256"),
+        }
+    def first_mismatch(left, right):
+        for index, (left_value, right_value) in enumerate(zip(left, right)):
+            if left_value != right_value:
+                return index
+        return None if len(left) == len(right) else min(len(left), len(right))
+
+    pass1_calls = [
+        {"call_kind": event.kind, "token_ids": list(event.token_ids), "token_count": len(event.token_ids)}
+        for event in instrumented.pass1_trace.events
+    ]
+    pass2_calls = [
+        {"call_kind": event.kind, "token_ids": list(event.token_ids), "token_count": len(event.token_ids)}
+        for event in instrumented.pass2_trace.events
+    ]
+    actual_call_export = actual_calls.export()
+    pass1_actual_calls = actual_call_export[: len(pass1_calls)]
+    pass2_actual_calls = actual_call_export[len(pass1_calls) : len(pass1_calls) + len(pass2_calls)]
+    replay_evidence = {
+        "pass1_token_ids": list(example_result.trace.full_token_ids),
+        "pass1_token_sha256": sha256_int_ids(list(example_result.trace.full_token_ids)),
+        "pass2_fed_token_ids": list(example_result.pass2_replayed_token_ids),
+        "pass2_token_sha256": sha256_int_ids(list(example_result.pass2_replayed_token_ids)),
+        "token_first_mismatch": first_mismatch(
+            list(example_result.trace.full_token_ids), list(example_result.pass2_replayed_token_ids)
+        ),
+        "pass1_calls": pass1_calls,
+        "pass2_calls": pass2_calls,
+        "pass1_call_sha256": sha256_json(pass1_calls),
+        "pass2_call_sha256": sha256_json(pass2_calls),
+        "call_first_mismatch": first_mismatch(pass1_calls, pass2_calls),
+        "pass1_actual_calls": pass1_actual_calls,
+        "pass2_actual_calls": pass2_actual_calls,
+        "pass1_actual_call_sha256": sha256_json(pass1_actual_calls),
+        "pass2_actual_call_sha256": sha256_json(pass2_actual_calls),
+        "actual_call_first_mismatch": first_mismatch(pass1_actual_calls, pass2_actual_calls),
+        "pass1_compaction_positions": pass1_compaction_positions,
+        "pass2_compaction_positions": pass2_compaction_positions,
+        "pass1_compaction_sha256": sha256_json(pass1_compaction_positions),
+        "pass2_compaction_sha256": sha256_json(pass2_compaction_positions),
+        "compaction_first_mismatch": first_mismatch(pass1_compaction_positions, pass2_compaction_positions),
+        "complete_compaction_trace_match": compaction_lists_match,
+    }
+    pass1_synchronized_seconds = next(
+        (record.duration_seconds for record in timer.records if record.phase == "rkv_complete_pass1"), 0.0
+    )
+    pass2_synchronized_seconds = next(
+        (record.duration_seconds for record in timer.records if record.phase == "rkv_complete_pass2"), 0.0
+    )
+    real_pair_synchronized_seconds = [
+        record.duration_seconds for record in timer.records
+        if record.phase.startswith("real_pair:") and record.phase.count(":") == 3
+    ]
+    no_op_synchronized_seconds = [
+        record.duration_seconds for record in timer.records
+        if record.phase.startswith("no_op_pair:") and record.phase.count(":") == 3
+    ]
 
     selected_event_count_exact = pair_completion.selected_compaction_events == B2A_SELECTED_EVENTS
     real_pair_count_exact = (
@@ -891,13 +1355,16 @@ def run_rkv_worker(
         real_pair_count_exact and no_op_count_exact and pair_completion.failed_real_pair_count == 0
     )
 
-    cuda.synchronize()
-    peak_allocated = int(cuda.max_memory_allocated())
-    peak_reserved = int(cuda.max_memory_reserved())
+    memory_meter.observe("rkv_complete_worker", lambda: None)
+    timer.finish_span("rkv_complete_worker", complete_worker_started_at)
+    peak_allocated = memory_meter.maximum_peak_allocated
+    peak_reserved = memory_meter.maximum_peak_reserved
+    first_memory = memory_meter.records[0]
     memory = MemoryEvidence(
-        allocated_before_reset_bytes=allocated_before, reserved_before_reset_bytes=reserved_before,
+        allocated_before_reset_bytes=first_memory.allocated_before,
+        reserved_before_reset_bytes=first_memory.reserved_before,
         peak_allocated_bytes=peak_allocated, peak_reserved_bytes=peak_reserved,
-        reset_point=RESET_POINT_AFTER_LOAD_BEFORE_INFERENCE,
+        reset_point="explicit_phase_owned_resets",
     )
     runtime_generation = build_runtime_generation_record(
         batch_size=batch_size, max_new_tokens=config.generation.max_new_tokens, eos_token_id=tokenizer.eos_token_id,
@@ -964,21 +1431,56 @@ def run_rkv_worker(
         no_op_count_exact=no_op_count_exact,
         all_required_pair_evaluations_completed=all_required_pair_evaluations_completed,
         observed_retention_ratio=observed_retention_ratio,
-        wall_seconds_pass1=instrumented.pass1_wall_seconds,
-        wall_seconds_pass2=instrumented.pass2_wall_seconds,
+        wall_seconds_pass1=pass1_synchronized_seconds,
+        wall_seconds_pass2=pass2_synchronized_seconds,
         wall_seconds_targeted_capture=instrumented.targeted_capture_wall_seconds,
-        real_pair_wall_seconds=list(example_result.real_pair_wall_seconds),
-        no_op_pair_wall_seconds=list(example_result.no_op_pair_wall_seconds),
+        real_pair_wall_seconds=real_pair_synchronized_seconds,
+        no_op_pair_wall_seconds=no_op_synchronized_seconds,
         determinism_policy=determinism_policy.__dict__,
         runtime_generation=runtime_generation.__dict__,
         runtime_generation_config_hash=runtime_generation.canonical_hash(),
         parameter_placement=parameter_placement.__dict__,
         runtime_identity=runtime_identity.__dict__,
-        memory=memory.__dict__,
+        memory={
+            **memory.__dict__,
+            "pre_branch_guards": [evidence.__dict__ for evidence in example_result.pre_branch_memory_evidence],
+        },
         minimized_target_evidence=[ev.__dict__ for ev in example_result.minimized_target_evidence],
         peak_cuda_allocated_bytes=peak_allocated,
         peak_cuda_reserved_bytes=peak_reserved,
         every_parameter_on_cuda=parameter_placement.every_parameter_on_cuda,
         batch_size=batch_size,
+        actual_batch_size_verified=actual_calls.batch_size_verified,
+        actual_call_evidence=actual_call_export,
+        snapshot_evidence={
+            "verified": model_snapshot is not None and tokenizer_snapshot is not None,
+            "model": None if model_snapshot is None else model_snapshot.__dict__,
+            "tokenizer": None if tokenizer_snapshot is None else tokenizer_snapshot.__dict__,
+        },
+        device_evidence=device_evidence,
+        selected_event_evidence=list(example_result.selected_event_evidence),
+        attempted_pair_identities=attempted_identities,
+        completed_pair_identities=completed_identities,
+        failed_pair_identities=failed_identities,
+        no_op_identity=next(
+            (identity for identity in attempted_identities if identity["pair_kind"] == "no_op"), None
+        ),
+        semantic_mutation_reports=list(example_result.semantic_mutation_reports),
+        no_op_evidence=no_op_evidence,
+        replay_evidence=replay_evidence,
+        dataset_row_identity={
+            "dataset_repo": manifest.dataset_repo,
+            "dataset_revision": manifest.dataset_revision,
+            "example_index": manifest.example_index,
+            "unique_id": manifest.unique_id,
+            "raw_content_hash": getattr(manifest, "raw_content_hash", None),
+            "manifest_canonical_hash": manifest.manifest_hash(),
+            "rendered_user_message_sha256": getattr(manifest, "rendered_user_message_sha256", None),
+            "chat_template_source_sha256": getattr(manifest, "chat_template_source_sha256", None),
+            "prompt_token_ids_sha256": manifest.prompt_token_ids_sha256,
+            "prompt_token_count": len(prompt_token_ids),
+        },
+        timing_evidence=timer.export(),
+        memory_phase_evidence=memory_meter.export(),
         software_versions={"torch": torch.__version__},
     ).model_dump(mode="json")

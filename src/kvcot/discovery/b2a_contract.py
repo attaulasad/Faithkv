@@ -163,7 +163,7 @@ MANDATORY_GATE_CONDITIONS: tuple[str, ...] = (
     # B1 execution-boundary closure §13: exact, DUPLICATE-DETECTING pair
     # identity accounting (`kvcot.discovery.b2a_evidence.PairIdentityEvidence`)
     # -- `real_pair_count_exact` above only ever compared a COUNT
-    # (`count >= 4` per event in the prior derivation) and could not tell
+    # (the prior at-least-four per-event derivation) and could not tell
     # four genuinely distinct pairs apart from the same pair recorded four
     # times, or twelve total real records that were not actually twelve
     # distinct (event, layer, head, candidate, donor) identities.

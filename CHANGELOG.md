@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-07-20 — Final B1 CPU execution-boundary closure (GPU/B2A/B2B remain blocked)
+
+Forward-only work from ancestor `3c853cff34e52d792cd0e5a96d1a5369f17f8047`
+closes the remaining CPU-auditable boundary: compact selected-only capture,
+single-live-branch ownership transfer, complete controlled worker success,
+synchronized timing and phase-owned memory, load-inclusive projection,
+strict RTX-3090/local-snapshot loaders, raw scientific identities/traces,
+29 explicit final gates, and immutable attempt artifacts/provenance. A real
+isolated tokenizer-only validation succeeded without any weight file. See
+`docs/B1_FINAL_CPU_CLOSURE.md` and `docs/B1_FINAL_REPAIR_LEDGER.md`.
+Compilation passed, 1,012 tests collected, and the complete non-GPU suite
+passed: 998 passed, 14 deselected. Both required CLI dry-runs passed.
+
+**B1 FINAL CPU CLOSURE VERDICT: READY FOR INDEPENDENT AUDIT — B2A/GPU
+REMAIN BLOCKED.**
+
+No B2A result exists. No B2B result exists. No RTX 3090 timing exists. No
+FaithKV method exists. Independent audit is required before any GPU
+authorization.
+
 Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 `CLAUDE.md`) may only change via a dated entry here, added **before** the
 run that depends on the change (per the build brief). Entries are ordered

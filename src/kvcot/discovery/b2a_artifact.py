@@ -21,9 +21,6 @@ collision cryptographically negligible. Write-temp-then-atomic-rename,
 refuse a pre-existing path outright (never silently overwrites evidence)."""
 from __future__ import annotations
 
-import json
-import os
-import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -64,20 +61,19 @@ def write_b2a_artifact(payload: dict[str, Any], path: Path) -> Path:
     path (never a fixed filename in practice, so this should never
     legitimately collide -- if it does, that is itself worth surfacing
     loudly rather than silently overwriting evidence)."""
-    if path.exists():
-        raise ArtifactAlreadyExistsError(f"refusing to overwrite existing artifact at {path}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=".b2a-artifact-", suffix=".json.tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, sort_keys=True, default=str)
-            f.write("\n")
-        os.replace(tmp_path, path)
-    except BaseException:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        from kvcot.discovery.attempt_artifacts import atomic_write_json
+
+        return atomic_write_json(path, payload)
+    except Exception as exc:
+        # Preserve the public exception used by the historical artifact API
+        # while sharing the final closure's single fsync + atomic-rename
+        # implementation.  Serialization is deliberately strict: evidence
+        # containing a non-JSON value fails instead of being silently
+        # stringified.
+        if path.exists():
+            raise ArtifactAlreadyExistsError(f"refusing to overwrite existing artifact at {path}") from exc
         raise
-    return path
 
 
 def build_and_write_b2a_artifact(

@@ -99,6 +99,7 @@ class Pass2Result:
     invalid_reason: str | None
     replayed_token_ids: tuple[int, ...]
     target_captures: tuple[TargetCapture, ...]
+    compaction_event_positions: tuple[int, ...] = ()
 
 
 def run_pass2_capture(
@@ -144,6 +145,7 @@ def run_pass2_capture(
     sinks: dict[int, list[UpdateKvCaptureRecord]] = {layer: [] for layer in target_layers}
     records_by_position: dict[int, dict[int, UpdateKvCaptureRecord]] = {layer: {} for layer in target_layers}
     pristine_snapshot_by_position: dict[int, ModelStateSnapshot] = {}
+    compaction_event_positions: list[int] = []
 
     current_position = {"pos": -1}
 
@@ -193,6 +195,9 @@ def run_pass2_capture(
         ):
             return Pass2Result(False, INVALID_PREFILL_SHAPE_MISMATCH, replay_token_ids, ())
         state = prefill_result.new_state
+        for prefill_position, observations in enumerate(prefill_result.per_position_layer_observations):
+            if any(observation.had_compaction for observation in observations.values()):
+                compaction_event_positions.append(prefill_position)
 
         if not uses_authoritative_provenance:
             # Provenance bookkeeping only (synthetic-harness path) -- no
@@ -219,6 +224,8 @@ def run_pass2_capture(
             sink_lengths_before = {layer_index: len(sinks[layer_index]) for layer_index in target_layers}
             result = decode_one_fn(state, token_id)
             state = result.new_state
+            if any(observation.had_compaction for observation in result.layer_observations.values()):
+                compaction_event_positions.append(pos)
 
             for layer_index in target_layers:
                 if len(sinks[layer_index]) > sink_lengths_before[layer_index]:
@@ -238,34 +245,36 @@ def run_pass2_capture(
     for ev in pass1_plan.events:
         record = records_by_position[ev.layer_index].get(ev.absolute_event_position)
         if record is None:
-            return Pass2Result(False, INVALID_MISSING_TARGET_CAPTURE, replay_token_ids, ())
+            return Pass2Result(False, INVALID_MISSING_TARGET_CAPTURE, replay_token_ids, (), tuple(compaction_event_positions))
 
         if not record.had_compaction:
-            return Pass2Result(False, INVALID_COMPACTION_POSITION_MISMATCH, replay_token_ids, ())
+            return Pass2Result(False, INVALID_COMPACTION_POSITION_MISMATCH, replay_token_ids, (), tuple(compaction_event_positions))
         # `parity_check_passed` covers BOTH gather parity (the returned
         # compressed cache actually matches the independently recomputed
         # gather) and absolute-survivor-identity parity together -- a
         # candidate/donor extracted from a record that failed either half
         # cannot be trusted, so the whole example must be invalidated.
         if not record.parity_check_passed:
-            return Pass2Result(False, INVALID_SURVIVOR_MISMATCH_WITHIN_PASS2, replay_token_ids, ())
+            return Pass2Result(False, INVALID_SURVIVOR_MISMATCH_WITHIN_PASS2, replay_token_ids, (), tuple(compaction_event_positions))
 
         pass1_layer_obs = trace.compaction_events[ev.compaction_event_id].layer_observations.get(ev.layer_index)
         if pass1_layer_obs is None or pass1_layer_obs.observed_kept_absolute_positions is None:
-            return Pass2Result(False, INVALID_SURVIVOR_MISMATCH_ACROSS_PASSES, replay_token_ids, ())
+            return Pass2Result(False, INVALID_SURVIVOR_MISMATCH_ACROSS_PASSES, replay_token_ids, (), tuple(compaction_event_positions))
         pass1_head_positions = pass1_layer_obs.observed_kept_absolute_positions[ev.kv_head_index]
         pass2_head_positions = record.observed_kept_absolute_positions[ev.kv_head_index]
         if pass1_head_positions.shape != pass2_head_positions.shape or not torch.equal(
             pass1_head_positions, pass2_head_positions
         ):
-            return Pass2Result(False, INVALID_SURVIVOR_MISMATCH_ACROSS_PASSES, replay_token_ids, ())
+            return Pass2Result(False, INVALID_SURVIVOR_MISMATCH_ACROSS_PASSES, replay_token_ids, (), tuple(compaction_event_positions))
 
         pristine_snapshot = pristine_snapshot_by_position.get(ev.absolute_event_position)
         if pristine_snapshot is None:
-            return Pass2Result(False, INVALID_MISSING_TARGET_SNAPSHOT, replay_token_ids, ())
+            return Pass2Result(False, INVALID_MISSING_TARGET_SNAPSHOT, replay_token_ids, (), tuple(compaction_event_positions))
 
         target_captures.append(
             TargetCapture(event_plan=ev, capture_record=record, pristine_snapshot=pristine_snapshot)
         )
 
-    return Pass2Result(True, None, replay_token_ids, tuple(target_captures))
+    return Pass2Result(
+        True, None, replay_token_ids, tuple(target_captures), tuple(compaction_event_positions)
+    )

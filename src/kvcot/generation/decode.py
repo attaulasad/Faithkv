@@ -79,7 +79,9 @@ def prefill(model, cache, prompt_token_ids: list[int], device: str) -> tuple[tor
     return out.logits[0, -1, :], n
 
 
-def decode_step(model, cache, last_token_id: int, absolute_position: int, device: str) -> torch.Tensor:
+def decode_step(
+    model, cache, last_token_id: int, absolute_position: int, device: str, call_observer=None
+) -> torch.Tensor:
     """One single-token forward call. docs/REPLAY_DESIGN.md §2: decode must
     be single-token calls, matching the frozen batch-1 loop, so
     `self.length` increments by exactly 1 per call during decode. Never
@@ -89,6 +91,8 @@ def decode_step(model, cache, last_token_id: int, absolute_position: int, device
     input_ids = torch.tensor([[last_token_id]], dtype=torch.long, device=device)
     position_ids = torch.tensor([[absolute_position]], device=device)
     cache_position = torch.tensor([absolute_position], device=device)
+    if call_observer is not None:
+        call_observer("decode", input_ids, position_ids, cache_position)
     with torch.no_grad():
         out = model(
             input_ids=input_ids,

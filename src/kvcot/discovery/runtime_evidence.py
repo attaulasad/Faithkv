@@ -154,15 +154,21 @@ class RuntimeIdentityEvidence:
 
 
 def derive_runtime_identity(
-    *, model: Any, tokenizer: Any, requested_model_revision: str, requested_tokenizer_revision: str
+    *,
+    model: Any,
+    tokenizer: Any,
+    requested_model_revision: str,
+    requested_tokenizer_revision: str,
+    verified_model_revision: str | None = None,
+    verified_tokenizer_revision: str | None = None,
 ) -> RuntimeIdentityEvidence:
     """`*_match` is `True` ONLY when a resolved revision was genuinely read
     back AND it equals the requested one -- an unresolved (`None`) readback
     is `False`, never silently treated as a match (B1B-R4 §9: "If a
     resolved runtime revision cannot be established, the corresponding
     evidence must be false or unresolved and the gate must fail")."""
-    resolved_model = read_resolved_model_revision(model)
-    resolved_tokenizer = read_resolved_tokenizer_revision(tokenizer)
+    resolved_model = verified_model_revision or read_resolved_model_revision(model)
+    resolved_tokenizer = verified_tokenizer_revision or read_resolved_tokenizer_revision(tokenizer)
     return RuntimeIdentityEvidence(
         requested_model_revision=requested_model_revision,
         resolved_model_revision=resolved_model,

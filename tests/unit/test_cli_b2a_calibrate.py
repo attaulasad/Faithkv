@@ -31,6 +31,19 @@ DISCOVERY_CONFIG = "configs/discovery/llama8b_math500_b1024.yaml"
 _DISALLOWED_MODULES = {"transformers", "datasets", "huggingface_hub", "rkv", "rkv.monkeypatch"}
 
 
+@pytest.fixture(autouse=True)
+def isolate_execute_attempt_artifacts(tmp_path, monkeypatch):
+    """Execute-mode refusal tests must exercise artifacts without dirtying the repo."""
+    from kvcot.discovery import attempt_artifacts
+
+    original = attempt_artifacts.create_attempt_directory
+    monkeypatch.setattr(
+        attempt_artifacts,
+        "create_attempt_directory",
+        lambda: original(root=tmp_path / "decisions"),
+    )
+
+
 @pytest.fixture
 def block_disallowed_imports(monkeypatch):
     real_import = builtins.__import__

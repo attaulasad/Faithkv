@@ -59,6 +59,21 @@ def manifest():
 
 
 def _passing_payloads(manifest, config):
+    actual_calls = [{
+        "call_kind": "prefill", "input_ids_shape": [1, manifest.prompt_token_count],
+        "batch_size": 1, "sequence_length": manifest.prompt_token_count, "device": "cuda:0",
+        "dtype": "torch.int64", "position_ids_shape": [1, manifest.prompt_token_count],
+        "cache_position_shape": [manifest.prompt_token_count],
+    }]
+    row_identity = {
+        "dataset_repo": manifest.dataset_repo, "dataset_revision": manifest.dataset_revision,
+        "example_index": manifest.example_index, "unique_id": manifest.unique_id,
+        "raw_content_hash": manifest.raw_content_hash, "manifest_canonical_hash": manifest.manifest_hash(),
+        "rendered_user_message_sha256": manifest.rendered_user_message_sha256,
+        "chat_template_source_sha256": manifest.chat_template_source_sha256,
+        "prompt_token_ids_sha256": manifest.prompt_token_ids_sha256,
+        "prompt_token_count": manifest.prompt_token_count,
+    }
     fullkv = dict(
         role="fullkv", model_revision=config.model.revision, tokenizer_revision=config.model.tokenizer_revision,
         dataset_repo=manifest.dataset_repo, dataset_revision=manifest.dataset_revision,
@@ -71,8 +86,29 @@ def _passing_payloads(manifest, config):
         runtime_generation_config_hash="g" * 64, parameter_placement=_PARAMETER_PLACEMENT,
         runtime_identity=_RUNTIME_IDENTITY_MATCH, memory=_MEMORY,
         peak_cuda_allocated_bytes=1_000_000, peak_cuda_reserved_bytes=2_000_000,
-        every_parameter_on_cuda=True, batch_size=1, software_versions={"torch": "2.0"},
+        every_parameter_on_cuda=True, batch_size=1, actual_batch_size_verified=True,
+        actual_call_evidence=actual_calls, dataset_row_identity=row_identity,
+        timing_evidence=[
+            {"phase": "fullkv_worker_startup", "duration_seconds": 0.1, "completed": True},
+            {"phase": "model_load", "duration_seconds": 2.0, "completed": True},
+        ],
+        software_versions={"torch": "2.0"},
     )
+    selected_events = [
+        {"compaction_event_id": event, "absolute_event_position": 100 + event, "layer_index": event, "kv_head_index": 0}
+        for event in range(3)
+    ]
+    real_identities = [
+        {
+            "compaction_event_id": event, "layer_index": event, "kv_head_index": 0,
+            "candidate_absolute_position": candidate, "donor_absolute_position": donor, "pair_kind": "real",
+        }
+        for event in range(3) for candidate in (10, 11) for donor in (20, 21)
+    ]
+    noop_identity = {
+        "compaction_event_id": 0, "layer_index": 0, "kv_head_index": 0,
+        "candidate_absolute_position": 20, "donor_absolute_position": 20, "pair_kind": "no_op",
+    }
     rkv = dict(
         role="rkv", model_revision=config.model.revision, tokenizer_revision=config.model.tokenizer_revision,
         dataset_repo=manifest.dataset_repo, dataset_revision=manifest.dataset_revision,
@@ -103,7 +139,16 @@ def _passing_payloads(manifest, config):
         runtime_generation_config_hash="g" * 64, parameter_placement=_PARAMETER_PLACEMENT,
         runtime_identity=_RUNTIME_IDENTITY_MATCH, memory=_MEMORY, minimized_target_evidence=[],
         peak_cuda_allocated_bytes=1_500_000, peak_cuda_reserved_bytes=2_500_000, every_parameter_on_cuda=True,
-        batch_size=1, software_versions={"torch": "2.0"},
+        batch_size=1, actual_batch_size_verified=True, actual_call_evidence=actual_calls,
+        dataset_row_identity=row_identity, selected_event_evidence=selected_events,
+        attempted_pair_identities=real_identities + [noop_identity],
+        completed_pair_identities=real_identities + [noop_identity], failed_pair_identities=[],
+        no_op_identity=noop_identity,
+        timing_evidence=[
+            {"phase": "rkv_worker_startup", "duration_seconds": 0.1, "completed": True},
+            {"phase": "model_load", "duration_seconds": 2.0, "completed": True},
+        ],
+        software_versions={"torch": "2.0"},
     )
     return fullkv, rkv
 
@@ -272,6 +317,9 @@ def test_gate_fails_on_duplicate_pair_identity_even_though_the_bare_count_is_exa
     rkv_payload["unique_completed_real_pair_count"] = 11  # one duplicate among the 12 records
     rkv_payload["events_with_exactly_four_unique_real_pairs"] = 2  # the event with the duplicate has only 3 unique
     rkv_payload["has_duplicate_real_pair_identity"] = True
+    duplicate = dict(rkv_payload["completed_pair_identities"][0])
+    rkv_payload["completed_pair_identities"][1] = duplicate
+    rkv_payload["attempted_pair_identities"][1] = duplicate
     runner = _fake_runner_writing(fullkv_payload, rkv_payload)
     monkeypatch.setattr("kvcot.discovery.b2a_artifact.build_and_write_b2a_artifact", _patched_writer(tmp_path))
 

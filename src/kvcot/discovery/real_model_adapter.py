@@ -319,7 +319,7 @@ def advance_after_forward(
     return observations
 
 
-def build_real_prefill_fn(device: str) -> PrefillFn:
+def build_real_prefill_fn(device: str, call_recorder: Any | None = None) -> PrefillFn:
     """Real-model `PrefillFn` -- one opaque forward call over the complete
     prompt (B1B-R2 §6), never repeated one-token calls. `state` must be a
     `RealModelState` whose `cache` is freshly constructed
@@ -368,6 +368,8 @@ def build_real_prefill_fn(device: str) -> PrefillFn:
         input_ids = torch.tensor([prompt_token_ids], dtype=torch.long, device=device)
         position_ids = torch.arange(0, n, device=device).unsqueeze(0)
         cache_position = torch.arange(0, n, device=device)
+        if call_recorder is not None:
+            call_recorder.observe("prefill", input_ids, position_ids, cache_position)
         with _pending_positions_scope(state, list(range(n)), "prefill"):
             with torch.no_grad():
                 out = state.model(
@@ -408,7 +410,7 @@ def build_real_prefill_fn(device: str) -> PrefillFn:
     return prefill_fn
 
 
-def build_real_decode_one_fn(device: str) -> DecodeOneFn:
+def build_real_decode_one_fn(device: str, call_recorder: Any | None = None) -> DecodeOneFn:
     """Real-model `DecodeOneFn` -- one single-token forward call, matching
     `kvcot.generation.decode.decode_step`'s exact call shape (imported and
     reused directly, never reimplemented). Position bookkeeping is handled
@@ -425,7 +427,10 @@ def build_real_decode_one_fn(device: str) -> DecodeOneFn:
 
         fed_position = state.absolute_position
         with _pending_positions_scope(state, [fed_position], "decode"):
-            logits = decode_step(state.model, state.cache, token_id, state.absolute_position, device)
+            logits = decode_step(
+                state.model, state.cache, token_id, state.absolute_position, device,
+                None if call_recorder is None else call_recorder.observe,
+            )
         state.absolute_position += 1
 
         observations = advance_after_forward(
@@ -524,7 +529,13 @@ class _LiveBranchState:
         return _project_pre_event_position_map(self, layer_index)
 
 
-def build_real_branch_step_fn_restore_once(model: Any, device: str):
+def build_real_branch_step_fn_restore_once(
+    model: Any,
+    device: str,
+    call_recorder: Any | None = None,
+    *,
+    consume_owned_snapshot: bool = False,
+):
     """Real `BranchStepFn` (B1B-R3 §9 repair): restores a complete
     `ModelStateSnapshot` into a FRESH cache EXACTLY ONCE per branch -- on
     the first call, when `state` is the branch's initial
@@ -545,7 +556,9 @@ def build_real_branch_step_fn_restore_once(model: Any, device: str):
 
         if isinstance(state, ModelStateSnapshot):
             cache = DynamicCache()
-            restored_provenance = restore_snapshot(model, cache, state)
+            restored_provenance = restore_snapshot(
+                model, cache, state, consume_owned_snapshot=consume_owned_snapshot
+            )
             live = _LiveBranchState(
                 cache=cache, model_provenance=restored_provenance,
                 compaction=restore_compaction_tracker_from_snapshot(state),
@@ -562,7 +575,10 @@ def build_real_branch_step_fn_restore_once(model: Any, device: str):
 
         fed_position = live.absolute_position
         with _pending_positions_scope(live, [fed_position], "decode"):
-            logits = decode_step(model, live.cache, token_id, live.absolute_position, device)
+            logits = decode_step(
+                model, live.cache, token_id, live.absolute_position, device,
+                None if call_recorder is None else call_recorder.observe,
+            )
         live.absolute_position += 1
 
         advance_after_forward(

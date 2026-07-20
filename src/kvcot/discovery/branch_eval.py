@@ -72,6 +72,37 @@ def compact_branch_score(result: BranchEvalResult) -> CompactBranchScore:
     )
 
 
+def evaluate_branch_compact(
+    step_fn: StepFn,
+    initial_cache_state: Any,
+    bridge_token_id: int,
+    reference_token_ids: Sequence[int],
+) -> CompactBranchScore:
+    """Score one discovery branch without retaining logits or final cache."""
+    if len(reference_token_ids) != SCORED_HORIZON:
+        raise ValueError(
+            f"reference_token_ids must have exactly {SCORED_HORIZON} entries, got {len(reference_token_ids)}"
+        )
+    cache_state = initial_cache_state
+    logits, cache_state = step_fn(cache_state, bridge_token_id)
+    per_token_nll: list[float] = []
+    last_index = len(reference_token_ids) - 1
+    for index, target_token_id in enumerate(reference_token_ids):
+        nll = -torch.log_softmax(logits.float(), dim=-1)[target_token_id]
+        per_token_nll.append(float(nll.item()))
+        if index < last_index:
+            logits, cache_state = step_fn(cache_state, target_token_id)
+    values = tuple(per_token_nll)
+    score = CompactBranchScore(
+        per_token_nll=values,
+        mean_nll=mean_nll(values),
+        nll_sha256=sha256_json(list(values)),
+    )
+    del logits
+    del cache_state
+    return score
+
+
 def evaluate_branch(step_fn: StepFn, initial_cache_state: Any, bridge_token_id: int, reference_token_ids: Sequence[int]) -> BranchEvalResult:
     """One branch's teacher-forced evaluation. `reference_token_ids` must
     have exactly `SCORED_HORIZON` entries — never padded, never truncated;

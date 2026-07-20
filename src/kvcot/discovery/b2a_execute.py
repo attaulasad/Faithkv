@@ -1,9 +1,9 @@
 """The real, one-example B2A GPU calibration run (B1B-R4 §8-§12/§14/§16/§21,
 superseding B1B-R3's `docs/B1B_R3_EXECUTABLE_STATE_CLOSURE.md`).
 
-**Never invoked in this pass.** `kvcot.cli.cmd_b2a_calibrate`'s `--execute`
-mode is the only caller, and it hard-stops on CPU-checkable preconditions
-(CUDA required) before `run_b2a_calibration` is ever reached.
+`kvcot.cli.cmd_b2a_calibrate`'s explicit `--execute` mode is the only
+production caller.  The CPU closure does not invoke that GPU path; the
+CLI first enforces all CPU-checkable preconditions and CUDA availability.
 
 ## Coordinator / worker split (B1B-R3 §11, worker bodies moved to
 ## `kvcot.discovery.b2a_workers` by B1B-R4 §19)
@@ -50,9 +50,10 @@ class B2ACalibrationArtifact:
     manifest_hash: str
     gate_result: Any  # kvcot.discovery.b2a_contract.B2AGateResult
     artifact_path: Path
+    final_gate_result: Any | None = None
 
 
-def _verify_resolved_prompt_identity(config, manifest) -> None:
+def _verify_resolved_prompt_identity(config, manifest) -> dict[str, Any]:
     """B1B-R3 §6: re-render, re-tokenize, and re-hash the frozen prompt
     from the manifest's own dataset row and the config's pinned tokenizer,
     and compare EVERY stored identity field before any model is loaded.
@@ -109,6 +110,27 @@ def _verify_resolved_prompt_identity(config, manifest) -> None:
             raise B2AExecutionRefused(f"prompt identity mismatch on {field_name!r}: recomputed={recomputed!r} frozen={frozen!r}")
     if manifest.prompt_token_ids is not None and list(token_ids) != list(manifest.prompt_token_ids):
         raise B2AExecutionRefused("recomputed prompt_token_ids array does not match manifest.prompt_token_ids.")
+    problem = fetched.row.get("problem")
+    if not isinstance(problem, str):
+        raise B2AExecutionRefused("re-fetched dataset row has no string problem field")
+    return {
+        "verified": True,
+        "dataset_repo": manifest.dataset_repo,
+        "dataset_config": manifest.dataset_config,
+        "dataset_split": manifest.dataset_split,
+        "dataset_revision": manifest.dataset_revision,
+        "example_index": manifest.example_index,
+        "unique_id": manifest.unique_id,
+        "raw_row_sha256": fetched.raw_content_hash,
+        "question_sha256": sha256_text(problem),
+        "gold_answer_sha256": sha256_text(fetched.row["answer"]),
+        "manifest_canonical_sha256": manifest.manifest_hash(),
+        "rendered_message_sha256": sha256_text(user_message),
+        "chat_template_sha256": sha256_text(tokenizer.chat_template),
+        "prompt_token_sha256": sha256_int_ids(token_ids),
+        "prompt_token_count": len(token_ids),
+        "tokenizer_eos_token_id": tokenizer.eos_token_id,
+    }
 
 
 def _build_fail_artifact_payload(
@@ -136,6 +158,7 @@ def _build_fail_artifact_payload(
         "dataset": {"repo": manifest.dataset_repo, "revision": manifest.dataset_revision},
         "one_example_only": True,
         "timed_out": bool(getattr(exc, "timed_out", False)),
+        "partial_success": partial_fullkv_result is not None,
     }
     if partial_fullkv_result is not None:
         payload["partial_fullkv_worker"] = partial_fullkv_result.model_dump(mode="json")
@@ -150,6 +173,7 @@ def run_b2a_calibration(
     manifest_path: str,
     python_executable: str | None = None,
     subprocess_runner=None,
+    attempt_directory=None,
 ) -> B2ACalibrationArtifact:
     """The coordinator (B1B-R3 §11, repaired B1B-R4 §8-§12/§14/§16/§21) --
     called by `kvcot.cli.cmd_b2a_calibrate --execute` (which has already
@@ -169,11 +193,7 @@ def run_b2a_calibration(
         build_gate_evidence_from_measurement,
         evaluate_b2a_gate,
     )
-    from kvcot.discovery.b2a_evidence import (
-        derive_meaningful_compression_observed,
-        per_real_pair_projection_seconds,
-        project_complete_pilot_gpu_hours,
-    )
+    from kvcot.discovery.b2a_evidence import derive_meaningful_compression_observed
     from kvcot.discovery.b2a_workers import WorkerFailedError, run_both_workers_via_subprocess
     from kvcot.discovery.constants import (
         B2A_NOOP_PAIR_EVALUATIONS_TOTAL,
@@ -181,26 +201,64 @@ def run_b2a_calibration(
         B2A_SELECTED_EVENTS,
     )
     from kvcot.discovery.discovery_config import canonical_config_hash
+    from kvcot.discovery.execution_measurement import build_runtime_projection
+    from kvcot.discovery.final_contract import (
+        evaluate_final_gates,
+        expected_generation_record,
+        memory_contract_satisfied,
+        timing_contract_satisfied,
+    )
 
     subprocess_runner = subprocess_runner or subprocess_module.run
     config_hash = canonical_config_hash(config)
     manifest_hash = manifest.manifest_hash()
 
     try:
-        _verify_resolved_prompt_identity(config, manifest)
+        prompt_verification = _verify_resolved_prompt_identity(config, manifest)
+        if isinstance(prompt_verification, dict):
+            from kvcot.discovery.attempt_artifacts import sha256_file
+
+            prompt_verification = {
+                **prompt_verification,
+                "manifest_file_byte_sha256": sha256_file(Path(manifest_path)),
+            }
 
         coordination = run_both_workers_via_subprocess(
             config_path, manifest_path, python_executable=python_executable, subprocess_runner=subprocess_runner,
+            attempt_directory=attempt_directory,
         )
 
         fullkv = coordination.fullkv
         rkv = coordination.rkv
 
-        per_example_total = fullkv.wall_seconds + rkv.wall_seconds_pass1 + rkv.wall_seconds_pass2
-        per_real_pair_seconds = per_real_pair_projection_seconds(tuple(rkv.real_pair_wall_seconds))
-        projected_gpu_hours = project_complete_pilot_gpu_hours(
-            per_example_total_seconds=per_example_total, per_real_pair_seconds=per_real_pair_seconds,
+        def required_phase_seconds(records, phase):
+            matches = [record for record in records if record.get("phase") == phase and record.get("completed") is True]
+            if len(matches) != 1:
+                raise B2AExecutionRefused(f"required timing phase {phase!r} is missing or duplicated")
+            value = matches[0].get("duration_seconds")
+            if not isinstance(value, (int, float)) or value <= 0:
+                raise B2AExecutionRefused(f"required timing phase {phase!r} is not a positive completed duration")
+            return float(value)
+
+        fullkv_startup_and_load = (
+            required_phase_seconds(fullkv.timing_evidence, "fullkv_worker_startup")
+            + required_phase_seconds(fullkv.timing_evidence, "model_load")
         )
+        rkv_startup_and_load = (
+            required_phase_seconds(rkv.timing_evidence, "rkv_worker_startup")
+            + required_phase_seconds(rkv.timing_evidence, "model_load")
+        )
+        runtime_projection = build_runtime_projection(
+            fullkv_startup_and_model_load_seconds=fullkv_startup_and_load,
+            rkv_startup_and_model_load_seconds=rkv_startup_and_load,
+            fullkv_natural_generation_seconds=fullkv.wall_seconds,
+            rkv_pass1_seconds=rkv.wall_seconds_pass1,
+            rkv_pass2_seconds=rkv.wall_seconds_pass2,
+            b2a_real_pair_seconds=list(rkv.real_pair_wall_seconds),
+        )
+        per_example_total = runtime_projection.per_example_inference_seconds
+        per_real_pair_seconds = runtime_projection.conservative_real_pair_seconds
+        projected_gpu_hours = runtime_projection.projected_total_seconds / 3600.0
 
         measurement = B2AOneExampleMeasurement(
             fullkv_natural_generation_wall_seconds=fullkv.wall_seconds,
@@ -247,10 +305,21 @@ def run_b2a_calibration(
             )
 
         dataset_revision_match = _field_matches_manifest_and_each_other("dataset_revision", manifest.dataset_revision)
+        expected_row_identity = {
+            "dataset_repo": manifest.dataset_repo,
+            "dataset_revision": manifest.dataset_revision,
+            "example_index": manifest.example_index,
+            "unique_id": manifest.unique_id,
+            "raw_content_hash": manifest.raw_content_hash,
+            "manifest_canonical_hash": manifest.manifest_hash(),
+            "rendered_user_message_sha256": manifest.rendered_user_message_sha256,
+            "chat_template_source_sha256": manifest.chat_template_source_sha256,
+            "prompt_token_ids_sha256": manifest.prompt_token_ids_sha256,
+            "prompt_token_count": manifest.prompt_token_count,
+        }
         dataset_row_identity_match = (
-            fullkv.dataset_repo == manifest.dataset_repo
-            and rkv.dataset_repo == manifest.dataset_repo
-            and coordination.shared_identity_ok
+            fullkv.dataset_row_identity == expected_row_identity
+            and rkv.dataset_row_identity == expected_row_identity
         )
         manifest_hash_match = _field_matches_manifest_and_each_other("manifest_hash", manifest.manifest_hash())
         prompt_token_hash_match = _field_matches_manifest_and_each_other(
@@ -292,8 +361,9 @@ def run_b2a_calibration(
             # the check never having run at all) must fail this condition,
             # not vacuously pass it.
             semantic_swap_parity=(
-                rkv.semantic_swap_checks_attempted == rkv.semantic_swap_checks_required
-                and rkv.semantic_swap_checks_passed == rkv.semantic_swap_checks_required
+                rkv.semantic_swap_checks_required == B2A_REAL_PAIR_EVALUATIONS_TOTAL
+                and rkv.semantic_swap_checks_attempted == B2A_REAL_PAIR_EVALUATIONS_TOTAL
+                and rkv.semantic_swap_checks_passed == B2A_REAL_PAIR_EVALUATIONS_TOTAL
                 and rkv.semantic_swap_checks_failed == 0
             ),
             # B1 execution-boundary closure §13: exact, duplicate-detecting
@@ -302,10 +372,23 @@ def run_b2a_calibration(
             # above, which only ever compares a raw COUNT and cannot detect
             # the same (event, layer, head, candidate, donor) identity
             # recorded more than once.
-            unique_real_pair_count_exact=(rkv.unique_completed_real_pair_count == B2A_REAL_PAIR_EVALUATIONS_TOTAL),
-            events_with_four_unique_pairs_exact=(rkv.events_with_exactly_four_unique_real_pairs == B2A_SELECTED_EVENTS),
+            unique_real_pair_count_exact=(
+                len({tuple(sorted(identity.items())) for identity in rkv.completed_pair_identities
+                     if identity.get("pair_kind") == "real"}) == B2A_REAL_PAIR_EVALUATIONS_TOTAL
+            ),
+            events_with_four_unique_pairs_exact=(
+                len({item["compaction_event_id"] for item in rkv.selected_event_evidence}) == B2A_SELECTED_EVENTS
+                and all(
+                    len({tuple(sorted(identity.items())) for identity in rkv.completed_pair_identities
+                         if identity.get("pair_kind") == "real"
+                         and identity.get("compaction_event_id") == event_id}) == 4
+                    for event_id in {item["compaction_event_id"] for item in rkv.selected_event_evidence}
+                )
+            ),
             no_duplicate_pair_identity=(
-                not rkv.has_duplicate_real_pair_identity and not rkv.has_duplicate_no_op_pair_identity
+                len(rkv.attempted_pair_identities)
+                == len({tuple(sorted(identity.items())) for identity in rkv.attempted_pair_identities})
+                and sum(1 for identity in rkv.attempted_pair_identities if identity.get("pair_kind") == "no_op") == 1
             ),
             dataset_revision_match=dataset_revision_match,
             dataset_row_identity_match=dataset_row_identity_match,
@@ -315,7 +398,14 @@ def run_b2a_calibration(
             tokenizer_revision_match=fullkv_identity_ok and rkv_identity_ok,
             generation_config_hash_match=(fullkv.runtime_generation_config_hash == rkv.runtime_generation_config_hash),
             rkv_config_hash_match=rkv.rkv_config_hash_match,
-            batch_size_verified=(fullkv.batch_size == 1 and rkv.batch_size == 1),
+            batch_size_verified=(
+                fullkv.actual_batch_size_verified
+                and rkv.actual_batch_size_verified
+                and bool(fullkv.actual_call_evidence)
+                and bool(rkv.actual_call_evidence)
+                and all(event.get("batch_size") == 1 for event in fullkv.actual_call_evidence)
+                and all(event.get("batch_size") == 1 for event in rkv.actual_call_evidence)
+            ),
             one_example_only=one_example_only,
             meaningful_compression_observed=derive_meaningful_compression_observed(
                 selected_event_count=rkv.selected_compaction_events, observed_retention_ratio=rkv.observed_retention_ratio,
@@ -334,8 +424,196 @@ def run_b2a_calibration(
         )
         gate_result = evaluate_b2a_gate(evidence)
 
+        # The expected EOS identity comes from the coordinator's independent
+        # pinned-tokenizer resolution, never from either worker's observation.
+        expected_eos_token_id = (
+            prompt_verification.get("tokenizer_eos_token_id")
+            if isinstance(prompt_verification, dict)
+            else None
+        )
+        expected_full_generation = expected_generation_record(config, manifest, expected_eos_token_id)
+        expected_rkv_generation = expected_generation_record(config, manifest, expected_eos_token_id)
+        fullkv_generation_matches_expected = fullkv.runtime_generation == expected_full_generation
+        rkv_generation_matches_expected = rkv.runtime_generation == expected_rkv_generation
+        workers_generation_match = (
+            fullkv.runtime_generation == rkv.runtime_generation
+            and fullkv.runtime_generation_config_hash == rkv.runtime_generation_config_hash
+        )
+
+        attempted_real = [item for item in rkv.attempted_pair_identities if item.get("pair_kind") == "real"]
+        completed_real = [item for item in rkv.completed_pair_identities if item.get("pair_kind") == "real"]
+        attempted_noop = [item for item in rkv.attempted_pair_identities if item.get("pair_kind") == "no_op"]
+        completed_noop = [item for item in rkv.completed_pair_identities if item.get("pair_kind") == "no_op"]
+        real_keys = [tuple(sorted(item.items())) for item in attempted_real]
+        completed_real_keys = {tuple(sorted(item.items())) for item in completed_real}
+        selected_ids = [item.get("compaction_event_id") for item in rkv.selected_event_evidence]
+        unique_selected_ids = set(selected_ids)
+        events_four = (
+            len(unique_selected_ids) == B2A_SELECTED_EVENTS
+            and all(
+                len({key for key in completed_real_keys if dict(key).get("compaction_event_id") == event_id}) == 4
+                for event_id in unique_selected_ids
+            )
+        )
+
+        replay = rkv.replay_evidence
+        complete_token_trace_match = (
+            bool(replay)
+            and replay.get("pass1_token_ids") == replay.get("pass2_fed_token_ids")
+            and replay.get("pass1_token_sha256") == replay.get("pass2_token_sha256")
+            and replay.get("token_first_mismatch") is None
+        )
+        complete_call_trace_match = (
+            rkv.prefill_decode_boundary_parity
+            and rkv.pass1_call_boundary == rkv.pass2_call_boundary
+            and rkv.pass1_call_boundary.get("prefill_call_count") == 1
+            and replay.get("pass1_calls") == replay.get("pass2_calls")
+            and replay.get("pass1_call_sha256") == replay.get("pass2_call_sha256")
+            and replay.get("call_first_mismatch") is None
+            and replay.get("pass1_actual_calls") == replay.get("pass2_actual_calls")
+            and replay.get("pass1_actual_call_sha256") == replay.get("pass2_actual_call_sha256")
+            and replay.get("actual_call_first_mismatch") is None
+        )
+        complete_compaction_trace_match = (
+            replay.get("pass1_compaction_positions") == replay.get("pass2_compaction_positions")
+            and replay.get("pass1_compaction_sha256") == replay.get("pass2_compaction_sha256")
+            and replay.get("compaction_first_mismatch") is None
+            and replay.get("complete_compaction_trace_match") is True
+        )
+
+        no_op = rkv.no_op_evidence
+        no_op_exact_parity = (
+            len(attempted_noop) == len(completed_noop) == 1
+            and rkv.no_op_identity == attempted_noop[0] == completed_noop[0]
+            and attempted_noop[0].get("candidate_absolute_position")
+            == attempted_noop[0].get("donor_absolute_position")
+            and no_op.get("baseline_nll") == no_op.get("no_op_nll")
+            and no_op.get("baseline_nll_sha256") == no_op.get("no_op_nll_sha256")
+            and no_op.get("mean_difference") == 0.0
+            and no_op.get("maximum_absolute_per_token_difference") == 0.0
+            and bool(no_op.get("starting_snapshot_sha256"))
+            and no_op.get("physical_byte_delta") == 0
+            and bool(no_op.get("provenance_before_sha256"))
+            and no_op.get("provenance_before_sha256") == no_op.get("provenance_after_sha256")
+            and bool(no_op.get("kept_index_before_sha256"))
+            and no_op.get("kept_index_before_sha256") == no_op.get("kept_index_after_sha256")
+        )
+
+        semantic_real_reports = [
+            report for report in rkv.semantic_mutation_reports
+            if report.get("pair_identity", {}).get("pair_kind") == "real"
+        ]
+        positive_semantic_swap_parity = (
+            rkv.semantic_swap_checks_required == B2A_REAL_PAIR_EVALUATIONS_TOTAL
+            and rkv.semantic_swap_checks_attempted == B2A_REAL_PAIR_EVALUATIONS_TOTAL
+            and rkv.semantic_swap_checks_passed == B2A_REAL_PAIR_EVALUATIONS_TOTAL
+            and rkv.semantic_swap_checks_failed == 0
+            and len(semantic_real_reports) == B2A_REAL_PAIR_EVALUATIONS_TOTAL
+            and all(report.get("attempted") is True and report.get("passed") is True for report in semantic_real_reports)
+        )
+
+        attempt_files_verified = False
+        worker_envelopes_verified = False
+        git_clean_verified = False
+        rkv_submodule_match = False
+        if attempt_directory is not None:
+            import json
+
+            required_attempt_files = {
+                "invocation.json", "preflight.json", "provenance.json",
+                "fullkv/command.json", "fullkv/stdout.log", "fullkv/stderr.log", "fullkv/progress.jsonl",
+                "fullkv/envelope.json", "fullkv/result.json", "fullkv/timing.json", "fullkv/memory.json",
+                "rkv/command.json", "rkv/stdout.log", "rkv/stderr.log", "rkv/progress.jsonl",
+                "rkv/envelope.json", "rkv/result.json", "rkv/timing.json", "rkv/memory.json",
+                "rkv/pair_identities.json", "rkv/semantic_swaps.json", "rkv/replay_evidence.json",
+            }
+            existing = {
+                path.relative_to(attempt_directory).as_posix()
+                for path in attempt_directory.rglob("*") if path.is_file()
+            }
+            attempt_files_verified = required_attempt_files.issubset(existing)
+            worker_envelopes_verified = all(
+                (attempt_directory / role / "envelope.json").is_file() for role in ("fullkv", "rkv")
+            )
+            provenance_path = attempt_directory / "provenance.json"
+            if provenance_path.is_file():
+                provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+                git_clean_verified = provenance.get("git", {}).get("dirty") is False
+                rkv_submodule_match = provenance.get("git", {}).get("rkv_submodule_match") is True
+
+        snapshot_verified = lambda worker, asset: (
+            worker.snapshot_evidence.get("verified") is True
+            and isinstance(worker.snapshot_evidence.get(asset), dict)
+            and worker.snapshot_evidence[asset].get("resolved_revision")
+            == (config.model.revision if asset == "model" else config.model.tokenizer_revision)
+        )
+        actual_batch_size_verified = (
+            fullkv.actual_batch_size_verified and rkv.actual_batch_size_verified
+            and bool(fullkv.actual_call_evidence) and bool(rkv.actual_call_evidence)
+            and all(call.get("batch_size") == 1 for call in fullkv.actual_call_evidence + rkv.actual_call_evidence)
+        )
+        final_gate_result = evaluate_final_gates({
+            "git_clean_verified": git_clean_verified,
+            "rkv_submodule_match": rkv_submodule_match,
+            "single_rtx3090_verified": (
+                fullkv.device_evidence.get("verified") is True and rkv.device_evidence.get("verified") is True
+            ),
+            "local_model_snapshot_verified": snapshot_verified(fullkv, "model") and snapshot_verified(rkv, "model"),
+            "local_tokenizer_snapshot_verified": (
+                snapshot_verified(fullkv, "tokenizer") and snapshot_verified(rkv, "tokenizer")
+            ),
+            "dataset_row_identity_verified": (
+                isinstance(prompt_verification, dict)
+                and prompt_verification.get("verified") is True
+                and prompt_verification.get("dataset_repo") == manifest.dataset_repo
+                and prompt_verification.get("dataset_config") == manifest.dataset_config
+                and prompt_verification.get("dataset_split") == manifest.dataset_split
+                and prompt_verification.get("dataset_revision") == manifest.dataset_revision
+                and prompt_verification.get("example_index") == manifest.example_index
+                and prompt_verification.get("unique_id") == manifest.unique_id
+                and all(
+                    isinstance(prompt_verification.get(name), str)
+                    and len(prompt_verification[name]) == 64
+                    for name in (
+                        "raw_row_sha256", "question_sha256", "gold_answer_sha256",
+                        "manifest_canonical_sha256", "manifest_file_byte_sha256",
+                    )
+                )
+            ),
+            "prompt_identity_verified": (
+                isinstance(prompt_verification, dict)
+                and prompt_verification.get("prompt_token_sha256") == manifest.prompt_token_ids_sha256
+                and prompt_verification.get("prompt_token_count") == manifest.prompt_token_count
+                and prompt_verification.get("rendered_message_sha256") == manifest.rendered_user_message_sha256
+                and prompt_verification.get("chat_template_sha256") == manifest.chat_template_source_sha256
+            ),
+            "fullkv_generation_matches_expected": fullkv_generation_matches_expected,
+            "rkv_generation_matches_expected": rkv_generation_matches_expected,
+            "workers_generation_match": workers_generation_match,
+            "actual_batch_size_verified": actual_batch_size_verified,
+            "complete_token_trace_match": complete_token_trace_match,
+            "complete_call_trace_match": complete_call_trace_match,
+            "complete_compaction_trace_match": complete_compaction_trace_match,
+            "capture_gather_parity": rkv.capture_gather_parity,
+            "absolute_position_parity": rkv.absolute_position_parity,
+            "selected_event_ids_exact": len(selected_ids) == B2A_SELECTED_EVENTS and len(unique_selected_ids) == B2A_SELECTED_EVENTS,
+            "unique_real_pair_count_exact": len(real_keys) == len(set(real_keys)) == B2A_REAL_PAIR_EVALUATIONS_TOTAL,
+            "events_with_four_unique_pairs_exact": events_four,
+            "no_duplicate_pair_identity": len(rkv.attempted_pair_identities) == len({tuple(sorted(item.items())) for item in rkv.attempted_pair_identities}),
+            "authorized_no_op_identity_exact": len(attempted_noop) == len(completed_noop) == 1 and rkv.no_op_identity == attempted_noop[0],
+            "positive_semantic_swap_parity": positive_semantic_swap_parity,
+            "no_op_exact_parity": no_op_exact_parity,
+            "all_required_timings_present": timing_contract_satisfied(fullkv.timing_evidence, rkv.timing_evidence),
+            "all_required_memory_phases_present": memory_contract_satisfied(fullkv.memory_phase_evidence, rkv.memory_phase_evidence),
+            "runtime_within_limit": gate_result.runtime_within_limit,
+            "peak_vram_within_limit": gate_result.peak_vram_within_limit,
+            "worker_envelopes_verified": worker_envelopes_verified,
+            "attempt_artifacts_verified": attempt_files_verified,
+        })
+
         payload = {
-            "passed": gate_result.passed,
+            "passed": gate_result.passed and (final_gate_result.passed if attempt_directory is not None else True),
+            "legacy_gate_passed": gate_result.passed,
             "config_hash": config_hash,
             "manifest_hash": manifest_hash,
             "b2a_selected_events": B2A_SELECTED_EVENTS,
@@ -345,12 +623,32 @@ def run_b2a_calibration(
             "rkv_worker": rkv.model_dump(mode="json"),
             "shared_identity_ok": coordination.shared_identity_ok,
             "shared_identity_mismatches": list(coordination.shared_identity_mismatches),
+            "worker_processes": {
+                "return_codes": coordination.return_codes,
+                "timeout_state": coordination.timeout_state,
+                "partial_success": coordination.partial_success,
+            },
             "measurement": measurement.model_dump(mode="json"),
+            "runtime_projection": runtime_projection.__dict__,
             "gate_result": {k: v for k, v in gate_result.__dict__.items()},
+            "final_gate_result": {
+                "passed": final_gate_result.passed,
+                "conditions": final_gate_result.conditions,
+                "failed_conditions": list(final_gate_result.failed_conditions),
+            },
+            "dataset_row_verification": prompt_verification,
         }
-        artifact_path = build_and_write_b2a_artifact(payload, config_hash, manifest_hash)
+        if attempt_directory is not None:
+            from kvcot.discovery.attempt_artifacts import atomic_write_json, build_attempt_references, AttemptDirectory
+
+            attempt = AttemptDirectory(attempt_id=attempt_directory.name.rsplit("_", 1)[-1], path=attempt_directory)
+            payload["attempt_artifacts"] = build_attempt_references(attempt)
+            artifact_path = atomic_write_json(attempt_directory / "final.json", payload)
+        else:
+            artifact_path = build_and_write_b2a_artifact(payload, config_hash, manifest_hash)
         return B2ACalibrationArtifact(
             config_hash=config_hash, manifest_hash=manifest_hash, gate_result=gate_result, artifact_path=artifact_path,
+            final_gate_result=final_gate_result,
         )
     except WorkerFailedError as exc:
         # B1B-R4 §16: preserve partial FullKV evidence (if FullKV succeeded
@@ -359,7 +657,11 @@ def run_b2a_calibration(
         fail_payload = _build_fail_artifact_payload(
             config, manifest, config_hash, manifest_hash, exc, partial_fullkv_result=partial,
         )
-        build_and_write_b2a_artifact(fail_payload, config_hash, manifest_hash)
+        if attempt_directory is not None:
+            from kvcot.discovery.attempt_artifacts import atomic_write_json
+            atomic_write_json(attempt_directory / "failure.json", fail_payload)
+        else:
+            build_and_write_b2a_artifact(fail_payload, config_hash, manifest_hash)
         raise
     except Exception as exc:
         # Catch-all: prompt-identity refusal, a pydantic validation error
@@ -367,5 +669,9 @@ def run_b2a_calibration(
         # every one of these must still write exactly one fail artifact
         # (B1B-R4 §16/§17), matching this coordinator's original guarantee.
         fail_payload = _build_fail_artifact_payload(config, manifest, config_hash, manifest_hash, exc)
-        build_and_write_b2a_artifact(fail_payload, config_hash, manifest_hash)
+        if attempt_directory is not None:
+            from kvcot.discovery.attempt_artifacts import atomic_write_json
+            atomic_write_json(attempt_directory / "failure.json", fail_payload)
+        else:
+            build_and_write_b2a_artifact(fail_payload, config_hash, manifest_hash)
         raise

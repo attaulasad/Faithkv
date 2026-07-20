@@ -22,6 +22,58 @@ from kvcot.utils.hashing import sha256_json
 
 
 @dataclass(frozen=True)
+class ActualModelCallEvidence:
+    call_kind: str
+    input_ids_shape: tuple[int, ...]
+    batch_size: int
+    sequence_length: int
+    device: str
+    dtype: str
+    position_ids_shape: tuple[int, ...]
+    cache_position_shape: tuple[int, ...]
+
+
+@dataclass
+class ActualModelCallRecorder:
+    """Records tensors at the real adapter boundary, before model(...)."""
+
+    events: list[ActualModelCallEvidence] = field(default_factory=list)
+
+    def observe(self, call_kind: str, input_ids: Any, position_ids: Any, cache_position: Any) -> None:
+        shape = tuple(int(value) for value in input_ids.shape)
+        if len(shape) != 2:
+            raise ValueError(f"actual input_ids must be rank 2, got {shape}")
+        evidence = ActualModelCallEvidence(
+            call_kind=call_kind,
+            input_ids_shape=shape,
+            batch_size=shape[0],
+            sequence_length=shape[1],
+            device=str(input_ids.device),
+            dtype=str(input_ids.dtype),
+            position_ids_shape=tuple(int(value) for value in position_ids.shape),
+            cache_position_shape=tuple(int(value) for value in cache_position.shape),
+        )
+        self.events.append(evidence)
+        if evidence.batch_size != 1:
+            raise ValueError(f"B2A requires actual model-call batch size 1, observed {evidence.batch_size}")
+
+    @property
+    def batch_size_verified(self) -> bool:
+        return bool(self.events) and all(event.batch_size == 1 for event in self.events)
+
+    def export(self) -> list[dict[str, Any]]:
+        return [
+            {
+                **event.__dict__,
+                "input_ids_shape": list(event.input_ids_shape),
+                "position_ids_shape": list(event.position_ids_shape),
+                "cache_position_shape": list(event.cache_position_shape),
+            }
+            for event in self.events
+        ]
+
+
+@dataclass(frozen=True)
 class CallBoundaryEvent:
     kind: str  # "prefill" or "decode"
     token_ids: tuple[int, ...]  # prompt tokens for prefill; exactly one token for decode
