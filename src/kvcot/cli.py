@@ -2383,18 +2383,24 @@ def cmd_b2a_calibrate(args: argparse.Namespace) -> int:
     if args.execute:
         import os
         import sys
+        from datetime import datetime, timezone
+
         from kvcot.discovery.attempt_artifacts import atomic_write_json, create_attempt_directory
+        from kvcot.discovery.manifest import DEFAULT_MANIFEST_PATH as _DEFAULT_MANIFEST_PATH
 
         attempt = create_attempt_directory()
         atomic_write_json(
             attempt.path / "invocation.json",
             {
                 "attempt_id": attempt.attempt_id,
+                # F6: a real UTC start timestamp -- completion.json's
+                # finished_at is validated against this.
+                "started_at": datetime.now(timezone.utc).isoformat(),
                 "argv": [arg for arg in sys.argv if "token" not in arg.lower() and "secret" not in arg.lower()],
                 "working_directory": str(Path.cwd()),
                 "pid": os.getpid(),
                 "config_path": str(args.config),
-                "manifest_path": "configs/discovery/b2a_one_example_manifest.json",
+                "manifest_path": str(_DEFAULT_MANIFEST_PATH),
                 "environment": {
                     "PYTHONHASHSEED": os.environ.get("PYTHONHASHSEED"),
                     "TOKENIZERS_PARALLELISM": os.environ.get("TOKENIZERS_PARALLELISM"),
@@ -2610,14 +2616,22 @@ def cmd_b2a_calibrate(args: argparse.Namespace) -> int:
         completion["exit_code"] = 0
         return 0
     finally:
-        if attempt is not None:
+        # F5: on the successful path the coordinator itself already wrote
+        # `completion.json` BEFORE `final.json` (so the final reference
+        # manifest includes it); this fallback covers only paths where the
+        # coordinator never got that far, and NEVER overwrites it.
+        if attempt is not None and not (attempt.path / "completion.json").exists():
             import datetime as datetime_module
 
             from kvcot.discovery.attempt_artifacts import atomic_write_json
 
             atomic_write_json(
                 attempt.path / "completion.json",
-                {"finished_at": datetime_module.datetime.now(datetime_module.timezone.utc).isoformat(), **completion},
+                {
+                    "attempt_id": attempt.attempt_id,
+                    "finished_at": datetime_module.datetime.now(datetime_module.timezone.utc).isoformat(),
+                    **completion,
+                },
             )
 
 

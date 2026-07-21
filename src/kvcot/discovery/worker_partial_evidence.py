@@ -25,6 +25,7 @@ failure envelope instead of `None`.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -53,6 +54,28 @@ def classify_failure(exc: BaseException) -> tuple[bool, bool]:
     return is_oom, is_timeout
 
 
+@dataclass
+class WorkerExecutionState:
+    """F1 (final independent-audit repair): explicit, typed execution-state
+    tracking for a worker body. `current_stage` is updated immediately
+    BEFORE each material operation begins; `last_completed_stage` is
+    updated only AFTER an operation completes successfully. On failure,
+    `failing_stage = current_stage` -- never the last COMPLETED stage,
+    which the prior implementation wrongly reported as the failing one."""
+
+    attempt_id: str | None = None
+    current_stage: str = "worker startup"
+    last_completed_stage: str | None = None
+    entered_stages: list[str] = field(default_factory=list)
+
+    def enter(self, stage: str) -> None:
+        self.current_stage = stage
+        self.entered_stages.append(stage)
+
+    def complete(self, stage: str | None = None) -> None:
+        self.last_completed_stage = stage if stage is not None else self.current_stage
+
+
 class PartialWorkerEvidence(BaseModel):
     """Whatever real evidence a worker body accumulated before failing.
 
@@ -77,16 +100,26 @@ class PartialWorkerEvidence(BaseModel):
     actual_call_evidence: list[dict[str, Any]] = Field(default_factory=list)
     pass1_token_ids: list[int] | None = None
     pass2_fed_token_ids: list[int] | None = None
+    pass1_compaction_positions: list[int] | None = None
+    pass2_compaction_positions: list[int] | None = None
     selected_event_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    minimized_target_evidence: list[dict[str, Any]] = Field(default_factory=list)
     attempted_pair_identities: list[dict[str, Any]] = Field(default_factory=list)
     completed_pair_identities: list[dict[str, Any]] = Field(default_factory=list)
     failed_pair_identities: list[dict[str, Any]] = Field(default_factory=list)
+    pair_failure_details: list[dict[str, Any]] = Field(default_factory=list)
     semantic_mutation_reports: list[dict[str, Any]] = Field(default_factory=list)
+    pre_branch_memory_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    no_op_identity: dict[str, Any] | None = None
     no_op_evidence: dict[str, Any] | None = None
     replay_evidence: dict[str, Any] | None = None
 
     example_attrition: dict[str, Any] | None = None
     pair_attrition: dict[str, Any] | None = None
+    example_aborted: bool = False
+    abort_failure_type: str | None = None
+    abort_failure_message: str | None = None
+    abort_is_oom: bool = False
 
     peak_cuda_allocated_bytes: int | None = None
     peak_cuda_reserved_bytes: int | None = None
@@ -165,19 +198,75 @@ def capture_partial_evidence(
 
     example_result = scope.get("example_result")
     selected_event_evidence: list[dict[str, Any]] = []
+    minimized_target_evidence: list[dict[str, Any]] = []
     attempted_pair_identities: list[dict[str, Any]] = []
     completed_pair_identities: list[dict[str, Any]] = []
+    failed_pair_identities: list[dict[str, Any]] = []
+    pair_failure_details: list[dict[str, Any]] = []
     semantic_mutation_reports: list[dict[str, Any]] = []
+    pre_branch_memory_evidence: list[dict[str, Any]] = []
+    no_op_identity: dict[str, Any] | None = None
+    no_op_evidence: dict[str, Any] | None = None
+    replay_evidence: dict[str, Any] | None = None
     pass1_token_ids: list[int] | None = None
     pass2_fed_token_ids: list[int] | None = None
+    pass1_compaction_positions: list[int] | None = None
+    pass2_compaction_positions: list[int] | None = None
+    example_aborted = False
+    abort_failure_type: str | None = None
+    abort_failure_message: str | None = None
+    abort_is_oom = False
     if example_result is not None:
         selected_event_evidence = list(example_result.selected_event_evidence)
         attempted_pair_identities = list(example_result.attempted_pair_identities)
         completed_pair_identities = list(example_result.completed_pair_identities)
         semantic_mutation_reports = list(example_result.semantic_mutation_reports)
+        minimized_target_evidence = [
+            _dataclass_dict(item) for item in getattr(example_result, "minimized_target_evidence", ())
+        ]
+        pre_branch_memory_evidence = [
+            _dataclass_dict(item) for item in getattr(example_result, "pre_branch_memory_evidence", ())
+        ]
+        raw_failure_details = list(getattr(example_result, "pair_failure_details", ()))
+        pair_failure_details = [_dataclass_dict(item) for item in raw_failure_details]
+        no_op_identity = next(
+            (identity for identity in attempted_pair_identities if identity.get("pair_kind") == "no_op"), None
+        )
+        example_aborted = bool(getattr(example_result, "aborted", False))
+        abort_failure_type = getattr(example_result, "abort_failure_type", None)
+        abort_failure_message = getattr(example_result, "abort_failure_message", None)
+        abort_is_oom = bool(getattr(example_result, "abort_is_oom", False))
         if example_result.trace is not None:
             pass1_token_ids = list(example_result.trace.full_token_ids)
         pass2_fed_token_ids = list(example_result.pass2_replayed_token_ids) or None
+
+        # The scientific derivations below are the SAME single helpers the
+        # successful worker path uses (`kvcot.discovery.b2a_evidence`) --
+        # never a second, divergent reimplementation. Each is guarded so a
+        # partially-constructed (or test-fake) example result contributes
+        # whatever it genuinely has, and nothing more is fabricated.
+        from kvcot.discovery.b2a_evidence import (
+            build_no_op_evidence,
+            build_replay_evidence,
+            derive_compaction_positions,
+            derive_failed_pair_identities,
+        )
+
+        failed_pair_identities = derive_failed_pair_identities(
+            attempted_pair_identities, completed_pair_identities, raw_failure_details
+        )
+        if hasattr(example_result, "pair_records"):
+            no_op_evidence = build_no_op_evidence(example_result) or None
+        if example_result.trace is not None and hasattr(example_result.trace, "compaction_events"):
+            pass1_compaction_positions, pass2_compaction_positions = derive_compaction_positions(example_result)
+        instrumented = scope.get("instrumented")
+        if instrumented is not None and example_result.trace is not None:
+            replay_evidence = build_replay_evidence(
+                example_result,
+                pass1_events=instrumented.pass1_trace.events,
+                pass2_events=instrumented.pass2_trace.events,
+                actual_call_export=actual_call_evidence,
+            )
 
     return PartialWorkerEvidence(
         role=role,
@@ -194,12 +283,25 @@ def capture_partial_evidence(
         actual_call_evidence=actual_call_evidence,
         pass1_token_ids=pass1_token_ids,
         pass2_fed_token_ids=pass2_fed_token_ids,
+        pass1_compaction_positions=pass1_compaction_positions,
+        pass2_compaction_positions=pass2_compaction_positions,
         selected_event_evidence=selected_event_evidence,
+        minimized_target_evidence=minimized_target_evidence,
         attempted_pair_identities=attempted_pair_identities,
         completed_pair_identities=completed_pair_identities,
+        failed_pair_identities=failed_pair_identities,
+        pair_failure_details=pair_failure_details,
         semantic_mutation_reports=semantic_mutation_reports,
+        pre_branch_memory_evidence=pre_branch_memory_evidence,
+        no_op_identity=no_op_identity,
+        no_op_evidence=no_op_evidence,
+        replay_evidence=replay_evidence,
         example_attrition=_attrition_snapshot(scope, "example_attrition"),
         pair_attrition=_attrition_snapshot(scope, "pair_attrition"),
+        example_aborted=example_aborted,
+        abort_failure_type=abort_failure_type,
+        abort_failure_message=abort_failure_message,
+        abort_is_oom=abort_is_oom,
         peak_cuda_allocated_bytes=peak_allocated,
         peak_cuda_reserved_bytes=peak_reserved,
         is_oom=is_oom,

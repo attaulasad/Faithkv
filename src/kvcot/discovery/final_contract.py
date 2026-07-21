@@ -35,6 +35,13 @@ FINAL_MANDATORY_GATE_CONDITIONS: tuple[str, ...] = (
     "authorized_no_op_identity_exact",
     "positive_semantic_swap_parity",
     "no_op_exact_parity",
+    # F7 (final independent-audit repair): a dedicated mandatory placement
+    # condition -- explicit requested-device identity plus complete
+    # CPU/disk/meta/offload rejection from BOTH workers' raw parameter-
+    # placement evidence (`kvcot.discovery.strict_device
+    # .verify_placement_from_raw_evidence`), never only the legacy
+    # measurement-level `every_parameter_on_cuda` field.
+    "no_offload_and_placement_verified",
     "all_required_timings_present",
     "all_required_memory_phases_present",
     "runtime_within_limit",
@@ -145,31 +152,140 @@ def evaluate_final_gates(conditions: Mapping[str, Any]) -> FinalGateResult:
     return FinalGateResult(passed=not failed, conditions=normalized, failed_conditions=failed)
 
 
-def timing_contract_satisfied(fullkv_records: Sequence[Mapping[str, Any]], rkv_records: Sequence[Mapping[str, Any]]) -> bool:
-    def valid(record: Mapping[str, Any]) -> bool:
-        value = record.get("duration_seconds")
-        return (
-            record.get("completed") is True
-            and isinstance(value, (int, float))
-            and math.isfinite(float(value))
-            and float(value) > 0.0
-        )
+# F9 (final independent-audit repair): exact multiplicity rules -- a
+# phase-name SET check tolerated duplicated singleton phases (two
+# `model_load` records satisfied "model_load present"). Every entry below
+# is the exact number of valid completed records that phase must have.
+FULLKV_TIMING_EXACT_MULTIPLICITY: dict[str, int] = {
+    "fullkv_worker_startup": 1,
+    "snapshot_tokenizer_resolution": 1,
+    "tokenizer_load": 1,
+    "model_load": 1,
+    "post_load_validation": 1,
+    "fullkv_prefill": 1,
+    "fullkv_complete_natural_generation": 1,
+    "fullkv_complete_worker": 1,
+}
+RKV_TIMING_EXACT_MULTIPLICITY: dict[str, int] = {
+    "rkv_worker_startup": 1,
+    "snapshot_tokenizer_resolution": 1,
+    "tokenizer_load": 1,
+    "model_load": 1,
+    "post_load_validation": 1,
+    "rkv_pass1_prefill": 1,
+    "rkv_pass2_prefill": 1,
+    "rkv_complete_pass1": 1,
+    "rkv_complete_pass2": 1,
+    "call_trace_comparison": 1,
+    "capture_gather_and_parity": 3,
+    "snapshot_creation": 3,
+    "compact_target_conversion": 1,
+    "rkv_complete_worker": 1,
+}
+FULLKV_MEMORY_EXACT_MULTIPLICITY: dict[str, int] = {
+    "before_model_load": 1,
+    "model_load": 1,
+    "post_load_baseline": 1,
+    "fullkv_complete_natural_generation": 1,
+    "fullkv_complete_worker": 1,
+}
+RKV_MEMORY_EXACT_MULTIPLICITY: dict[str, int] = {
+    "before_model_load": 1,
+    "model_load": 1,
+    "post_load_baseline": 1,
+    "rkv_complete_pass1": 1,
+    "rkv_complete_pass2": 1,
+    "compact_target_conversion": 1,
+    "rkv_complete_worker": 1,
+}
 
-    full_valid = [record for record in fullkv_records if valid(record)]
-    rkv_valid = [record for record in rkv_records if valid(record)]
-    full_names = {str(record.get("phase")) for record in full_valid}
-    rkv_names = {str(record.get("phase")) for record in rkv_valid}
-    if not set(FULLKV_REQUIRED_TIMING_PHASES).issubset(full_names):
-        return False
-    if not set(RKV_REQUIRED_TIMING_PHASES).issubset(rkv_names):
-        return False
 
-    complete_real = [name for name in rkv_names if name.startswith("real_pair:") and name.count(":") == 3]
-    complete_noop = [name for name in rkv_names if name.startswith("no_op_pair:") and name.count(":") == 3]
+def _valid_timing(record: Mapping[str, Any]) -> bool:
+    value = record.get("duration_seconds")
+    return (
+        record.get("completed") is True
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        and float(value) > 0.0
+    )
+
+
+def _phase_counts(records: Sequence[Mapping[str, Any]], valid) -> dict[str, int] | None:
+    """Counts of VALID records per phase -- `None` (reject) when any record
+    for a contract-relevant phase is present but invalid (a failed record
+    must never silently vanish and let the name-set look complete)."""
+    counts: dict[str, int] = {}
+    for record in records:
+        name = str(record.get("phase"))
+        if not valid(record):
+            return None
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def _pair_phase_multiplicities_ok(counts: dict[str, int]) -> bool:
+    complete_real = [name for name in counts if name.startswith("real_pair:") and name.count(":") == 3]
+    complete_noop = [name for name in counts if name.startswith("no_op_pair:") and name.count(":") == 3]
     if len(complete_real) != 12 or len(complete_noop) != 1:
         return False
     for complete_name in complete_real + complete_noop:
-        if any(f"{complete_name}:{subphase}" not in rkv_names for subphase in PAIR_REQUIRED_TIMING_SUBPHASES):
+        if counts[complete_name] != 1:
+            return False
+        for subphase in PAIR_REQUIRED_TIMING_SUBPHASES:
+            if counts.get(f"{complete_name}:{subphase}") != 1:
+                return False
+    return True
+
+
+def timing_contract_satisfied(
+    fullkv_records: Sequence[Mapping[str, Any]],
+    rkv_records: Sequence[Mapping[str, Any]],
+    *,
+    fullkv_actual_calls: Sequence[Mapping[str, Any]] | None = None,
+    rkv_actual_calls: Sequence[Mapping[str, Any]] | None = None,
+) -> bool:
+    """Exact-multiplicity timing contract (F9). Rejects a missing phase, a
+    duplicate singleton, a duplicate pair identity, a wrong capture count,
+    a non-finite/zero/negative duration, and a failed record masquerading
+    as completed. When actual model-call evidence is supplied, per-call
+    decode/prefill record counts must agree with it rather than any
+    hard-coded number (R-KV branch steps also record `decode` actual-call
+    events outside the pass loops, so the R-KV decode bound is a floor)."""
+    full_counts = _phase_counts(fullkv_records, _valid_timing)
+    rkv_counts = _phase_counts(rkv_records, _valid_timing)
+    if full_counts is None or rkv_counts is None:
+        return False
+    for phase, expected in FULLKV_TIMING_EXACT_MULTIPLICITY.items():
+        if full_counts.get(phase, 0) != expected:
+            return False
+    for phase, expected in RKV_TIMING_EXACT_MULTIPLICITY.items():
+        if rkv_counts.get(phase, 0) != expected:
+            return False
+    if full_counts.get("fullkv_decode", 0) < 1 or full_counts.get("answer_verification", 0) < 1:
+        return False
+    if rkv_counts.get("rkv_pass1_decode", 0) < 1 or rkv_counts.get("rkv_pass2_decode", 0) < 1:
+        return False
+    if rkv_counts.get("answer_verification", 0) < 1:
+        return False
+    if not _pair_phase_multiplicities_ok(rkv_counts):
+        return False
+
+    if fullkv_actual_calls is not None:
+        actual_prefill = sum(1 for event in fullkv_actual_calls if event.get("call_kind") == "prefill")
+        actual_decode = sum(1 for event in fullkv_actual_calls if event.get("call_kind") == "decode")
+        if full_counts.get("fullkv_prefill", 0) != actual_prefill:
+            return False
+        if full_counts.get("fullkv_decode", 0) != actual_decode:
+            return False
+    if rkv_actual_calls is not None:
+        actual_prefill = sum(1 for event in rkv_actual_calls if event.get("call_kind") == "prefill")
+        actual_decode = sum(1 for event in rkv_actual_calls if event.get("call_kind") == "decode")
+        if rkv_counts.get("rkv_pass1_prefill", 0) + rkv_counts.get("rkv_pass2_prefill", 0) != actual_prefill:
+            return False
+        # Branch-step decodes appear in actual-call evidence but not as
+        # per-call pass-loop timing records -- the pass-loop decode records
+        # can never exceed the raw actual decode count.
+        if rkv_counts.get("rkv_pass1_decode", 0) + rkv_counts.get("rkv_pass2_decode", 0) > actual_decode:
             return False
     return True
 
@@ -193,17 +309,23 @@ def memory_contract_satisfied(fullkv_records: Sequence[Mapping[str, Any]], rkv_r
             ))
         )
 
-    full_valid = [record for record in fullkv_records if valid(record)]
-    rkv_valid = [record for record in rkv_records if valid(record)]
-    full_names = {str(record.get("phase")) for record in full_valid}
-    rkv_names = {str(record.get("phase")) for record in rkv_valid}
-    if not set(FULLKV_REQUIRED_MEMORY_PHASES).issubset(full_names):
+    full_counts = _phase_counts(fullkv_records, valid)
+    rkv_counts = _phase_counts(rkv_records, valid)
+    if full_counts is None or rkv_counts is None:
         return False
-    if not set(RKV_REQUIRED_MEMORY_PHASES).issubset(rkv_names):
-        return False
+    for phase, expected in FULLKV_MEMORY_EXACT_MULTIPLICITY.items():
+        if full_counts.get(phase, 0) != expected:
+            return False
+    for phase, expected in RKV_MEMORY_EXACT_MULTIPLICITY.items():
+        if rkv_counts.get(phase, 0) != expected:
+            return False
+    real_pairs = {name: count for name, count in rkv_counts.items() if name.startswith("real_pair:") and name.count(":") == 3}
+    noop_pairs = {name: count for name, count in rkv_counts.items() if name.startswith("no_op_pair:") and name.count(":") == 3}
     return (
-        len([name for name in rkv_names if name.startswith("real_pair:") and name.count(":") == 3]) == 12
-        and len([name for name in rkv_names if name.startswith("no_op_pair:") and name.count(":") == 3]) == 1
+        len(real_pairs) == 12
+        and all(count == 1 for count in real_pairs.values())
+        and len(noop_pairs) == 1
+        and all(count == 1 for count in noop_pairs.values())
     )
 
 

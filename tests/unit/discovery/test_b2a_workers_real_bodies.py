@@ -489,7 +489,10 @@ def test_run_rkv_worker_fails_closed_when_fake_kv_cluster_disagrees_with_frozen_
             _fresh_cache_factory=lambda: _FakeCache(NUM_LAYERS), _cuda=_FakeCudaFacade(), _device="cpu",
         )
     assert isinstance(exc_info.value.__cause__, WorkerFailedError)
-    assert exc_info.value.evidence.failing_stage == "model-load completion"
+    # F1: the FAILING stage is the stage that was executing when the
+    # exception was raised -- never the last COMPLETED stage.
+    assert exc_info.value.evidence.failing_stage == "runtime R-KV config verification"
+    assert exc_info.value.evidence.last_completed_stage == "model_load"
     assert exc_info.value.evidence.is_oom is False
     # Partial evidence genuinely accumulated before this failure (model
     # load, determinism policy) survives on the typed evidence object.
@@ -515,8 +518,9 @@ def test_production_call_shape_never_passes_injection_kwargs():
     assert "_cuda" not in source
 
 
-def test_actual_worker_bodies_flow_through_envelopes_coordinator_and_artifact(monkeypatch, tmp_path):
-    """CPU end-to-end: canonical bodies -> entry envelopes -> coordinator -> artifact."""
+def _run_controlled_coordinator(monkeypatch, tmp_path):
+    """CPU end-to-end harness: canonical bodies -> entry envelopes ->
+    coordinator -> artifact. Returns `(artifact, attempt)`."""
     import contextlib
     import io
     import sys
@@ -582,19 +586,90 @@ def test_actual_worker_bodies_flow_through_envelopes_coordinator_and_artifact(mo
         return SimpleNamespace(returncode=returncode, stdout=stdout.getvalue(), stderr=stderr.getvalue())
 
     attempt = create_attempt_directory(root=tmp_path, attempt_id="cpu-e2e")
-    atomic_write_json(attempt.path / "invocation.json", {"attempt_id": attempt.attempt_id})
+    atomic_write_json(attempt.path / "invocation.json", {
+        "attempt_id": attempt.attempt_id, "started_at": "2026-01-01T00:00:00+00:00",
+        "argv": ["python", "-m", "kvcot", "b2a-calibrate", "--execute"],
+        "config_path": "controlled.yaml", "manifest_path": "controlled-manifest.json",
+    })
     atomic_write_json(attempt.path / "preflight.json", {"passed": True})
     atomic_write_json(attempt.path / "provenance.json", {"git": {"dirty": False, "rkv_submodule_match": True}})
     artifact = b2a_execute.run_b2a_calibration(
         config, manifest, config_path="controlled.yaml", manifest_path="controlled-manifest.json",
         python_executable="fake-python", subprocess_runner=runner, attempt_directory=attempt.path,
     )
+    return artifact, attempt
+
+
+def test_actual_worker_bodies_flow_through_envelopes_coordinator_and_artifact(monkeypatch, tmp_path):
+    artifact, attempt = _run_controlled_coordinator(monkeypatch, tmp_path)
     assert artifact.gate_result.passed is True
     assert artifact.artifact_path == attempt.path / "final.json"
     assert artifact.artifact_path.is_file()
     assert (attempt.path / "fullkv" / "envelope.json").is_file()
     assert (attempt.path / "rkv" / "envelope.json").is_file()
     assert (attempt.path / "rkv" / "pair_identities.json").is_file()
+    assert (attempt.path / "process_outcome.json").is_file()
     # CPU fakes are deliberately not accepted as RTX-3090/snapshot evidence.
     assert artifact.final_gate_result.passed is False
     assert "single_rtx3090_verified" in artifact.final_gate_result.failed_conditions
+    assert "no_offload_and_placement_verified" in artifact.final_gate_result.failed_conditions
+
+
+def test_coordinator_lifecycle_writes_completion_before_final_and_references_it(monkeypatch, tmp_path):
+    """F5: completion.json exists before final.json is written, so the final
+    reference manifest includes it; final.json never references itself."""
+    import json
+
+    artifact, attempt = _run_controlled_coordinator(monkeypatch, tmp_path)
+    completion = json.loads((attempt.path / "completion.json").read_text(encoding="utf-8"))
+    assert completion["attempt_id"] == attempt.attempt_id
+    assert completion["outcome"] == "gate_failed"  # CPU fakes never pass the final device gates
+    assert completion["exit_code"] == 2
+    assert completion["intended_final_relative_path"] == "final.json"
+
+    final = json.loads((attempt.path / "final.json").read_text(encoding="utf-8"))
+    listed = [item["relative_path"] for item in final["attempt_artifacts"]["files"]]
+    assert "completion.json" in listed
+    assert "process_outcome.json" in listed
+    assert "final.json" not in listed
+    assert all(item["semantic_role"] != "unknown" for item in final["attempt_artifacts"]["files"])
+
+    from kvcot.discovery.attempt_verification import verify_final_reference_manifest
+
+    ok, reasons = verify_final_reference_manifest(attempt.path)
+    assert reasons == ()
+    assert ok is True
+
+
+def test_coordinator_final_write_failure_preserves_prefinal_artifacts(monkeypatch, tmp_path):
+    """F5: a failed final.json write preserves every pre-final artifact,
+    writes final_write_failure.json, never overwrites completion.json, and
+    is never reported as a completed successful attempt."""
+    import json
+
+    import pytest as pytest_module
+
+    from kvcot.discovery import attempt_artifacts as artifacts_module
+    from kvcot.discovery.b2a_execute import B2AFinalWriteError
+
+    real_write = artifacts_module.atomic_write_json
+
+    def failing_write(path, payload):
+        if path.name == "final.json":
+            raise OSError("disk full while writing final.json")
+        return real_write(path, payload)
+
+    monkeypatch.setattr(artifacts_module, "atomic_write_json", failing_write)
+    with pytest_module.raises(B2AFinalWriteError):
+        _run_controlled_coordinator(monkeypatch, tmp_path)
+    attempt_dirs = [p for p in tmp_path.iterdir() if p.is_dir()]
+    assert len(attempt_dirs) == 1
+    attempt_path = attempt_dirs[0]
+    assert not (attempt_path / "final.json").exists()
+    assert (attempt_path / "completion.json").is_file()
+    assert (attempt_path / "final_write_failure.json").is_file()
+    failure = json.loads((attempt_path / "final_write_failure.json").read_text(encoding="utf-8"))
+    assert failure["failure_type"] == "OSError"
+    for preserved in ("invocation.json", "preflight.json", "provenance.json", "process_outcome.json",
+                      "fullkv/result.json", "rkv/result.json"):
+        assert (attempt_path / preserved).is_file()

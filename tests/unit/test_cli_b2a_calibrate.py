@@ -195,8 +195,8 @@ def test_execute_writes_real_device_preflight_evidence_and_threads_it_to_coordin
 
     fake_evidence = strict_device.StrictDeviceEvidence(
         visible_gpu_count=1, gpu_name="NVIDIA GeForce RTX 3090", device_index=0,
-        total_vram_bytes=24 * 1024**3, compute_capability=(8, 6), driver_version="555.42",
-        cuda_runtime="12.1", cudnn_version="8900", policy_satisfied=True,
+        requested_device="cuda:0", total_vram_bytes=24 * 1024**3, compute_capability=(8, 6),
+        driver_version="555.42", cuda_runtime="12.1", cudnn_version="8900", policy_satisfied=True,
     )
     monkeypatch.setattr(strict_device, "verify_single_rtx3090", lambda *a, **k: fake_evidence)
 
@@ -218,8 +218,8 @@ def test_execute_writes_real_device_preflight_evidence_and_threads_it_to_coordin
 
     assert captured_kwargs["cli_device_preflight"] == {
         "verified": True, "visible_gpu_count": 1, "gpu_name": "NVIDIA GeForce RTX 3090", "device_index": 0,
-        "total_vram_bytes": 24 * 1024**3, "compute_capability": (8, 6), "driver_version": "555.42",
-        "cuda_runtime": "12.1", "cudnn_version": "8900", "policy_satisfied": True,
+        "requested_device": "cuda:0", "total_vram_bytes": 24 * 1024**3, "compute_capability": (8, 6),
+        "driver_version": "555.42", "cuda_runtime": "12.1", "cudnn_version": "8900", "policy_satisfied": True,
     }
 
     preflight_path = _find_attempt_dir(tmp_path) / "preflight.json"
@@ -245,8 +245,8 @@ def test_execute_writes_completion_record_on_gate_failure(monkeypatch, tmp_path)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     fake_evidence = strict_device.StrictDeviceEvidence(
         visible_gpu_count=1, gpu_name="NVIDIA GeForce RTX 3090", device_index=0,
-        total_vram_bytes=24 * 1024**3, compute_capability=(8, 6), driver_version="555.42",
-        cuda_runtime="12.1", cudnn_version="8900", policy_satisfied=True,
+        requested_device="cuda:0", total_vram_bytes=24 * 1024**3, compute_capability=(8, 6),
+        driver_version="555.42", cuda_runtime="12.1", cudnn_version="8900", policy_satisfied=True,
     )
     monkeypatch.setattr(strict_device, "verify_single_rtx3090", lambda *a, **k: fake_evidence)
 
@@ -285,8 +285,8 @@ def test_execute_writes_completion_record_even_on_uncaught_exception(monkeypatch
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     fake_evidence = strict_device.StrictDeviceEvidence(
         visible_gpu_count=1, gpu_name="NVIDIA GeForce RTX 3090", device_index=0,
-        total_vram_bytes=24 * 1024**3, compute_capability=(8, 6), driver_version="555.42",
-        cuda_runtime="12.1", cudnn_version="8900", policy_satisfied=True,
+        requested_device="cuda:0", total_vram_bytes=24 * 1024**3, compute_capability=(8, 6),
+        driver_version="555.42", cuda_runtime="12.1", cudnn_version="8900", policy_satisfied=True,
     )
     monkeypatch.setattr(strict_device, "verify_single_rtx3090", lambda *a, **k: fake_evidence)
 

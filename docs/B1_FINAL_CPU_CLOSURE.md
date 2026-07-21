@@ -92,6 +92,7 @@ The canonical list is `FINAL_MANDATORY_GATE_CONDITIONS` in
 - authorized_no_op_identity_exact
 - positive_semantic_swap_parity
 - no_op_exact_parity
+- no_offload_and_placement_verified
 - all_required_timings_present
 - all_required_memory_phases_present
 - runtime_within_limit
@@ -156,3 +157,28 @@ conversion, the twelve real pairs, and the no-op. Pair construction alone
 calls the compact branch evaluator and semantic swap. The coordinator alone
 reconstructs final gates and writes `final.json`. No shadow worker, pair,
 projection, gate, or artifact path remains.
+
+## Round 4 addendum (2026-07-21)
+
+Round 3's status statements (including the earlier claim that only
+documentation items remained) were an overclaim: a final independent
+audit confirmed nine functional execution-boundary defects (F1–F9) plus
+the two formalities (F10). All ten are repaired on this branch — see
+`docs/B1_INDEPENDENT_AUDIT_REPAIR.md` §8/§9 (authoritative) and
+`docs/B1_FINAL_REPAIR_LEDGER.md` "Round 4". The mandatory final-gate list
+above now contains 30 conditions, including the round-4
+`no_offload_and_placement_verified` placement boundary. The successful
+attempt lifecycle is now: invocation → provenance → preflight → workers →
+worker/coordinator artifacts (incl. `process_outcome.json`) → gates →
+`completion.json` → pre-final verification → reference manifest →
+`final.json` last (see `docs/B1_FINAL_EXECUTION_CALL_GRAPH.md`).
+
+Current verdict (round 4): **B1 FINAL CPU CLOSURE VERDICT: INCOMPLETE —
+B2A/GPU REMAIN BLOCKED.** All F1–F10 repairs are complete and locally
+validated (1,187 collected; 1,173 passed / 14 GPU-marked deselected; both
+dry-runs exit 0); the sole open item is independent CI evidence — GitHub
+Actions is locked at the account level ("account is locked due to a
+billing issue"), so no completed successful CI run exists. No GPU
+inference was run. No model weights were downloaded. No B2A result
+exists. No B2B result exists. No real CUDA timing exists. No RTX 3090
+memory measurement exists. No FaithKV method exists.

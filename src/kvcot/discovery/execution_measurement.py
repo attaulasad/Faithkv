@@ -103,6 +103,7 @@ class MemoryPhaseEvidence:
     synchronized_after: bool
     completed: bool
     failure_type: str | None = None
+    failure_message: str | None = None
 
 
 class MemoryMeasuredOperationError(RuntimeError):
@@ -130,11 +131,11 @@ class CudaMemoryMeasurer:
         except BaseException as exc:
             self.cuda.synchronize()
             evidence = self._finish(
-                phase, allocated_before, reserved_before, reset_point, False, type(exc).__name__
+                phase, allocated_before, reserved_before, reset_point, False, type(exc).__name__, str(exc)
             )
             raise MemoryMeasuredOperationError(evidence, exc) from exc
         self.cuda.synchronize()
-        self._finish(phase, allocated_before, reserved_before, reset_point, True, None)
+        self._finish(phase, allocated_before, reserved_before, reset_point, True, None, None)
         return result
 
     def _finish(
@@ -145,6 +146,7 @@ class CudaMemoryMeasurer:
         reset_point: str,
         completed: bool,
         failure_type: str | None,
+        failure_message: str | None,
     ) -> MemoryPhaseEvidence:
         evidence = MemoryPhaseEvidence(
             phase=phase,
@@ -159,6 +161,7 @@ class CudaMemoryMeasurer:
             synchronized_after=True,
             completed=completed,
             failure_type=failure_type,
+            failure_message=failure_message,
         )
         self.records.append(evidence)
         return evidence

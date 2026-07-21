@@ -60,6 +60,7 @@ from kvcot.discovery.call_trace import (
     compare_call_boundary_traces,
 )
 from kvcot.discovery.constants import B2A_REAL_PAIR_EVALUATIONS_TOTAL, B2A_SELECTED_EVENTS
+from kvcot.discovery.worker_partial_evidence import WorkerExecutionState
 
 SubprocessRunner = Callable[..., "subprocess.CompletedProcess"]
 
@@ -454,6 +455,7 @@ def run_both_workers_via_subprocess(
                     "timeout_seconds": B2A_WORKER_TIMEOUT_SECONDS,
                     "check": False,
                     "capture_output": True,
+                    "text": True,
                 },
             )
 
@@ -615,6 +617,16 @@ def run_both_workers_via_subprocess(
             })
             atomic_write_json(tmp_dir / "rkv" / "semantic_swaps.json", rkv_result.semantic_mutation_reports)
             atomic_write_json(tmp_dir / "rkv" / "replay_evidence.json", rkv_result.replay_evidence)
+            # F4.4: the coordinator's OWN durable record of the two worker
+            # processes' outcomes -- never inferable from worker-authored
+            # artifacts alone.
+            atomic_write_json(tmp_dir / "process_outcome.json", {
+                "attempt_id": attempt_id,
+                "return_codes": {"fullkv": int(fullkv_proc.returncode), "rkv": int(rkv_proc.returncode)},
+                "timeout_state": {"fullkv": False, "rkv": False},
+                "partial_success": False,
+                "coordinator_observed_process_seconds": dict(process_seconds),
+            })
 
         shared_ok, mismatches = validate_shared_identity(fullkv_result, rkv_result)
         return WorkerCoordinationResult(
@@ -806,14 +818,10 @@ def run_fullkv_worker(
 
     cuda = _cuda if _cuda is not None else torch.cuda
     _progress = _progress or _production_progress_callback("fullkv")
-    _last_completed_stage: dict = {"stage": None}
-    _underlying_progress = _progress
-
-    def _progress(stage, status, counters=None):
-        if status == "completed":
-            _last_completed_stage["stage"] = stage
-        if _underlying_progress is not None:
-            _underlying_progress(stage, status, counters)
+    # F1: explicit typed execution-state tracking -- `current_stage` set
+    # immediately before each material operation, `last_completed_stage`
+    # only after success. On failure, failing_stage = current_stage.
+    execution_state = WorkerExecutionState(attempt_id=os.environ.get("KVCOT_B2A_ATTEMPT_ID"))
 
     cuda_available = bool(cuda.is_available())
     if not cuda_available and _load_model is None:
@@ -825,6 +833,15 @@ def run_fullkv_worker(
 
     try:
         timer = SynchronizedTimer(cuda, _clock or time.perf_counter)
+        _raw_measure = timer.measure
+
+        def _tracked_measure(phase, operation):
+            execution_state.enter(phase)
+            result = _raw_measure(phase, operation)
+            execution_state.complete(phase)
+            return result
+
+        timer.measure = _tracked_measure
         memory_meter = CudaMemoryMeasurer(cuda)
         complete_worker_started_at = timer.begin_span()
 
@@ -900,9 +917,9 @@ def run_fullkv_worker(
         )
         def validate_post_load():
             assert_no_offloaded_parameters(model)
-            return derive_parameter_placement(model)
+            return derive_parameter_placement(model, requested_device=_device)
 
-        parameter_placement = timer.measure("post_load_validation", validate_post_load)
+        parameter_placement = measured("post_load_validation", validate_post_load)
 
         num_layers = len(model.model.layers)
         num_kv_heads = model.config.num_key_value_heads
@@ -963,6 +980,7 @@ def run_fullkv_worker(
             if record.phase == "fullkv_complete_natural_generation"
         )
 
+        execution_state.enter("result construction")
         if not actual_calls.batch_size_verified:
             raise WorkerFailedError("no valid actual model-call batch evidence was recorded")
         batch_size = actual_calls.events[0].batch_size
@@ -1040,8 +1058,9 @@ def run_fullkv_worker(
         from kvcot.discovery.worker_partial_evidence import WorkerBodyFailure, capture_partial_evidence
 
         evidence = capture_partial_evidence(
-            role="fullkv", failing_stage=_last_completed_stage["stage"] or "unknown", exc=exc,
-            scope=locals(),
+            role="fullkv", failing_stage=execution_state.current_stage, exc=exc,
+            scope=locals(), attempt_id=execution_state.attempt_id,
+            last_completed_stage=execution_state.last_completed_stage,
         )
         raise WorkerBodyFailure(evidence, exc) from exc
 
@@ -1124,14 +1143,7 @@ def run_rkv_worker(
 
     cuda = _cuda if _cuda is not None else torch.cuda
     _progress = _progress or _production_progress_callback("rkv")
-    _last_completed_stage: dict = {"stage": None}
-    _underlying_progress = _progress
-
-    def _progress(stage, status, counters=None):
-        if status == "completed":
-            _last_completed_stage["stage"] = stage
-        if _underlying_progress is not None:
-            _underlying_progress(stage, status, counters)
+    execution_state = WorkerExecutionState(attempt_id=os.environ.get("KVCOT_B2A_ATTEMPT_ID"))
 
     cuda_available = bool(cuda.is_available())
     if not cuda_available and _load_model is None:
@@ -1139,6 +1151,15 @@ def run_rkv_worker(
 
     try:
         timer = SynchronizedTimer(cuda, _clock or time.perf_counter)
+        _raw_measure = timer.measure
+
+        def _tracked_measure(phase, operation):
+            execution_state.enter(phase)
+            result = _raw_measure(phase, operation)
+            execution_state.complete(phase)
+            return result
+
+        timer.measure = _tracked_measure
         memory_meter = CudaMemoryMeasurer(cuda)
         complete_worker_started_at = timer.begin_span()
 
@@ -1205,12 +1226,14 @@ def run_rkv_worker(
                     config, model_snapshot.local_path, tokenizer_snapshot.local_path, _device
                 ),
             )
+        execution_state.enter("runtime R-KV config verification")
         runtime_check = verify_runtime_matches_frozen(config.rkv, model)
         if not runtime_check.passed:
             raise WorkerFailedError(
                 f"runtime R-KV configuration disagrees with the frozen config on: {runtime_check.mismatched_fields} "
                 f"(frozen_hash={runtime_check.frozen_hash}, runtime_hash={runtime_check.runtime_hash})"
             )
+        execution_state.complete("runtime R-KV config verification")
         runtime_identity = derive_runtime_identity(
             model=model, tokenizer=tokenizer, requested_model_revision=config.model.revision,
             requested_tokenizer_revision=config.model.tokenizer_revision,
@@ -1219,9 +1242,9 @@ def run_rkv_worker(
         )
         def validate_post_load():
             assert_no_offloaded_parameters(model)
-            return derive_parameter_placement(model)
+            return derive_parameter_placement(model, requested_device=_device)
 
-        parameter_placement = timer.measure("post_load_validation", validate_post_load)
+        parameter_placement = measured("post_load_validation", validate_post_load)
         num_layers = len(model.model.layers)
         num_kv_heads = model.config.num_key_value_heads
 
@@ -1286,7 +1309,9 @@ def run_rkv_worker(
             # bridge/scored-horizon counts -- this call site only supplies
             # the real vocabulary size and those frozen counts, never a
             # pre-computed opaque byte total.
-            return check_pre_branch_memory(
+            stage = f"pre-branch admission:{kind}:{target.event_plan.compaction_event_id}"
+            execution_state.enter(stage)
+            guard_evidence = check_pre_branch_memory(
                 phase=f"{kind}:{target.event_plan.compaction_event_id}",
                 cuda=cuda,
                 snapshot=target.pristine_snapshot,
@@ -1295,6 +1320,8 @@ def run_rkv_worker(
                 bridge_token_count=BRIDGE_TOKEN_COUNT,
                 scored_token_count=SCORED_HORIZON,
             )
+            execution_state.complete(stage)
+            return guard_evidence
 
         example_result = run_example(
             example_id=manifest.unique_id, model_revision=config.model.revision,
@@ -1363,10 +1390,14 @@ def run_rkv_worker(
         if not actual_calls.batch_size_verified:
             raise WorkerFailedError("no valid actual model-call batch evidence was recorded")
         batch_size = actual_calls.events[0].batch_size
-        from kvcot.utils.hashing import sha256_int_ids, sha256_json
+        from kvcot.discovery.b2a_evidence import (
+            build_no_op_evidence,
+            build_replay_evidence,
+            derive_compaction_positions,
+            derive_failed_pair_identities,
+        )
 
-        pass1_compaction_positions = [event.absolute_event_position for event in example_result.trace.compaction_events]
-        pass2_compaction_positions = list(example_result.pass2_compaction_event_positions)
+        pass1_compaction_positions, pass2_compaction_positions = derive_compaction_positions(example_result)
         compaction_lists_match = pass1_compaction_positions == pass2_compaction_positions
         trajectory = derive_trajectory_parity_evidence(
             pass2_result_valid=example_result.valid,
@@ -1388,112 +1419,19 @@ def run_rkv_worker(
 
         attempted_identities = list(example_result.attempted_pair_identities)
         completed_identities = list(example_result.completed_pair_identities)
-        completed_keys = {tuple(sorted(identity.items())) for identity in completed_identities}
-        failed_identities = []
-        for identity in attempted_identities:
-            if tuple(sorted(identity.items())) in completed_keys:
-                continue
-            detail = next(
-                (
-                    item for item in pair_completion.pair_failure_details
-                    if item.compaction_event_id == identity["compaction_event_id"]
-                    and item.layer_index == identity["layer_index"]
-                    and item.kv_head_index == identity["kv_head_index"]
-                    and item.evicted_absolute_position == identity["candidate_absolute_position"]
-                    and item.donor_absolute_position == identity["donor_absolute_position"]
-                    and item.pair_kind == identity["pair_kind"]
-                ),
-                None,
-            )
-            failed_identities.append({
-                **identity,
-                "failure_stage": None if detail is None else detail.stage,
-                "failure_detail": None if detail is None else detail.detail,
-            })
-        no_op_records = [record for record in example_result.pair_records if record.is_noop_control]
-        no_op_reports = [
-            report for report in example_result.semantic_mutation_reports
-            if report["pair_identity"]["pair_kind"] == "no_op"
-        ]
-        no_op_evidence = {}
-        if len(no_op_records) == 1 and len(no_op_reports) == 1:
-            record = no_op_records[0]
-            report = no_op_reports[0]
-            differences = [abs(a - b) for a, b in zip(record.baseline_per_token_nll, record.swapped_per_token_nll)]
-            no_op_evidence = {
-                "baseline_nll": list(record.baseline_per_token_nll),
-                "no_op_nll": list(record.swapped_per_token_nll),
-                "baseline_nll_sha256": sha256_json(list(record.baseline_per_token_nll)),
-                "no_op_nll_sha256": sha256_json(list(record.swapped_per_token_nll)),
-                "baseline_mean_nll": sum(record.baseline_per_token_nll) / len(record.baseline_per_token_nll),
-                "no_op_mean_nll": sum(record.swapped_per_token_nll) / len(record.swapped_per_token_nll),
-                "mean_difference": record.swap_gain,
-                "maximum_absolute_per_token_difference": max(differences),
-                "starting_snapshot_sha256": report.get("starting_snapshot_sha256"),
-                "semantic_mutation_report": report,
-                "physical_byte_delta": record.net_physical_bytes_changed,
-                "provenance_before_sha256": report.get("provenance_before_sha256"),
-                "provenance_after_sha256": report.get("provenance_after_sha256"),
-                "kept_index_before_sha256": report.get("kept_index_before_sha256"),
-                "kept_index_after_sha256": report.get("kept_index_after_sha256"),
-            }
-        # Independent-audit Gate H3 repair: `first_mismatch` used to return
-        # only a bare index -- diagnosing a mismatch required re-running
-        # the model to see what the expected/observed values actually were.
-        # `build_mismatch_record` (`kvcot.discovery.mismatch`) captures the
-        # expected/observed values and lengths at the first point of
-        # divergence directly, distinguishing a genuine value difference
-        # from either sequence simply ending first, never indexing beyond
-        # either sequence.
-        from kvcot.discovery.mismatch import build_mismatch_record
-
-        def first_mismatch(left, right):
-            return build_mismatch_record(left, right).first_mismatch_index
-
-        pass1_calls = [
-            {"call_kind": event.kind, "token_ids": list(event.token_ids), "token_count": len(event.token_ids)}
-            for event in instrumented.pass1_trace.events
-        ]
-        pass2_calls = [
-            {"call_kind": event.kind, "token_ids": list(event.token_ids), "token_count": len(event.token_ids)}
-            for event in instrumented.pass2_trace.events
-        ]
+        # F2: the SAME shared helpers `capture_partial_evidence` uses on the
+        # failure path -- one implementation of each derivation, never two.
+        failed_identities = derive_failed_pair_identities(
+            attempted_identities, completed_identities, pair_completion.pair_failure_details
+        )
+        no_op_evidence = build_no_op_evidence(example_result)
         actual_call_export = actual_calls.export()
-        pass1_actual_calls = actual_call_export[: len(pass1_calls)]
-        pass2_actual_calls = actual_call_export[len(pass1_calls) : len(pass1_calls) + len(pass2_calls)]
-        pass1_token_ids = list(example_result.trace.full_token_ids)
-        pass2_fed_token_ids = list(example_result.pass2_replayed_token_ids)
-        pass1_compaction_positions_list = list(pass1_compaction_positions)
-        pass2_compaction_positions_list = list(pass2_compaction_positions)
-        replay_evidence = {
-            "pass1_token_ids": pass1_token_ids,
-            "pass1_token_sha256": sha256_int_ids(pass1_token_ids),
-            "pass2_fed_token_ids": pass2_fed_token_ids,
-            "pass2_token_sha256": sha256_int_ids(pass2_fed_token_ids),
-            "token_first_mismatch": first_mismatch(pass1_token_ids, pass2_fed_token_ids),
-            "token_mismatch": build_mismatch_record(pass1_token_ids, pass2_fed_token_ids).export(),
-            "pass1_calls": pass1_calls,
-            "pass2_calls": pass2_calls,
-            "pass1_call_sha256": sha256_json(pass1_calls),
-            "pass2_call_sha256": sha256_json(pass2_calls),
-            "call_first_mismatch": first_mismatch(pass1_calls, pass2_calls),
-            "call_mismatch": build_mismatch_record(pass1_calls, pass2_calls).export(),
-            "pass1_actual_calls": pass1_actual_calls,
-            "pass2_actual_calls": pass2_actual_calls,
-            "pass1_actual_call_sha256": sha256_json(pass1_actual_calls),
-            "pass2_actual_call_sha256": sha256_json(pass2_actual_calls),
-            "actual_call_first_mismatch": first_mismatch(pass1_actual_calls, pass2_actual_calls),
-            "actual_call_mismatch": build_mismatch_record(pass1_actual_calls, pass2_actual_calls).export(),
-            "pass1_compaction_positions": pass1_compaction_positions_list,
-            "pass2_compaction_positions": pass2_compaction_positions_list,
-            "pass1_compaction_sha256": sha256_json(pass1_compaction_positions_list),
-            "pass2_compaction_sha256": sha256_json(pass2_compaction_positions_list),
-            "compaction_first_mismatch": first_mismatch(pass1_compaction_positions_list, pass2_compaction_positions_list),
-            "compaction_mismatch": build_mismatch_record(
-                pass1_compaction_positions_list, pass2_compaction_positions_list
-            ).export(),
-            "complete_compaction_trace_match": compaction_lists_match,
-        }
+        replay_evidence = build_replay_evidence(
+            example_result,
+            pass1_events=instrumented.pass1_trace.events,
+            pass2_events=instrumented.pass2_trace.events,
+            actual_call_export=actual_call_export,
+        )
         pass1_synchronized_seconds = next(
             (record.duration_seconds for record in timer.records if record.phase == "rkv_complete_pass1"), 0.0
         )
@@ -1509,6 +1447,7 @@ def run_rkv_worker(
             if record.phase.startswith("no_op_pair:") and record.phase.count(":") == 3
         ]
 
+        execution_state.enter("result construction")
         selected_event_count_exact = pair_completion.selected_compaction_events == B2A_SELECTED_EVENTS
         real_pair_count_exact = (
             pair_completion.attempted_real_pair_count == B2A_REAL_PAIR_EVALUATIONS_TOTAL
@@ -1655,7 +1594,8 @@ def run_rkv_worker(
         from kvcot.discovery.worker_partial_evidence import WorkerBodyFailure, capture_partial_evidence
 
         evidence = capture_partial_evidence(
-            role="rkv", failing_stage=_last_completed_stage["stage"] or "unknown", exc=exc,
-            scope=locals(),
+            role="rkv", failing_stage=execution_state.current_stage, exc=exc,
+            scope=locals(), attempt_id=execution_state.attempt_id,
+            last_completed_stage=execution_state.last_completed_stage,
         )
         raise WorkerBodyFailure(evidence, exc) from exc

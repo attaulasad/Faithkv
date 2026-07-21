@@ -100,3 +100,39 @@ evidence already cited inline throughout this ledger and the audit
 document) — see `docs/B1_INDEPENDENT_AUDIT_REPAIR.md` §6. No B2A result
 exists. No B2B result exists. No real CUDA timing exists. No RTX 3090
 memory measurement exists. No FaithKV method exists.
+
+## Round 4 (2026-07-21) — final F1–F10 repairs
+
+Round 3's closing claim that "remaining gaps are now only H4.7 … and
+H8.6" was an overclaim: an independent audit verified nine further
+functional execution-boundary defects. Starting commit:
+`419bbc0020b374d6c4a2085a7a04ff293d7ec680`.
+
+| ID | Defect | Files | Focused tests | Status |
+|---|---|---|---|---|
+| F1 | `failing_stage` populated with the last *completed* stage; `attempt_id`/`last_completed_stage` omitted | `worker_partial_evidence.py` (`WorkerExecutionState`), `b2a_workers.py` | 12 stage-injection tests (`test_final_audit_repairs.py`), updated `test_b2a_workers_real_bodies.py` | Complete |
+| F2 | `failed_pair_identities`/`no_op_evidence`/`replay_evidence` and most available `ExampleResult` fields dropped on failure | `b2a_evidence.py` (shared helpers), `worker_partial_evidence.py`, `b2a_workers.py` | 6 preservation tests + structural single-derivation test | Complete |
+| F3 | Memory failure records had no `failure_message` | `execution_measurement.py` | memory-failure message/field tests | Complete |
+| F4 | Artifact verification incomplete (no top-level parsing, command identity, saved-result equality, typed validation, process outcome, progress ordering, hash recomputation) | `attempt_verification.py`, `b2a_workers.py` (`process_outcome.json`, `text: True`), `b2a_execute.py` | 38 tests in `test_attempt_verification.py` (rewritten fixture + new negatives) | Complete |
+| F5 | `final.json` written before `completion.json`; no invocation start timestamp | `b2a_execute.py` (lifecycle + `B2AFinalWriteError` + `final_write_failure.json`), `cli.py` (started_at, write-if-missing completion), `attempt_artifacts.py` (semantic-role reference manifest) | lifecycle + final-write-failure + reference-manifest tests | Complete |
+| F6 | Provenance missing RAM/OS/kernel/origin-branch/three-way ancestry; `3c853cf` sole start authority | `attempt_artifacts.py` | provenance content tests | Complete |
+| F7 | No explicit requested-device or complete placement boundary in the mandatory final gate | `strict_device.py`, `runtime_evidence.py`, `final_contract.py`, `b2a_execute.py` | 11 placement negatives, requested-device negatives, three-way mismatch | Complete |
+| F8 | Coordinator snapshot check weaker than resolver (no index/shard/inventory revalidation) | `snapshot_boundary.py`, `b2a_execute.py` | malformed-index/missing-shard/fake-inventory/wrong-hash/wrong-size/wrong-path/valid-snapshot tests | Complete |
+| F9 | Timing/memory contracts tolerated duplicate singleton phases | `final_contract.py` | duplicate-singleton/pair, capture-count, invalid-duration, actual-call-agreement, memory-duplication tests | Complete |
+| F10 | H4.7/H8.6 formalities | `docs/B1_TOKENIZER_ONLY_VALIDATION_CLARIFICATION.md`, `docs/B1_FINAL_EXECUTION_CALL_GRAPH.md` | doc-name coverage via `test_final_contract.py` | Complete |
+
+Local validation (round 4, newly observed): `python -m compileall src
+tests` clean; 1,187 tests collected; full non-GPU suite **1,173 passed,
+14 deselected**; both dry-runs exit 0; `git diff --check` clean.
+
+CI: `.github/workflows/cpu-tests.yml` is the equivalent CPU workflow, but
+every recorded run fails without starting — GitHub reports "The job was
+not started because your account is locked due to a billing issue." No
+completed successful CI run exists for any commit on this branch.
+
+**Round 4 verdict: B1 FINAL CPU CLOSURE VERDICT: INCOMPLETE — B2A/GPU
+REMAIN BLOCKED** (sole open item: independent CI evidence, blocked by the
+GitHub account lock). No GPU inference was run. No model weights were
+downloaded. No B2A result exists. No B2B result exists. No real CUDA
+timing exists. No RTX 3090 memory measurement exists. No FaithKV method
+exists.

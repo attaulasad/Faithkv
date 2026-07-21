@@ -44,6 +44,13 @@ class B2AExecutionRefused(RuntimeError):
     pass
 
 
+class B2AFinalWriteError(RuntimeError):
+    """F5: raised when every pre-final artifact was written and verified but
+    the terminal `final.json` write itself failed -- the attempt is NOT a
+    completed successful attempt, every pre-final artifact is preserved,
+    and `completion.json` is never overwritten."""
+
+
 @dataclass(frozen=True)
 class B2ACalibrationArtifact:
     config_hash: str
@@ -588,19 +595,20 @@ def run_b2a_calibration(
         rkv_submodule_match = False
         if attempt_directory is not None:
             import json
+            import sys as sys_module
 
             from kvcot.discovery.attempt_verification import verify_attempt_artifacts, verify_worker_envelopes
 
-            # Independent-audit Gate H6 repair: these two gates used to be
-            # pure file-EXISTENCE checks (`required_attempt_files
-            # .issubset(existing)`, `.is_file()`) -- they now parse and
-            # cross-validate the CONTENT of every pre-final artifact
-            # (envelope/result hash agreement, timing/memory/pair-identity/
-            # semantic-swap/replay-evidence mirrors matching their source,
-            # command role agreement, progress-journal validity) against
-            # the worker results and against each other.
+            # Independent-audit Gate H6 repair, extended by F4: the ONE
+            # authoritative attempt verifier -- parses and cross-validates
+            # every pre-final artifact's content (top-level artifacts,
+            # exact worker command identity, saved-result-vs-coordinator
+            # agreement, typed envelope/result validation, coordinator
+            # process outcome, and full progress-journal validation).
             attempt_files_verified, attempt_verification_reasons = verify_attempt_artifacts(
                 attempt_directory, fullkv_result=fullkv.model_dump(mode="json"), rkv_result=rkv.model_dump(mode="json"),
+                expected_config_hash=config_hash, expected_manifest_hash=manifest_hash,
+                python_executable=python_executable or sys_module.executable, typed_results=True,
             )
             worker_envelopes_verified = verify_worker_envelopes(attempt_directory)
             provenance_path = attempt_directory / "provenance.json"
@@ -609,7 +617,10 @@ def run_b2a_calibration(
                 git_clean_verified = provenance.get("git", {}).get("dirty") is False
                 rkv_submodule_match = provenance.get("git", {}).get("rkv_submodule_match") is True
 
-        from kvcot.discovery.snapshot_boundary import verify_snapshot_evidence_raw
+        from kvcot.discovery.snapshot_boundary import (
+            revalidate_snapshot_evidence_against_directory,
+            verify_snapshot_evidence_raw,
+        )
 
         def snapshot_verified(worker, asset: str) -> bool:
             # Independent-audit Gate H4.4/H4.6 repair: no longer trusts a
@@ -630,13 +641,20 @@ def run_b2a_calibration(
                     expected_revision=expected_revision,
                     asset_type=asset,
                 )
+                # F8: when the worker-reported local snapshot directory is
+                # readable from the coordinator, recompute the inventory,
+                # sizes, hash, and index/shard accounting from disk too.
+                and revalidate_snapshot_evidence_against_directory(worker.snapshot_evidence.get(asset))
             )
         actual_batch_size_verified = (
             fullkv.actual_batch_size_verified and rkv.actual_batch_size_verified
             and bool(fullkv.actual_call_evidence) and bool(rkv.actual_call_evidence)
             and all(call.get("batch_size") == 1 for call in fullkv.actual_call_evidence + rkv.actual_call_evidence)
         )
-        from kvcot.discovery.strict_device import verify_device_gate_from_raw_evidence
+        from kvcot.discovery.strict_device import (
+            verify_device_gate_from_raw_evidence,
+            verify_placement_from_raw_evidence,
+        )
 
         final_gate_result = evaluate_final_gates({
             "git_clean_verified": git_clean_verified,
@@ -694,7 +712,17 @@ def run_b2a_calibration(
             "authorized_no_op_identity_exact": len(attempted_noop) == len(completed_noop) == 1 and rkv.no_op_identity == attempted_noop[0],
             "positive_semantic_swap_parity": positive_semantic_swap_parity,
             "no_op_exact_parity": no_op_exact_parity,
-            "all_required_timings_present": timing_contract_satisfied(fullkv.timing_evidence, rkv.timing_evidence),
+            # F7: complete requested-device + CPU/disk/meta/offload placement
+            # boundary from BOTH workers' raw parameter-placement evidence.
+            "no_offload_and_placement_verified": verify_placement_from_raw_evidence(
+                fullkv.parameter_placement, rkv.parameter_placement
+            ),
+            # F9: exact multiplicities, with per-call decode/prefill counts
+            # cross-checked against raw actual model-call evidence.
+            "all_required_timings_present": timing_contract_satisfied(
+                fullkv.timing_evidence, rkv.timing_evidence,
+                fullkv_actual_calls=fullkv.actual_call_evidence, rkv_actual_calls=rkv.actual_call_evidence,
+            ),
             "all_required_memory_phases_present": memory_contract_satisfied(fullkv.memory_phase_evidence, rkv.memory_phase_evidence),
             "runtime_within_limit": gate_result.runtime_within_limit,
             "peak_vram_within_limit": gate_result.peak_vram_within_limit,
@@ -734,11 +762,60 @@ def run_b2a_calibration(
             "dataset_row_verification": prompt_verification,
         }
         if attempt_directory is not None:
+            # F5: the coherent successful ordering -- gates are already
+            # calculated above; `completion.json` is written BEFORE the
+            # reference manifest is built, so the manifest can include it;
+            # `final.json` is written LAST and is the only artifact
+            # excluded from its own reference set.
+            from datetime import datetime, timezone
+
             from kvcot.discovery.attempt_artifacts import atomic_write_json, build_attempt_references, AttemptDirectory
+            from kvcot.discovery.attempt_verification import verify_attempt_artifacts as _verify_prefinal
 
             attempt = AttemptDirectory(attempt_id=attempt_directory.name.rsplit("_", 1)[-1], path=attempt_directory)
-            payload["attempt_artifacts"] = build_attempt_references(attempt)
-            artifact_path = atomic_write_json(attempt_directory / "final.json", payload)
+            overall_passed = bool(gate_result.passed and final_gate_result.passed)
+            atomic_write_json(attempt_directory / "completion.json", {
+                "attempt_id": attempt.attempt_id,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "outcome": "gate_passed" if overall_passed else "gate_failed",
+                "exit_code": 0 if overall_passed else 2,
+                "gate_passed": overall_passed,
+                "intended_final_relative_path": "final.json",
+                "artifact_path": str(attempt_directory / "final.json"),
+                "config_hash": config_hash,
+                "manifest_hash": manifest_hash,
+            })
+            import sys as sys_module
+
+            prefinal_ok, prefinal_reasons = _verify_prefinal(
+                attempt_directory, fullkv_result=fullkv.model_dump(mode="json"), rkv_result=rkv.model_dump(mode="json"),
+                expected_config_hash=config_hash, expected_manifest_hash=manifest_hash,
+                python_executable=python_executable or sys_module.executable, typed_results=True,
+            )
+            payload["pre_final_verification"] = {"verified": prefinal_ok, "reasons": list(prefinal_reasons)}
+            if overall_passed and not prefinal_ok:
+                raise B2AExecutionRefused(
+                    f"pre-final artifact verification failed after completion was recorded: {list(prefinal_reasons)}"
+                )
+            payload["attempt_artifacts"] = build_attempt_references(attempt, exclude=("final.json",))
+            try:
+                artifact_path = atomic_write_json(attempt_directory / "final.json", payload)
+            except BaseException as final_exc:
+                # F5: every pre-final artifact is preserved; completion.json
+                # is never overwritten; the attempt is NOT reported as a
+                # completed successful attempt.
+                try:
+                    atomic_write_json(attempt_directory / "final_write_failure.json", {
+                        "attempt_id": attempt.attempt_id,
+                        "failure_type": type(final_exc).__name__,
+                        "failure_message": str(final_exc),
+                        "intended_final_relative_path": "final.json",
+                    })
+                except Exception:  # noqa: BLE001 -- best-effort only, never masks the real failure
+                    pass
+                raise B2AFinalWriteError(
+                    f"final.json write failed: {type(final_exc).__name__}: {final_exc}"
+                ) from final_exc
         else:
             artifact_path = build_and_write_b2a_artifact(payload, config_hash, manifest_hash)
         return B2ACalibrationArtifact(

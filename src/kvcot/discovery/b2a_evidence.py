@@ -322,3 +322,138 @@ def project_complete_pilot_gpu_hours(
         + B2B_PILOT_TOTAL_REAL_PAIR_EVALUATIONS * per_real_pair_seconds
     )
     return projected_seconds / 3600.0
+
+
+# --------------------------------------------------------------------------
+# F2 (final independent-audit repair): the one canonical implementation of
+# the failed-pair-identity, no-op, compaction-position, and replay evidence
+# derivations. Both the successful worker path
+# (`kvcot.discovery.b2a_workers.run_rkv_worker`) and the failure path
+# (`kvcot.discovery.worker_partial_evidence.capture_partial_evidence`) call
+# these -- never two divergent copies of the same scientific derivation.
+# --------------------------------------------------------------------------
+
+
+def derive_failed_pair_identities(attempted, completed, pair_failure_details) -> list:
+    """attempted minus completed, enriched with the matching
+    `PairFailureDetail`'s stage/detail where one exists."""
+    completed_keys = {tuple(sorted(identity.items())) for identity in completed}
+    failed = []
+    for identity in attempted:
+        if tuple(sorted(identity.items())) in completed_keys:
+            continue
+        detail = next(
+            (
+                item for item in pair_failure_details
+                if item.compaction_event_id == identity.get("compaction_event_id")
+                and item.layer_index == identity.get("layer_index")
+                and item.kv_head_index == identity.get("kv_head_index")
+                and item.evicted_absolute_position == identity.get("candidate_absolute_position")
+                and item.donor_absolute_position == identity.get("donor_absolute_position")
+                and item.pair_kind == identity.get("pair_kind")
+            ),
+            None,
+        )
+        failed.append({
+            **identity,
+            "failure_stage": None if detail is None else detail.stage,
+            "failure_detail": None if detail is None else detail.detail,
+        })
+    return failed
+
+
+def build_no_op_evidence(example_result) -> dict:
+    """The numeric no-op parity evidence block. `{}` unless exactly one
+    no-op record AND exactly one no-op mutation report exist -- evidence is
+    only reported for work that genuinely happened."""
+    from kvcot.utils.hashing import sha256_json
+
+    no_op_records = [record for record in example_result.pair_records if record.is_noop_control]
+    no_op_reports = [
+        report for report in example_result.semantic_mutation_reports
+        if report.get("pair_identity", {}).get("pair_kind") == "no_op"
+    ]
+    if len(no_op_records) != 1 or len(no_op_reports) != 1:
+        return {}
+    record = no_op_records[0]
+    report = no_op_reports[0]
+    differences = [abs(a - b) for a, b in zip(record.baseline_per_token_nll, record.swapped_per_token_nll)]
+    return {
+        "baseline_nll": list(record.baseline_per_token_nll),
+        "no_op_nll": list(record.swapped_per_token_nll),
+        "baseline_nll_sha256": sha256_json(list(record.baseline_per_token_nll)),
+        "no_op_nll_sha256": sha256_json(list(record.swapped_per_token_nll)),
+        "baseline_mean_nll": sum(record.baseline_per_token_nll) / len(record.baseline_per_token_nll),
+        "no_op_mean_nll": sum(record.swapped_per_token_nll) / len(record.swapped_per_token_nll),
+        "mean_difference": record.swap_gain,
+        "maximum_absolute_per_token_difference": max(differences),
+        "starting_snapshot_sha256": report.get("starting_snapshot_sha256"),
+        "semantic_mutation_report": report,
+        "physical_byte_delta": record.net_physical_bytes_changed,
+        "provenance_before_sha256": report.get("provenance_before_sha256"),
+        "provenance_after_sha256": report.get("provenance_after_sha256"),
+        "kept_index_before_sha256": report.get("kept_index_before_sha256"),
+        "kept_index_after_sha256": report.get("kept_index_after_sha256"),
+    }
+
+
+def derive_compaction_positions(example_result) -> tuple[list, list]:
+    """(pass1_positions, pass2_positions) -- Pass 1 from the trace's own
+    compaction events, Pass 2 from the replay's observed positions."""
+    pass1 = [event.absolute_event_position for event in example_result.trace.compaction_events]
+    pass2 = list(example_result.pass2_compaction_event_positions)
+    return pass1, pass2
+
+
+def build_replay_evidence(example_result, *, pass1_events, pass2_events, actual_call_export) -> dict:
+    """The complete token/call/compaction replay-parity evidence block --
+    moved verbatim out of `run_rkv_worker`'s success path so a failing
+    worker can still report whatever replay evidence already existed."""
+    from kvcot.discovery.mismatch import build_mismatch_record
+    from kvcot.utils.hashing import sha256_int_ids, sha256_json
+
+    def first_mismatch(left, right):
+        return build_mismatch_record(left, right).first_mismatch_index
+
+    pass1_calls = [
+        {"call_kind": event.kind, "token_ids": list(event.token_ids), "token_count": len(event.token_ids)}
+        for event in pass1_events
+    ]
+    pass2_calls = [
+        {"call_kind": event.kind, "token_ids": list(event.token_ids), "token_count": len(event.token_ids)}
+        for event in pass2_events
+    ]
+    pass1_actual_calls = actual_call_export[: len(pass1_calls)]
+    pass2_actual_calls = actual_call_export[len(pass1_calls) : len(pass1_calls) + len(pass2_calls)]
+    pass1_token_ids = list(example_result.trace.full_token_ids)
+    pass2_fed_token_ids = list(example_result.pass2_replayed_token_ids)
+    pass1_compaction_positions, pass2_compaction_positions = derive_compaction_positions(example_result)
+    return {
+        "pass1_token_ids": pass1_token_ids,
+        "pass1_token_sha256": sha256_int_ids(pass1_token_ids),
+        "pass2_fed_token_ids": pass2_fed_token_ids,
+        "pass2_token_sha256": sha256_int_ids(pass2_fed_token_ids),
+        "token_first_mismatch": first_mismatch(pass1_token_ids, pass2_fed_token_ids),
+        "token_mismatch": build_mismatch_record(pass1_token_ids, pass2_fed_token_ids).export(),
+        "pass1_calls": pass1_calls,
+        "pass2_calls": pass2_calls,
+        "pass1_call_sha256": sha256_json(pass1_calls),
+        "pass2_call_sha256": sha256_json(pass2_calls),
+        "call_first_mismatch": first_mismatch(pass1_calls, pass2_calls),
+        "call_mismatch": build_mismatch_record(pass1_calls, pass2_calls).export(),
+        "pass1_actual_calls": pass1_actual_calls,
+        "pass2_actual_calls": pass2_actual_calls,
+        "pass1_actual_call_sha256": sha256_json(pass1_actual_calls),
+        "pass2_actual_call_sha256": sha256_json(pass2_actual_calls),
+        "actual_call_first_mismatch": first_mismatch(pass1_actual_calls, pass2_actual_calls),
+        "actual_call_mismatch": build_mismatch_record(pass1_actual_calls, pass2_actual_calls).export(),
+        "pass1_compaction_positions": pass1_compaction_positions,
+        "pass2_compaction_positions": pass2_compaction_positions,
+        "pass1_compaction_sha256": sha256_json(pass1_compaction_positions),
+        "pass2_compaction_sha256": sha256_json(pass2_compaction_positions),
+        "compaction_first_mismatch": first_mismatch(pass1_compaction_positions, pass2_compaction_positions),
+        "compaction_mismatch": build_mismatch_record(
+            pass1_compaction_positions, pass2_compaction_positions
+        ).export(),
+        "complete_compaction_trace_match": pass1_compaction_positions == pass2_compaction_positions,
+    }

@@ -447,3 +447,60 @@ No B2A result exists. No B2B result exists. No real CUDA timing exists. No
 RTX 3090 memory measurement exists. Frozen-row real eligibility remains
 unknown. No FaithKV method exists. B2A remains blocked pending another
 independent audit. B2B remains blocked.
+
+## 8. Round 4 (2026-07-21) — final bounded independent-audit repair (F1–F10)
+
+Round 3's §7 claimed the only remaining items were "audit-formality items,
+not functional defects" (H4.7 documentation and the H8.6 call-graph
+document). **That was an overclaim.** A subsequent independent audit
+verified nine further *functional* execution-boundary defects (F1–F9)
+plus the two documented formalities (F10). Round 4 fixes all of them,
+starting from commit `419bbc0020b374d6c4a2085a7a04ff293d7ec680`.
+
+| ID | Confirmed defect | Repair (files) |
+|---|---|---|
+| F1 | Both worker exception handlers reported `failing_stage=_last_completed_stage` — the last *completed* stage, not the failing one — and omitted `attempt_id`/`last_completed_stage`. | Typed `WorkerExecutionState` (`worker_partial_evidence.py`); tracked `timer.measure` wrapper + explicit stage enters in both worker bodies (`b2a_workers.py`); handlers now pass `failing_stage=current_stage`, `last_completed_stage`, `attempt_id` (from `KVCOT_B2A_ATTEMPT_ID`). 12 injection tests in `test_final_audit_repairs.py`. |
+| F2 | `PartialWorkerEvidence` declared `failed_pair_identities`/`no_op_evidence`/`replay_evidence` but `capture_partial_evidence` never populated them, and dropped minimized targets, pair failure details, no-op identity, pre-branch guard evidence, compaction positions, and abort state. | Shared single-implementation helpers `derive_failed_pair_identities`/`build_no_op_evidence`/`build_replay_evidence`/`derive_compaction_positions` (`b2a_evidence.py`) called by BOTH the success path and `capture_partial_evidence`; evidence schema extended with all listed fields plus `example_aborted`/abort type/message/OOM. 6 preservation tests. |
+| F3 | `MemoryPhaseEvidence` recorded only `failure_type`, no message. | `failure_message` added (`execution_measurement.py`); failure records preserve full phase/before/peak/after/reset/sync fields; never replaced with zero-valued success records. |
+| F4 | Verifier did not parse `invocation.json`/`preflight.json`/`provenance.json`; no completion/process-outcome/command-identity/saved-result/typed/progress-ordering/hash validation. | `attempt_verification.py` rewritten into the one authoritative verifier: top-level artifact parsing (attempt-ID agreement, timestamps, start<=finish, sanitized argv, path/hash agreement, preflight hardware schema, completion outcome/exit-code agreement, provenance git/submodule), exact worker command identity (incl. `text` mode, timeout, duplicate/contradictory flag rejection), saved-vs-coordinator result equality, typed `WorkerEnvelope`/`FullKVWorkerResult`/`RKVWorkerResult` validation, `process_outcome.json` (new coordinator-owned artifact), and full progress-journal validation (known stages/statuses, per-event IDs/timestamps, monotonic singleton ordering, no duplicate singleton completion, start-before-completion, exactly 12 unique real-pair + 1 no-op completions, no failure events, result-before-envelope). `verify_final_reference_manifest` recomputes every hash. |
+| F5 | `final.json` was written before `completion.json`, so its reference set could never include the completion record; `invocation.json` had no start timestamp. | Coordinator now writes `completion.json` (attempt ID, finished_at, outcome/exit-code/gate agreement, intended final path) BEFORE building the reference manifest and writing `final.json` LAST (`b2a_execute.py`); `final.json` is the only artifact excluded from its own reference set; final-write failure preserves all pre-final artifacts, writes atomic `final_write_failure.json`, never overwrites `completion.json`, raises `B2AFinalWriteError` (nonzero); CLI completion write is now a write-if-missing fallback; `invocation.json` gains a real UTC `started_at`. |
+| F6 | Provenance omitted total RAM, OS/kernel detail, origin-branch SHA, and hardcoded `3c853cf` as sole start authority. | `collect_execution_provenance` (`attempt_artifacts.py`): branch/HEAD/origin-main/origin-branch SHAs, dirty state + status/staged/unstaged/untracked, `419bbc0` starting commit + three-way required ancestry (`419bbc0`/`7ef13ae`/`3c853cf`), submodule observed/expected/match, full system block (OS, platform, kernel release/version, arch, CPU, logical CPUs, `total_physical_ram_bytes` via psutil/sysconf/GlobalMemoryStatusEx with honest `None`, disk free for artifacts and model cache), 9-package software block, GPU-evidence cross-references. No credentials recorded. |
+| F7 | Device gate verified card identity but not explicit requested-device identity or complete CPU/disk/meta/offload placement. | `requested_device` added to `StrictDeviceEvidence` + raw gate + three-way agreement fields (`strict_device.py`); `ParameterPlacementEvidence` gains `unique_devices` (full identity strings) + `requested_device` (`runtime_evidence.py`); new mandatory final condition `no_offload_and_placement_verified` (`final_contract.py`, wired in `b2a_execute.py`) via `verify_placement_from_raw_evidence`. 11 placement negatives + device-gate negatives. |
+| F8 | Coordinator-side snapshot check did not reproduce index/shard validation. | `VerifiedLocalSnapshot` exports inventory hash, per-file sizes, file count, index files + content hashes, referenced/missing shards, recognized weights (`snapshot_boundary.py`); `verify_snapshot_evidence_raw` revalidates all of it (internal consistency of hash and total size included); `revalidate_snapshot_evidence_against_directory` recomputes from disk when the path is readable (never network). 8 negatives. |
+| F9 | Timing/memory contracts compared phase-name sets; duplicate singletons passed. | Exact multiplicity maps + `_phase_counts` (`final_contract.py`): singletons exactly 1, `capture_gather_and_parity`/`snapshot_creation` exactly 3, 12 unique real-pair + 1 no-op complete phases each exactly 1 with every subphase exactly 1; prefill/decode timing counts checked against raw actual-call evidence (FullKV exact; R-KV prefill exact, decode floor — branch steps also record decode actual calls); rejects non-finite/zero/negative durations, failed-as-completed records, and unsynchronized memory records. |
+| F10 | H4.7/H8.6 formalities open. | `docs/B1_TOKENIZER_ONLY_VALIDATION_CLARIFICATION.md` (three-path distinction, no cross-claiming); `docs/B1_FINAL_EXECUTION_CALL_GRAPH.md` (full success + 12 failure paths, durable artifact per node). |
+
+Additional round-4 corrections while closing F4: the required progress
+stage "runtime verification" was never actually emitted in production
+(`post_load_validation` ran under `timer.measure`, which writes no journal
+event) — it now runs under `measured(...)`; worker `command.json` records
+`text: True`; the R-KV frozen-config check has its own tracked stage
+(`runtime R-KV config verification`).
+
+### CI status (honest report)
+
+`.github/workflows/cpu-tests.yml` already exists and is the equivalent CPU
+workflow the round-4 brief describes (compileall, collect-only,
+`-m "not gpu"`, `git diff --check`; no CUDA, no downloads). However, every
+recorded run — including the one for starting commit `419bbc0` — **failed
+without starting**: GitHub's check-run annotation reads *"The job was not
+started because your account is locked due to a billing issue."* This is
+an account-level GitHub Actions lock, not a code failure, and cannot be
+fixed from this repository. CI status is therefore **failed** (account
+locked), and per the completion rule the round-4 verdict below remains
+INCOMPLETE even though every F1–F10 repair, focused test, full non-GPU
+suite run, and dry-run passes locally.
+
+## 9. Round 4 verdict
+
+```
+B1 FINAL CPU CLOSURE VERDICT:
+INCOMPLETE — B2A/GPU REMAIN BLOCKED
+```
+
+All F1–F10 repairs are complete and tested locally; the sole open item is
+independent CI evidence, blocked by the GitHub account lock above. No GPU
+inference was run. No model weights were downloaded. No B2A result exists.
+No B2B result exists. No real CUDA timing exists. No RTX 3090 memory
+measurement exists. Frozen-row real eligibility remains unknown. An
+independent audit is still required. No FaithKV method exists.

@@ -98,20 +98,32 @@ MODEL_SHA = "b" * 40
 
 
 def _valid_model_evidence(**overrides) -> dict:
+    from kvcot.discovery.snapshot_boundary import compute_inventory_sha256
+
+    inventory = [["config.json", 24], ["model.safetensors", 1000]]
     base = dict(
         repository_id="org/model", requested_revision=MODEL_SHA, resolved_revision=MODEL_SHA,
         asset_type="model", local_path="/fake/path", files=["config.json", "model.safetensors"],
         total_bytes=1024, required_free_bytes=0, free_bytes=1_000_000_000, local_files_only=True,
+        file_count=2, file_inventory=inventory, inventory_sha256=compute_inventory_sha256(inventory),
+        weight_index_files=[], weight_index_sha256=[], referenced_shards=[],
+        missing_referenced_shards=[], recognized_weight_files=["model.safetensors"],
     )
     base.update(overrides)
     return base
 
 
 def _valid_tokenizer_evidence(**overrides) -> dict:
+    from kvcot.discovery.snapshot_boundary import compute_inventory_sha256
+
+    inventory = [["tokenizer_config.json", 112], ["tokenizer.json", 400]]
     base = dict(
         repository_id="org/tokenizer", requested_revision=MODEL_SHA, resolved_revision=MODEL_SHA,
         asset_type="tokenizer", local_path="/fake/path", files=["tokenizer_config.json", "tokenizer.json"],
         total_bytes=512, required_free_bytes=0, free_bytes=1_000_000_000, local_files_only=True,
+        file_count=2, file_inventory=inventory, inventory_sha256=compute_inventory_sha256(inventory),
+        weight_index_files=[], weight_index_sha256=[], referenced_shards=[],
+        missing_referenced_shards=[], recognized_weight_files=[],
     )
     base.update(overrides)
     return base

@@ -55,6 +55,11 @@ def verify_device_gate_from_raw_evidence(
             return False
         if evidence.get("device_index") != 0:
             return False
+        # F7: the EXPLICITLY requested device must be recorded and must be
+        # exactly "cuda:0" -- a missing requested-device field fails, never
+        # passes by omission.
+        if evidence.get("requested_device") != "cuda:0":
+            return False
         gpu_name = str(evidence.get("gpu_name") or "")
         if "RTX 3090" not in gpu_name.upper():
             return False
@@ -75,7 +80,7 @@ def verify_device_gate_from_raw_evidence(
         return False
 
     agreement_fields = (
-        "gpu_name", "device_index", "total_vram_bytes", "compute_capability",
+        "gpu_name", "device_index", "requested_device", "total_vram_bytes", "compute_capability",
         "driver_version", "cuda_runtime", "cudnn_version",
     )
     reference = observations[0]
@@ -86,11 +91,61 @@ def verify_device_gate_from_raw_evidence(
     )
 
 
+def verify_placement_from_raw_evidence(
+    fullkv_placement: dict[str, Any],
+    rkv_placement: dict[str, Any],
+    *,
+    requested_device: str = "cuda:0",
+) -> bool:
+    """F7: the dedicated `no_offload_and_placement_verified` final gate --
+    recomputed from BOTH workers' raw `ParameterPlacementEvidence` dicts,
+    never the legacy top-level `every_parameter_on_cuda` field alone.
+    Requires, for each worker: an explicitly recorded requested device equal
+    to `cuda:0`; a positive parameter count; a device-type walk of exactly
+    `{"cuda"}`; a per-parameter device walk of exactly `{"cuda:0"}` (no CPU,
+    disk-offloaded, meta, or off-index parameter); and an `hf_device_map`
+    that is either absent or maps every module to `cuda:0`/index `0` (no
+    cpu/disk/meta entry, no automatic/offloaded map)."""
+
+    def _ok(placement: Any) -> bool:
+        if not isinstance(placement, dict):
+            return False
+        if placement.get("requested_device") != requested_device:
+            return False
+        if placement.get("every_parameter_on_cuda") is not True:
+            return False
+        if placement.get("no_offload_verified") is not True:
+            return False
+        count = placement.get("parameter_count")
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            return False
+        unique_types = placement.get("unique_device_types")
+        if not isinstance(unique_types, (list, tuple)) or list(unique_types) != ["cuda"]:
+            return False
+        unique_devices = placement.get("unique_devices")
+        if not isinstance(unique_devices, (list, tuple)) or list(unique_devices) != [requested_device]:
+            return False
+        device_map = placement.get("hf_device_map")
+        if device_map is not None:
+            if not isinstance(device_map, dict):
+                return False
+            for value in device_map.values():
+                normalized = str(value).lower()
+                if normalized in ("cpu", "disk", "meta", "auto"):
+                    return False
+                if normalized not in (requested_device, requested_device.split(":", 1)[-1], "cuda"):
+                    return False
+        return True
+
+    return _ok(fullkv_placement) and _ok(rkv_placement)
+
+
 @dataclass(frozen=True)
 class StrictDeviceEvidence:
     visible_gpu_count: int
     gpu_name: str
     device_index: int
+    requested_device: str
     total_vram_bytes: int
     compute_capability: tuple[int, int]
     driver_version: str
@@ -118,7 +173,10 @@ def verify_single_rtx3090(
     *,
     torch_module: Any,
     driver_version_fn: Callable[[], str] = _driver_version,
+    requested_device: str = "cuda:0",
 ) -> StrictDeviceEvidence:
+    if requested_device != "cuda:0":
+        raise StrictDeviceError(f"B2A requires the explicit device 'cuda:0', requested {requested_device!r}")
     count = int(cuda.device_count())
     if count != 1:
         raise StrictDeviceError(f"B2A requires exactly one visible CUDA device, observed {count}")
@@ -136,6 +194,7 @@ def verify_single_rtx3090(
         visible_gpu_count=count,
         gpu_name=name,
         device_index=index,
+        requested_device=requested_device,
         total_vram_bytes=int(props.total_memory),
         compute_capability=capability,
         driver_version=str(driver_version_fn()),

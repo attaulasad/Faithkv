@@ -61,8 +61,8 @@ def test_strict_device_fails_closed_for_wrong_visibility_or_model(count, name):
 def _valid_device_evidence(**overrides) -> dict:
     base = dict(
         verified=True, visible_gpu_count=1, gpu_name="NVIDIA GeForce RTX 3090", device_index=0,
-        total_vram_bytes=24 * 1024**3, compute_capability=(8, 6), driver_version="555.42",
-        cuda_runtime="12.1", cudnn_version="8900", policy_satisfied=True,
+        requested_device="cuda:0", total_vram_bytes=24 * 1024**3, compute_capability=(8, 6),
+        driver_version="555.42", cuda_runtime="12.1", cudnn_version="8900", policy_satisfied=True,
     )
     base.update(overrides)
     return base

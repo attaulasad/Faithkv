@@ -114,15 +114,106 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def build_attempt_references(attempt: AttemptDirectory) -> dict[str, Any]:
+SEMANTIC_ROLE_BY_RELATIVE_PATH: dict[str, str] = {
+    "invocation.json": "invocation",
+    "preflight.json": "preflight",
+    "provenance.json": "provenance",
+    "completion.json": "completion",
+    "process_outcome.json": "process_outcome",
+    "failure.json": "failure",
+    "final_write_failure.json": "final_write_failure",
+}
+_SEMANTIC_ROLE_BY_WORKER_FILE: dict[str, str] = {
+    "command.json": "worker_command",
+    "stdout.log": "worker_stdout",
+    "stderr.log": "worker_stderr",
+    "progress.jsonl": "worker_progress",
+    "result.json": "worker_result",
+    "result.json.envelope.json": "worker_envelope",
+    "envelope.json": "worker_envelope",
+    "timing.json": "worker_timing",
+    "memory.json": "worker_memory",
+    "termination.json": "worker_termination",
+    "pair_identities.json": "pair_identities",
+    "semantic_swaps.json": "semantic_swaps",
+    "replay_evidence.json": "replay_evidence",
+}
+
+
+def semantic_role_for(relative_path: str) -> str:
+    if relative_path in SEMANTIC_ROLE_BY_RELATIVE_PATH:
+        return SEMANTIC_ROLE_BY_RELATIVE_PATH[relative_path]
+    parts = relative_path.split("/")
+    if len(parts) == 2 and parts[0] in ("fullkv", "rkv") and parts[1] in _SEMANTIC_ROLE_BY_WORKER_FILE:
+        return _SEMANTIC_ROLE_BY_WORKER_FILE[parts[1]]
+    return "unknown"
+
+
+def build_attempt_references(attempt: AttemptDirectory, *, exclude: tuple[str, ...] = ()) -> dict[str, Any]:
+    """F4.6/F5: the immutable pre-final reference manifest -- one entry per
+    file with relative path, semantic role, size, and SHA-256. `exclude`
+    names relative paths never listed (only ever `final.json`, which cannot
+    reference itself)."""
     references = []
     for path in sorted(file for file in attempt.path.rglob("*") if file.is_file()):
+        relative = path.relative_to(attempt.path).as_posix()
+        if relative in exclude:
+            continue
         references.append({
-            "relative_path": path.relative_to(attempt.path).as_posix(),
+            "relative_path": relative,
+            "semantic_role": semantic_role_for(relative),
             "sha256": sha256_file(path),
             "size_bytes": path.stat().st_size,
         })
     return {"attempt_id": attempt.attempt_id, "attempt_directory": attempt.path.name, "files": references}
+
+
+# F6: the B1 repair-round start authorities -- 419bbc0 is the round-four
+# starting commit; the two earlier execution-boundary commits remain
+# required ancestors. Never only 3c853cf.
+B1_REPAIR_ROUND4_STARTING_COMMIT = "419bbc0020b374d6c4a2085a7a04ff293d7ec680"
+B1_REQUIRED_ANCESTOR_SHAS: tuple[str, ...] = (
+    B1_REPAIR_ROUND4_STARTING_COMMIT,
+    "7ef13ae566e7c3e699e5143405baf76a81078edf",
+    "3c853cff34e52d792cd0e5a96d1a5369f17f8047",
+)
+
+
+def total_physical_ram_bytes() -> int | None:
+    """CPU-safe total physical RAM. `None` (honestly unavailable) when no
+    supported mechanism exists -- never a fabricated value."""
+    try:
+        import psutil
+
+        return int(psutil.virtual_memory().total)
+    except Exception:
+        pass
+    try:
+        names = getattr(os, "sysconf_names", {})
+        if "SC_PAGE_SIZE" in names and "SC_PHYS_PAGES" in names:
+            return int(os.sysconf("SC_PAGE_SIZE")) * int(os.sysconf("SC_PHYS_PAGES"))
+    except (ValueError, OSError, AttributeError):
+        pass
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            class _MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_uint32), ("dwMemoryLoad", ctypes.c_uint32),
+                    ("ullTotalPhys", ctypes.c_uint64), ("ullAvailPhys", ctypes.c_uint64),
+                    ("ullTotalPageFile", ctypes.c_uint64), ("ullAvailPageFile", ctypes.c_uint64),
+                    ("ullTotalVirtual", ctypes.c_uint64), ("ullAvailVirtual", ctypes.c_uint64),
+                    ("ullAvailExtendedVirtual", ctypes.c_uint64),
+                ]
+
+            status = _MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(_MemoryStatusEx)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+                return int(status.ullTotalPhys)
+        except Exception:
+            pass
+    return None
 
 
 def collect_execution_provenance(*, repository: Path, expected_rkv_sha: str, artifact_root: Path) -> dict[str, Any]:
@@ -149,11 +240,15 @@ def collect_execution_provenance(*, repository: Path, expected_rkv_sha: str, art
     untracked = [line[3:] for line in status_lines if line.startswith("??")]
     submodule_line = git("submodule", "status", "third_party/R-KV")
     observed_rkv_sha = submodule_line.lstrip("-+U ").split()[0] if submodule_line else None
-    starting_sha = "3c853cff34e52d792cd0e5a96d1a5369f17f8047"
-    ancestor = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", starting_sha, "HEAD"], cwd=repository,
-        check=False, capture_output=True,
-    ).returncode == 0
+    branch = git("branch", "--show-current")
+
+    def is_ancestor(sha: str) -> bool:
+        return subprocess.run(
+            ["git", "merge-base", "--is-ancestor", sha, "HEAD"], cwd=repository,
+            check=False, capture_output=True,
+        ).returncode == 0
+
+    ancestry = {sha: is_ancestor(sha) for sha in B1_REQUIRED_ANCESTOR_SHAS}
 
     package_names = (
         "torch", "transformers", "accelerate", "flash-attn", "datasets",
@@ -172,27 +267,54 @@ def collect_execution_provenance(*, repository: Path, expected_rkv_sha: str, art
     model_disk = shutil.disk_usage(cache_probe.resolve().anchor or cache_probe.resolve())
     return {
         "git": {
-            "branch": git("branch", "--show-current"),
+            "branch": branch,
             "head": git("rev-parse", "HEAD"),
             "base_main_sha": git("rev-parse", "origin/main", check=False) or None,
+            "origin_branch_sha": (git("rev-parse", f"origin/{branch}", check=False) or None) if branch else None,
             "dirty": bool(status_lines),
             "status": status_lines,
             "staged_paths": staged,
             "unstaged_paths": unstaged,
             "untracked_paths": untracked,
-            "starting_ancestor": starting_sha,
-            "starting_ancestor_verified": ancestor,
+            "starting_commit": B1_REPAIR_ROUND4_STARTING_COMMIT,
+            "required_ancestry": ancestry,
+            "all_required_ancestry_verified": all(ancestry.values()),
+            # Retained for backward compatibility with earlier artifacts --
+            # 3c853cf is no longer the SOLE start authority.
+            "starting_ancestor": "3c853cff34e52d792cd0e5a96d1a5369f17f8047",
+            "starting_ancestor_verified": ancestry["3c853cff34e52d792cd0e5a96d1a5369f17f8047"],
             "rkv_submodule_sha": observed_rkv_sha,
             "expected_rkv_sha": expected_rkv_sha,
             "rkv_submodule_match": observed_rkv_sha == expected_rkv_sha,
         },
         "software": software,
+        "system": {
+            "os": platform.system(),
+            "platform": platform.platform(),
+            "kernel_release": platform.release(),
+            "kernel_version": platform.version(),
+            "architecture": platform.machine(),
+            "cpu": platform.processor() or platform.machine(),
+            "logical_cpu_count": os.cpu_count(),
+            "total_physical_ram_bytes": total_physical_ram_bytes(),
+            "artifact_free_disk_bytes": artifact_disk.free,
+            "model_cache_free_disk_bytes": model_disk.free,
+        },
+        # Retained for backward compatibility with earlier consumers.
         "hardware": {
             "cpu": platform.processor() or platform.machine(),
             "logical_cpu_count": os.cpu_count(),
             "artifact_free_disk_bytes": artifact_disk.free,
             "model_cache_free_disk_bytes": model_disk.free,
         },
+        # F6: GPU/driver/CUDA/cuDNN evidence deliberately does NOT live here
+        # (this collector is CPU-safe) -- cross-references to where that
+        # evidence durably lives inside the same attempt directory.
+        "gpu_evidence_cross_references": [
+            "preflight.json:device",
+            "fullkv/result.json:device_evidence",
+            "rkv/result.json:device_evidence",
+        ],
     }
 
 

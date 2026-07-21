@@ -2,16 +2,27 @@
 
 ## B1 FINAL CPU CLOSURE VERDICT: INCOMPLETE — B2A/GPU REMAIN BLOCKED
 
-An independent audit found the prior "READY FOR INDEPENDENT AUDIT" verdict
-incomplete (loose `verified` booleans, a misleadingly-named timing phase,
-bare mismatch indices, total loss of partial worker evidence on failure,
-among other confirmed gaps). Three forward-only repair passes closed
-Gates H1-H7 in full and H8.2; the only remaining items are H4.7 (a
-documentation distinction) and H8.6 (a formal call-graph document), both
-audit-formality items rather than functional defects. See
-`docs/B1_INDEPENDENT_AUDIT_REPAIR.md` (authoritative for current status)
-and `docs/B1_FINAL_CPU_CLOSURE.md` (superseded, preserved as history).
-Non-GPU suite: 1102 passed, 14 deselected.
+**Round 4 (2026-07-21, current).** The round-3 paragraph below claimed
+only two documentation formalities remained — that was an overclaim. A
+final independent audit confirmed nine further functional
+execution-boundary defects (F1–F9: wrong failing-stage attribution,
+dropped partial R-KV evidence, missing memory failure messages, incomplete
+artifact verification, `final.json` written before `completion.json`,
+incomplete provenance, a narrower-than-claimed device/placement gate,
+weak snapshot revalidation, duplicate-tolerant timing/memory contracts)
+plus the two formalities (F10). All ten are repaired and locally
+validated (1,187 collected; 1,173 passed / 14 deselected; dry-runs exit
+0). The sole open item is independent CI evidence: GitHub Actions is
+locked at the account level (billing), so no run can start. See
+`docs/B1_INDEPENDENT_AUDIT_REPAIR.md` §8/§9 (authoritative),
+`docs/B1_FINAL_REPAIR_LEDGER.md` "Round 4", and
+`docs/B1_FINAL_EXECUTION_CALL_GRAPH.md`.
+
+Round 3 (historical, overclaim corrected above): three forward-only
+repair passes closed Gates H1-H7 in full and H8.2; it claimed the only
+remaining items were H4.7 and H8.6, "both audit-formality items rather
+than functional defects" — incorrect, per the round-4 findings.
+Non-GPU suite at round 3: 1102 passed, 14 deselected.
 
 No B2A result exists. No B2B result exists. No RTX 3090 timing exists. No
 FaithKV method exists. Independent audit is required before any GPU

@@ -1,5 +1,65 @@
 # Changelog
 
+## 2026-07-21 — Final bounded B1 independent-audit repair, round 4: F1–F10 (INCOMPLETE — B2A/GPU remain blocked; no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; forward-only from `419bbc0020b374d6c4a2085a7a04ff293d7ec680`)
+
+Fourth forward-only repair pass. Round 3's claim that only documentation
+remained was an overclaim: an independent audit verified nine functional
+execution-boundary defects (F1–F9) plus two formalities (F10). All ten are
+repaired. Authoritative detail: `docs/B1_INDEPENDENT_AUDIT_REPAIR.md` §8/§9;
+ledger: `docs/B1_FINAL_REPAIR_LEDGER.md` "Round 4".
+
+- **F1** — typed `WorkerExecutionState`; `failing_stage` is now the stage
+  that was *executing* at failure (never the last completed one);
+  `attempt_id`/`last_completed_stage` propagate into failure envelopes.
+- **F2** — `capture_partial_evidence` now preserves every available field
+  of an aborted example (failed/attempted/completed pair identities, pair
+  failure details, minimized targets, pre-branch guard evidence, no-op
+  identity/evidence when constructed, replay evidence, Pass-1/Pass-2 token
+  and compaction evidence, attrition, abort type/message/OOM) via the SAME
+  `b2a_evidence` helpers the success path uses — one derivation, never two.
+- **F3** — `MemoryPhaseEvidence.failure_message` added; failed measured
+  operations preserve their full record.
+- **F4** — `attempt_verification` is now the one authoritative
+  successful-attempt verifier: top-level artifact parsing/cross-checks,
+  exact worker command identity (incl. `text: True`), saved-vs-supplied
+  result equality, typed envelope/result validation, the new
+  coordinator-owned `process_outcome.json`, full progress-journal
+  validation (ordering, multiplicities, 12 unique real pairs + 1 no-op),
+  and `verify_final_reference_manifest` hash recomputation.
+- **F5** — lifecycle reordered: `completion.json` (attempt ID, outcome,
+  exit code, intended final path) is written BEFORE the reference manifest
+  and `final.json` (written LAST, excluded from its own reference set);
+  final-write failure preserves all pre-final artifacts and writes
+  `final_write_failure.json`; `invocation.json` gains a real UTC
+  `started_at`; the CLI completion write is a write-if-missing fallback.
+- **F6** — provenance completed: origin-branch SHA, three-way required
+  ancestry (`419bbc0`/`7ef13ae`/`3c853cf` — never only `3c853cf`), full
+  system block (OS/kernel/arch/CPU/logical CPUs/total physical RAM via a
+  CPU-safe chain/disk free), software versions, GPU-evidence
+  cross-references.
+- **F7** — new mandatory final gate `no_offload_and_placement_verified`:
+  explicit `requested_device == "cuda:0"` in device evidence (three-way)
+  and complete CPU/disk/meta/offload/off-index placement rejection from
+  both workers' raw parameter-placement evidence (`unique_devices`).
+- **F8** — snapshot revalidation now equals the resolver: exported
+  inventory hash/sizes/count, index content hashes, referenced/missing
+  shards, recognized weights; raw revalidation plus on-disk recomputation
+  when readable (never network).
+- **F9** — exact timing/memory multiplicities (singletons ×1, capture ×3,
+  12 unique pair phases ×1 each with every subphase ×1); decode/prefill
+  counts agree with raw actual-call evidence; duplicates and
+  failed-as-completed records rejected.
+- **F10** — `docs/B1_TOKENIZER_ONLY_VALIDATION_CLARIFICATION.md` (H4.7)
+  and `docs/B1_FINAL_EXECUTION_CALL_GRAPH.md` (H8.6).
+
+Validation (newly observed): compileall clean; 1,187 tests collected;
+non-GPU suite 1,173 passed / 14 deselected; both dry-runs exit 0;
+`git diff --check` clean. CI: the equivalent CPU workflow
+(`.github/workflows/cpu-tests.yml`) exists, but GitHub Actions is locked
+at the account level ("account is locked due to a billing issue") — no
+run starts, so no completed successful CI run exists; the verdict remains
+**INCOMPLETE — B2A/GPU REMAIN BLOCKED** on that sole open item.
+
 ## 2026-07-21 — Independent-audit repair pass on B1, round 3: verify and close remaining round-2 gaps (INCOMPLETE — GPU/B2A/B2B remain blocked; no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; prior commit `f077314...` not reset/rebased/amended)
 
 Third forward-only repair pass, prompted by a request to VERIFY round 2's

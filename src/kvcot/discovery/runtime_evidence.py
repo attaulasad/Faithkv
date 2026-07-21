@@ -83,23 +83,32 @@ def build_runtime_generation_record(
 @dataclass(frozen=True)
 class ParameterPlacementEvidence:
     unique_device_types: tuple[str, ...]
+    # F7: full device IDENTITY strings ("cuda:0"), not just device types --
+    # a parameter on cuda:1 has type "cuda" but is NOT on the requested
+    # device; only the identity walk can reject it.
+    unique_devices: tuple[str, ...]
+    requested_device: str | None
     every_parameter_on_cuda: bool
     hf_device_map: dict[str, str] | None
     no_offload_verified: bool
     parameter_count: int
 
 
-def derive_parameter_placement(model: Any) -> ParameterPlacementEvidence:
+def derive_parameter_placement(model: Any, *, requested_device: str | None = None) -> ParameterPlacementEvidence:
     """Walks every named parameter (never reads `model.device`, which
     cannot detect a partially-offloaded `device_map="auto"` load -- see
     `kvcot.discovery.no_offload`'s docstring for why) and records the
-    resulting device-type set plus, when present, `hf_device_map` --
-    `every_parameter_on_cuda`/`no_offload_verified` are DERIVED from this
-    walk, never asserted independently."""
+    resulting device-type set, the full per-device identity set, and, when
+    present, `hf_device_map` -- `every_parameter_on_cuda`/
+    `no_offload_verified` are DERIVED from this walk, never asserted
+    independently."""
     devices: set[str] = set()
+    device_identities: set[str] = set()
     n_params = 0
     for _, param in model.named_parameters():
         devices.add(param.device.type)
+        index = getattr(param.device, "index", None)
+        device_identities.add(param.device.type if index is None else f"{param.device.type}:{index}")
         n_params += 1
 
     device_map = getattr(model, "hf_device_map", None)
@@ -111,6 +120,8 @@ def derive_parameter_placement(model: Any) -> ParameterPlacementEvidence:
     )
     return ParameterPlacementEvidence(
         unique_device_types=tuple(sorted(devices)),
+        unique_devices=tuple(sorted(device_identities)),
+        requested_device=requested_device,
         every_parameter_on_cuda=every_cuda,
         hf_device_map=device_map_str,
         no_offload_verified=no_offload,
