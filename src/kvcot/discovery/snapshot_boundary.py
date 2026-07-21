@@ -137,6 +137,71 @@ def resolve_local_snapshot(
     )
 
 
+def verify_snapshot_evidence_raw(
+    evidence: dict | None,
+    *,
+    expected_repository_id: str,
+    expected_revision: str,
+    asset_type: Literal["tokenizer", "model"],
+) -> bool:
+    """Independent-audit Gate H4.4/H4.6 repair: the final coordinator gate
+    used to trust `worker.snapshot_evidence.get("verified") is True` plus a
+    single `resolved_revision` comparison -- accepting whatever a worker's
+    JSON output claimed without independently re-checking the CONTENT of
+    that claim (repository identity, asset type, exact-SHA revision
+    request/resolution agreement, `local_files_only`, a non-empty file
+    inventory, and the required config/tokenizer/weight files actually
+    being present in that inventory).
+
+    This re-validates a worker-reported `VerifiedLocalSnapshot.__dict__`
+    (as received over JSON, so a plain `dict`, never re-touching the
+    filesystem or the network) against every field `resolve_local_snapshot`
+    itself would have enforced at load time -- a schema drift or a
+    malformed/tampered worker report is caught here independently, never
+    assumed correct merely because the worker's own load succeeded."""
+    if not isinstance(evidence, dict):
+        return False
+    if evidence.get("repository_id") != expected_repository_id:
+        return False
+    if evidence.get("asset_type") != asset_type:
+        return False
+    requested = evidence.get("requested_revision")
+    resolved = evidence.get("resolved_revision")
+    if not isinstance(requested, str) or not FULL_SHA_RE.fullmatch(requested):
+        return False
+    if requested != expected_revision:
+        return False
+    if not isinstance(resolved, str) or not FULL_SHA_RE.fullmatch(resolved):
+        return False
+    if resolved != requested:
+        return False
+    if evidence.get("local_files_only") is not True:
+        return False
+    files = evidence.get("files")
+    if not isinstance(files, (list, tuple)) or len(files) == 0:
+        return False
+    files = tuple(files)
+    if any(".incomplete" in str(name) or str(name).endswith(".lock") for name in files):
+        return False
+    total_bytes = evidence.get("total_bytes")
+    if not isinstance(total_bytes, (int, float)) or isinstance(total_bytes, bool) or total_bytes <= 0:
+        return False
+    if asset_type == "tokenizer":
+        if "tokenizer_config.json" not in files:
+            return False
+        if not {"tokenizer.json", "tokenizer.model", "vocab.json"}.intersection(files):
+            return False
+    else:
+        if "config.json" not in files:
+            return False
+        has_weight = any(
+            any(Path(str(name)).match(pattern) for pattern in WEIGHT_PATTERNS) for name in files
+        )
+        if not has_weight:
+            return False
+    return True
+
+
 def contains_weight_files(path: str | Path) -> tuple[str, ...]:
     root = Path(path)
     return tuple(

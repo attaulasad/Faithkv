@@ -174,6 +174,7 @@ def run_b2a_calibration(
     python_executable: str | None = None,
     subprocess_runner=None,
     attempt_directory=None,
+    cli_device_preflight: dict[str, Any] | None = None,
 ) -> B2ACalibrationArtifact:
     """The coordinator (B1B-R3 §11, repaired B1B-R4 §8-§12/§14/§16/§21) --
     called by `kvcot.cli.cmd_b2a_calibrate --execute` (which has already
@@ -557,40 +558,55 @@ def run_b2a_calibration(
         )
 
         attempt_files_verified = False
+        attempt_verification_reasons: tuple[str, ...] = ()
         worker_envelopes_verified = False
         git_clean_verified = False
         rkv_submodule_match = False
         if attempt_directory is not None:
             import json
 
-            required_attempt_files = {
-                "invocation.json", "preflight.json", "provenance.json",
-                "fullkv/command.json", "fullkv/stdout.log", "fullkv/stderr.log", "fullkv/progress.jsonl",
-                "fullkv/envelope.json", "fullkv/result.json", "fullkv/timing.json", "fullkv/memory.json",
-                "rkv/command.json", "rkv/stdout.log", "rkv/stderr.log", "rkv/progress.jsonl",
-                "rkv/envelope.json", "rkv/result.json", "rkv/timing.json", "rkv/memory.json",
-                "rkv/pair_identities.json", "rkv/semantic_swaps.json", "rkv/replay_evidence.json",
-            }
-            existing = {
-                path.relative_to(attempt_directory).as_posix()
-                for path in attempt_directory.rglob("*") if path.is_file()
-            }
-            attempt_files_verified = required_attempt_files.issubset(existing)
-            worker_envelopes_verified = all(
-                (attempt_directory / role / "envelope.json").is_file() for role in ("fullkv", "rkv")
+            from kvcot.discovery.attempt_verification import verify_attempt_artifacts, verify_worker_envelopes
+
+            # Independent-audit Gate H6 repair: these two gates used to be
+            # pure file-EXISTENCE checks (`required_attempt_files
+            # .issubset(existing)`, `.is_file()`) -- they now parse and
+            # cross-validate the CONTENT of every pre-final artifact
+            # (envelope/result hash agreement, timing/memory/pair-identity/
+            # semantic-swap/replay-evidence mirrors matching their source,
+            # command role agreement, progress-journal validity) against
+            # the worker results and against each other.
+            attempt_files_verified, attempt_verification_reasons = verify_attempt_artifacts(
+                attempt_directory, fullkv_result=fullkv.model_dump(mode="json"), rkv_result=rkv.model_dump(mode="json"),
             )
+            worker_envelopes_verified = verify_worker_envelopes(attempt_directory)
             provenance_path = attempt_directory / "provenance.json"
             if provenance_path.is_file():
                 provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
                 git_clean_verified = provenance.get("git", {}).get("dirty") is False
                 rkv_submodule_match = provenance.get("git", {}).get("rkv_submodule_match") is True
 
-        snapshot_verified = lambda worker, asset: (
-            worker.snapshot_evidence.get("verified") is True
-            and isinstance(worker.snapshot_evidence.get(asset), dict)
-            and worker.snapshot_evidence[asset].get("resolved_revision")
-            == (config.model.revision if asset == "model" else config.model.tokenizer_revision)
-        )
+        from kvcot.discovery.snapshot_boundary import verify_snapshot_evidence_raw
+
+        def snapshot_verified(worker, asset: str) -> bool:
+            # Independent-audit Gate H4.4/H4.6 repair: no longer trusts a
+            # bare `snapshot_evidence["verified"] is True` plus a single
+            # `resolved_revision` field comparison -- fully re-validates
+            # the reported `VerifiedLocalSnapshot` content (repository
+            # identity, asset type, exact-SHA revision agreement,
+            # `local_files_only`, non-empty file inventory, no incomplete/
+            # lock files, and the required config/tokenizer/weight files
+            # actually present) from the RAW worker-reported dict.
+            expected_repository_id = config.model.name if asset == "model" else config.model.tokenizer_name
+            expected_revision = config.model.revision if asset == "model" else config.model.tokenizer_revision
+            return (
+                worker.snapshot_evidence.get("verified") is True
+                and verify_snapshot_evidence_raw(
+                    worker.snapshot_evidence.get(asset),
+                    expected_repository_id=expected_repository_id,
+                    expected_revision=expected_revision,
+                    asset_type=asset,
+                )
+            )
         actual_batch_size_verified = (
             fullkv.actual_batch_size_verified and rkv.actual_batch_size_verified
             and bool(fullkv.actual_call_evidence) and bool(rkv.actual_call_evidence)
@@ -607,7 +623,7 @@ def run_b2a_calibration(
             # presence) and their mutual agreement -- never a bare
             # worker-reported `verified=True` boolean.
             "single_rtx3090_verified": verify_device_gate_from_raw_evidence(
-                fullkv.device_evidence, rkv.device_evidence
+                fullkv.device_evidence, rkv.device_evidence, cli_device_preflight
             ),
             "local_model_snapshot_verified": snapshot_verified(fullkv, "model") and snapshot_verified(rkv, "model"),
             "local_tokenizer_snapshot_verified": (
@@ -681,6 +697,7 @@ def run_b2a_calibration(
                 "coordinator_observed_process_seconds": coordination.coordinator_observed_process_seconds,
                 "process_overhead_diagnostic": process_overhead_diagnostic,
             },
+            "cli_device_preflight": cli_device_preflight,
             "measurement": measurement.model_dump(mode="json"),
             "runtime_projection": runtime_projection.__dict__,
             "gate_result": {k: v for k, v in gate_result.__dict__.items()},
@@ -689,6 +706,7 @@ def run_b2a_calibration(
                 "conditions": final_gate_result.conditions,
                 "failed_conditions": list(final_gate_result.failed_conditions),
             },
+            "attempt_verification_reasons": list(attempt_verification_reasons),
             "dataset_row_verification": prompt_verification,
         }
         if attempt_directory is not None:

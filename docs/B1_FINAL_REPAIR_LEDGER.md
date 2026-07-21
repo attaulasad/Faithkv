@@ -51,7 +51,23 @@ above are NOT edited or re-marked.
 | H7 | No immutable start/end artifact split; no dedicated post-CUDA device preflight artifact distinct from CPU-safe provenance | Medium | Not repaired this pass | none | none | — | H7.1-H7.5 largely open; `collect_execution_provenance`/`build_attempt_references` already cover a real subset | Open |
 | H8 | Hostile audit re-run; CI workflow verified (not modified, already correct) | — | — | (audit only) | — | 1039 passed, 14 deselected; `python -m compileall`, `--collect-only`, both CLI dry-runs, `python -m kvcot --help`, `git diff --check` all exit 0 | H8.2's unified contract-consistency test not built | Partial |
 
-**Independent-audit repair pass verdict: B1 FINAL CPU CLOSURE VERDICT:
-INCOMPLETE — B2A/GPU REMAIN BLOCKED.** No B2A result exists. No B2B result
-exists. No real CUDA timing exists. No RTX 3090 memory measurement exists.
-No FaithKV method exists.
+### Round 2 (forward-only, on top of round 1's commit)
+
+Closes the majority of what round 1 left open. Full detail:
+`docs/B1_INDEPENDENT_AUDIT_REPAIR.md` §3.
+
+| ID | Confirmed defect | Risk | Files changed | Focused tests | Full-suite result | Open questions | Status |
+|---|---|---|---|---|---|---|---|
+| H4 (remainder) | No CLI preflight artifact; coordinator trusted `snapshot_evidence["verified"]` + one field | Medium-High (GPU-time) | `cli.py`, `strict_device.py`, `snapshot_boundary.py`, `b2a_execute.py` | 4 new in `test_strict_device.py`, 15 new in `test_snapshot_boundary.py`, 2 new in `test_cli_b2a_calibrate.py` | 1093 passed, 14 deselected | H4.5/H4.7 (network-fallback proof, tokenizer-validation distinction) not re-verified | Complete for H4.1-H4.4/H4.6 |
+| H5 | Pre-branch memory guard omitted shape-derived branch-horizon growth | Medium (GPU-time) | `execution_measurement.py`, `b2a_workers.py` | 6 new in `test_execution_measurement.py` | 1093 passed, 14 deselected | None for the repaired components | Complete |
+| H6 | Artifact gates were existence-only | High (GPU-time) | `attempt_verification.py` (new), `b2a_execute.py` | 16 new in `test_attempt_verification.py` | 1093 passed, 14 deselected | None for the repaired scope | Complete |
+| H7 (remainder) | No immutable start/end split; no dedicated device-preflight artifact | Medium | `cli.py` (`completion.json`; `preflight.json` now real, from H4) | 2 new in `test_cli_b2a_calibrate.py` | 1093 passed, 14 deselected | H7.4's stage-completeness verifier not built | Complete except H7.4 |
+| H8.2 | No unified contract-consistency test | Medium | `test_contract_consistency.py` (new) | 10 new tests | 1093 passed, 14 deselected | H8.6's formal call-graph document not produced | Complete |
+
+**Round 2 verdict: B1 FINAL CPU CLOSURE VERDICT: INCOMPLETE — B2A/GPU
+REMAIN BLOCKED.** Remaining gaps are narrow and named (H2.2 sub-phase
+granularity, H4.5/H4.7, H6.4 progress-duplication detection, H7.4
+stage-completeness, H8.6 formal document, `manifest_prepare.py`'s 3
+uninvestigated bare excepts) — see `docs/B1_INDEPENDENT_AUDIT_REPAIR.md`
+§5. No B2A result exists. No B2B result exists. No real CUDA timing
+exists. No RTX 3090 memory measurement exists. No FaithKV method exists.

@@ -1276,16 +1276,24 @@ def run_rkv_worker(
         if vocab_size <= 0:
             raise WorkerFailedError("model.config.vocab_size must be positive for the pre-branch memory guard")
 
+        from kvcot.discovery.constants import BRIDGE_TOKEN_COUNT, SCORED_HORIZON
+
         def _pre_branch_guard(target, kind):
-            # log-softmax materializes float32 output alongside the current
-            # vocabulary logits; account for both using the actual vocabulary.
-            known_temporary_bytes = 2 * vocab_size * 4
+            # Independent-audit Gate H5 repair: `check_pre_branch_memory`
+            # now derives K/V-growth-across-the-branch-horizon, reallocation
+            # headroom, and position-tracking growth itself from the
+            # snapshot's own real tensor shapes and the frozen
+            # bridge/scored-horizon counts -- this call site only supplies
+            # the real vocabulary size and those frozen counts, never a
+            # pre-computed opaque byte total.
             return check_pre_branch_memory(
                 phase=f"{kind}:{target.event_plan.compaction_event_id}",
                 cuda=cuda,
                 snapshot=target.pristine_snapshot,
                 selected_vector_bytes=target.persistent_tensor_bytes,
-                known_temporary_bytes=known_temporary_bytes,
+                vocab_size=vocab_size,
+                bridge_token_count=BRIDGE_TOKEN_COUNT,
+                scored_token_count=SCORED_HORIZON,
             )
 
         example_result = run_example(

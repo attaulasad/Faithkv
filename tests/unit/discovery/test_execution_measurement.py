@@ -10,6 +10,9 @@ from kvcot.discovery.execution_measurement import (
     TimedOperationError,
     build_runtime_projection,
     check_pre_branch_memory,
+    snapshot_growth_bytes_per_token,
+    snapshot_position_tracking_bytes_per_token,
+    snapshot_tensor_bytes,
 )
 from kvcot.generation.state import ModelStateSnapshot
 
@@ -74,23 +77,135 @@ def _snapshot():
     )
 
 
+def test_snapshot_growth_bytes_per_token_is_shape_derived():
+    """1 layer, num_kv_heads=1, head_dim=8, float32 (4 bytes): one more
+    decoded position adds `1 * 8 * 4 = 32` bytes to K and 32 to V."""
+    snapshot = _snapshot()
+    assert snapshot_growth_bytes_per_token(snapshot) == 64
+
+
+def test_snapshot_position_tracking_bytes_per_token_is_shape_derived():
+    """1 layer, num_kv_heads=1: one int64 position per (layer, kv_head)."""
+    snapshot = _snapshot()
+    assert snapshot_position_tracking_bytes_per_token(snapshot) == 8
+
+
 def test_pre_branch_guard_is_shape_derived_and_rejects_before_clone():
+    """Independent-audit Gate H5 repair: every component below is derived
+    from the snapshot's own real tensor shapes or the frozen
+    bridge/scored-horizon counts -- hand-computed here to prove the exact
+    formula, not just that SOME positive number came out."""
     snapshot = _snapshot()
     cuda = FakeCuda(allocated=1000, reserved=2000)
-    # One complete working clone: discovery restore transfers its tensor
-    # ownership into the live cache instead of allocating a second clone.
-    required = (2 * 1 * 1 * 4 * 8 * 4) + 64 + 128
+
+    clone_bytes = snapshot_tensor_bytes(snapshot)  # 128 (K) + 128 (V) = 256
+    assert clone_bytes == 256
+    selected_vector_bytes = 64
+    vocab_size = 10
+    bridge_token_count = 1
+    scored_token_count = 2
+    total_future_branch_tokens = bridge_token_count + scored_token_count  # 3
+    per_token_kv_growth = 64  # from test_snapshot_growth_bytes_per_token_is_shape_derived
+    complete_horizon_kv_growth = per_token_kv_growth * total_future_branch_tokens  # 192
+    append_realloc = complete_horizon_kv_growth  # 192, conservative doubling
+    query_cache_growth = 0
+    logits_bytes = vocab_size * 4  # 40
+    log_softmax_bytes = vocab_size * 4  # 40
+    nll_scalar_bytes = scored_token_count * 4  # 8
+    position_tracking_bytes = 8 * total_future_branch_tokens  # 24
+    known_temporary = logits_bytes + log_softmax_bytes + nll_scalar_bytes + position_tracking_bytes  # 112
+    required = (
+        clone_bytes + selected_vector_bytes + complete_horizon_kv_growth + append_realloc
+        + query_cache_growth + known_temporary
+    )
+    assert required == 816
+
     accepted = check_pre_branch_memory(
-        phase="pair", cuda=cuda, snapshot=snapshot, selected_vector_bytes=64,
-        known_temporary_bytes=128, safety_limit_bytes=2000 + required,
+        phase="pair", cuda=cuda, snapshot=snapshot, selected_vector_bytes=selected_vector_bytes,
+        vocab_size=vocab_size, bridge_token_count=bridge_token_count, scored_token_count=scored_token_count,
+        safety_limit_bytes=2000 + required,
     )
     rejected = check_pre_branch_memory(
-        phase="pair", cuda=cuda, snapshot=snapshot, selected_vector_bytes=64,
-        known_temporary_bytes=128, safety_limit_bytes=2000 + required - 1,
+        phase="pair", cuda=cuda, snapshot=snapshot, selected_vector_bytes=selected_vector_bytes,
+        vocab_size=vocab_size, bridge_token_count=bridge_token_count, scored_token_count=scored_token_count,
+        safety_limit_bytes=2000 + required - 1,
     )
     assert accepted.required_additional_bytes == required
     assert accepted.accepted is True
     assert rejected.accepted is False
+
+    # Every componentized field is independently visible, not just the total.
+    assert accepted.bridge_token_count == 1
+    assert accepted.scored_token_count == 2
+    assert accepted.total_future_branch_tokens == 3
+    assert accepted.per_token_kv_growth_bytes == 64
+    assert accepted.complete_horizon_kv_growth_bytes == 192
+    assert accepted.append_realloc_temporary_bytes == 192
+    assert accepted.query_cache_growth_bytes == 0
+    assert accepted.logits_bytes == 40
+    assert accepted.log_softmax_bytes == 40
+    assert accepted.nll_scalar_bytes == 8
+    assert accepted.position_tracking_bytes == 24
+    assert accepted.known_temporary_bytes == 112
+
+
+def test_pre_branch_guard_kv_growth_scales_with_cache_shape():
+    """Doubling num_kv_heads (or head_dim, or the horizon) must double the
+    corresponding growth component -- proving these are genuinely derived
+    from shape, never a fixed value regardless of model size."""
+    bigger = ModelStateSnapshot(
+        key_cache=[torch.zeros(1, 2, 4, 8)], value_cache=[torch.zeros(1, 2, 4, 8)], query_cache={},
+        compression_flags_per_layer=["none"], model_length=4, after_think=None,
+    )
+    assert snapshot_growth_bytes_per_token(bigger) == 128  # 2x num_kv_heads -> 2x growth
+    assert snapshot_position_tracking_bytes_per_token(bigger) == 16  # 2x num_kv_heads -> 2x tracking
+
+    multi_layer = ModelStateSnapshot(
+        key_cache=[torch.zeros(1, 1, 4, 8), torch.zeros(1, 1, 4, 8)],
+        value_cache=[torch.zeros(1, 1, 4, 8), torch.zeros(1, 1, 4, 8)],
+        query_cache={}, compression_flags_per_layer=["none", "none"], model_length=4, after_think=None,
+    )
+    assert snapshot_growth_bytes_per_token(multi_layer) == 128  # 2 layers -> 2x growth
+
+
+def test_pre_branch_guard_selected_vector_bytes_do_not_scale_with_cache_length():
+    """A longer PRE-EXISTING cache (more decoded positions already in the
+    snapshot) must not change `selected_vector_bytes` -- that quantity is
+    caller-supplied (the actual persisted selected-vector size), entirely
+    independent of how long the snapshot's cache already is."""
+    short_snapshot = ModelStateSnapshot(
+        key_cache=[torch.zeros(1, 1, 4, 8)], value_cache=[torch.zeros(1, 1, 4, 8)], query_cache={},
+        compression_flags_per_layer=["none"], model_length=4, after_think=None,
+    )
+    long_snapshot = ModelStateSnapshot(
+        key_cache=[torch.zeros(1, 1, 400, 8)], value_cache=[torch.zeros(1, 1, 400, 8)], query_cache={},
+        compression_flags_per_layer=["none"], model_length=400, after_think=None,
+    )
+    cuda = FakeCuda()
+    short_result = check_pre_branch_memory(
+        phase="pair", cuda=cuda, snapshot=short_snapshot, selected_vector_bytes=64, vocab_size=10,
+        bridge_token_count=1, scored_token_count=2,
+    )
+    long_result = check_pre_branch_memory(
+        phase="pair", cuda=cuda, snapshot=long_snapshot, selected_vector_bytes=64, vocab_size=10,
+        bridge_token_count=1, scored_token_count=2,
+    )
+    assert short_result.selected_vector_bytes == long_result.selected_vector_bytes == 64
+    # But the snapshot CLONE bytes (which DO scale with cache length) differ.
+    assert long_result.snapshot_clone_bytes > short_result.snapshot_clone_bytes
+    # And the per-token growth/position-tracking rates are identical (same
+    # shape per position), independent of how many positions already exist.
+    assert short_result.per_token_kv_growth_bytes == long_result.per_token_kv_growth_bytes
+
+
+def test_pre_branch_guard_fails_closed_on_non_finite_or_negative_components():
+    snapshot = _snapshot()
+    cuda = FakeCuda()
+    with pytest.raises((ValueError, TypeError)):
+        check_pre_branch_memory(
+            phase="pair", cuda=cuda, snapshot=snapshot, selected_vector_bytes=-1, vocab_size=10,
+            bridge_token_count=1, scored_token_count=2,
+        )
 
 
 def test_load_inclusive_projection_uses_max_of_twelve_real_pairs_and_excludes_noop():

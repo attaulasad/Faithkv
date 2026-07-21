@@ -6,7 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from kvcot.discovery.snapshot_boundary import SnapshotBoundaryError, resolve_local_snapshot
+from kvcot.discovery.snapshot_boundary import (
+    SnapshotBoundaryError,
+    resolve_local_snapshot,
+    verify_snapshot_evidence_raw,
+)
 from kvcot.discovery.strict_device import StrictDeviceError, verify_single_rtx3090
 
 SHA = "a" * 40
@@ -82,3 +86,147 @@ def test_strict_device_preflight_rejects_wrong_hardware(cuda, match):
             cuda, torch_module=SimpleNamespace(version=SimpleNamespace(cuda="12.8")),
             driver_version_fn=lambda: "570.00",
         )
+
+
+# --------------------------------------------------------------------------
+# Independent-audit Gate H4.4/H4.6: `verify_snapshot_evidence_raw` must
+# re-validate the CONTENT of a worker-reported snapshot dict, never trust a
+# bare `verified`/`resolved_revision` pair.
+# --------------------------------------------------------------------------
+
+MODEL_SHA = "b" * 40
+
+
+def _valid_model_evidence(**overrides) -> dict:
+    base = dict(
+        repository_id="org/model", requested_revision=MODEL_SHA, resolved_revision=MODEL_SHA,
+        asset_type="model", local_path="/fake/path", files=["config.json", "model.safetensors"],
+        total_bytes=1024, required_free_bytes=0, free_bytes=1_000_000_000, local_files_only=True,
+    )
+    base.update(overrides)
+    return base
+
+
+def _valid_tokenizer_evidence(**overrides) -> dict:
+    base = dict(
+        repository_id="org/tokenizer", requested_revision=MODEL_SHA, resolved_revision=MODEL_SHA,
+        asset_type="tokenizer", local_path="/fake/path", files=["tokenizer_config.json", "tokenizer.json"],
+        total_bytes=512, required_free_bytes=0, free_bytes=1_000_000_000, local_files_only=True,
+    )
+    base.update(overrides)
+    return base
+
+
+def test_snapshot_evidence_raw_passes_for_a_valid_model_report():
+    assert verify_snapshot_evidence_raw(
+        _valid_model_evidence(), expected_repository_id="org/model", expected_revision=MODEL_SHA,
+        asset_type="model",
+    ) is True
+
+
+def test_snapshot_evidence_raw_passes_for_a_valid_tokenizer_report():
+    assert verify_snapshot_evidence_raw(
+        _valid_tokenizer_evidence(), expected_repository_id="org/tokenizer", expected_revision=MODEL_SHA,
+        asset_type="tokenizer",
+    ) is True
+
+
+def test_snapshot_evidence_raw_fails_on_none_or_non_dict():
+    assert verify_snapshot_evidence_raw(
+        None, expected_repository_id="org/model", expected_revision=MODEL_SHA, asset_type="model",
+    ) is False
+    assert verify_snapshot_evidence_raw(
+        "not a dict", expected_repository_id="org/model", expected_revision=MODEL_SHA, asset_type="model",
+    ) is False
+
+
+def test_snapshot_evidence_raw_fails_on_wrong_repository():
+    bad = _valid_model_evidence(repository_id="org/wrong-model")
+    assert verify_snapshot_evidence_raw(
+        bad, expected_repository_id="org/model", expected_revision=MODEL_SHA, asset_type="model",
+    ) is False
+
+
+def test_snapshot_evidence_raw_fails_on_wrong_asset_type():
+    bad = _valid_model_evidence(asset_type="tokenizer")
+    assert verify_snapshot_evidence_raw(
+        bad, expected_repository_id="org/model", expected_revision=MODEL_SHA, asset_type="model",
+    ) is False
+
+
+def test_snapshot_evidence_raw_fails_on_requested_resolved_mismatch():
+    """A `requested_revision` != `resolved_revision` is a FLOATING revision
+    -- the whole point of pinning is that the request and the resolution
+    agree exactly."""
+    bad = _valid_model_evidence(resolved_revision="c" * 40)
+    assert verify_snapshot_evidence_raw(
+        bad, expected_repository_id="org/model", expected_revision=MODEL_SHA, asset_type="model",
+    ) is False
+
+
+def test_snapshot_evidence_raw_fails_on_requested_not_matching_expected():
+    bad = _valid_model_evidence(requested_revision="d" * 40, resolved_revision="d" * 40)
+    assert verify_snapshot_evidence_raw(
+        bad, expected_repository_id="org/model", expected_revision=MODEL_SHA, asset_type="model",
+    ) is False
+
+
+def test_snapshot_evidence_raw_fails_on_non_full_sha_revision():
+    bad = _valid_model_evidence(requested_revision="main", resolved_revision="main")
+    assert verify_snapshot_evidence_raw(
+        bad, expected_repository_id="org/model", expected_revision="main", asset_type="model",
+    ) is False
+
+
+def test_snapshot_evidence_raw_fails_when_local_files_only_is_not_true():
+    bad = _valid_model_evidence(local_files_only=False)
+    assert verify_snapshot_evidence_raw(
+        bad, expected_repository_id="org/model", expected_revision=MODEL_SHA, asset_type="model",
+    ) is False
+
+
+def test_snapshot_evidence_raw_fails_on_empty_file_inventory():
+    bad = _valid_model_evidence(files=[])
+    assert verify_snapshot_evidence_raw(
+        bad, expected_repository_id="org/model", expected_revision=MODEL_SHA, asset_type="model",
+    ) is False
+
+
+def test_snapshot_evidence_raw_fails_on_incomplete_or_lock_files():
+    bad = _valid_model_evidence(files=["config.json", "model.safetensors.incomplete"])
+    assert verify_snapshot_evidence_raw(
+        bad, expected_repository_id="org/model", expected_revision=MODEL_SHA, asset_type="model",
+    ) is False
+
+
+def test_snapshot_evidence_raw_fails_on_missing_model_config():
+    bad = _valid_model_evidence(files=["model.safetensors"])
+    assert verify_snapshot_evidence_raw(
+        bad, expected_repository_id="org/model", expected_revision=MODEL_SHA, asset_type="model",
+    ) is False
+
+
+def test_snapshot_evidence_raw_fails_on_missing_model_weights():
+    bad = _valid_model_evidence(files=["config.json"])
+    assert verify_snapshot_evidence_raw(
+        bad, expected_repository_id="org/model", expected_revision=MODEL_SHA, asset_type="model",
+    ) is False
+
+
+def test_snapshot_evidence_raw_fails_on_missing_tokenizer_files():
+    bad = _valid_tokenizer_evidence(files=["tokenizer_config.json"])  # no vocabulary file
+    assert verify_snapshot_evidence_raw(
+        bad, expected_repository_id="org/tokenizer", expected_revision=MODEL_SHA, asset_type="tokenizer",
+    ) is False
+
+    bad2 = _valid_tokenizer_evidence(files=["tokenizer.json"])  # no tokenizer_config.json
+    assert verify_snapshot_evidence_raw(
+        bad2, expected_repository_id="org/tokenizer", expected_revision=MODEL_SHA, asset_type="tokenizer",
+    ) is False
+
+
+def test_snapshot_evidence_raw_fails_on_non_positive_total_bytes():
+    bad = _valid_model_evidence(total_bytes=0)
+    assert verify_snapshot_evidence_raw(
+        bad, expected_repository_id="org/model", expected_revision=MODEL_SHA, asset_type="model",
+    ) is False

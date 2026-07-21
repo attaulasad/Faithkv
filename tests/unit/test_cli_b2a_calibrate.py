@@ -170,6 +170,174 @@ def test_execute_requires_cuda_when_manifest_is_resolved(monkeypatch):
         )
 
 
+def _find_attempt_dir(tmp_path) -> Path:
+    matches = list((tmp_path / "decisions").glob("b2a_attempt_*"))
+    assert len(matches) == 1, f"expected exactly one attempt directory, found {matches}"
+    return matches[0]
+
+
+def test_execute_writes_real_device_preflight_evidence_and_threads_it_to_coordinator(monkeypatch, tmp_path):
+    """Independent-audit Gate H4.3: `preflight.json` used to be a trivial
+    `{"passed": True, ...}` literal written BEFORE the CUDA check even ran,
+    with no device verification at all. `--execute` must now call the same
+    raw-evidence producer the workers use (`verify_single_rtx3090`), write
+    its REAL output into `preflight.json`, and pass it to the coordinator
+    as `cli_device_preflight` so the final gate can cross-check three
+    independent observations (CLI, FullKV, R-KV), never just two."""
+    import json
+    from types import SimpleNamespace
+
+    import torch
+
+    from kvcot.discovery import strict_device
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    fake_evidence = strict_device.StrictDeviceEvidence(
+        visible_gpu_count=1, gpu_name="NVIDIA GeForce RTX 3090", device_index=0,
+        total_vram_bytes=24 * 1024**3, compute_capability=(8, 6), driver_version="555.42",
+        cuda_runtime="12.1", cudnn_version="8900", policy_satisfied=True,
+    )
+    monkeypatch.setattr(strict_device, "verify_single_rtx3090", lambda *a, **k: fake_evidence)
+
+    captured_kwargs = {}
+
+    def fake_run_b2a_calibration(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return SimpleNamespace(
+            gate_result=SimpleNamespace(passed=True, failed_conditions=()),
+            final_gate_result=SimpleNamespace(passed=True, failed_conditions=()),
+            artifact_path=tmp_path / "final.json",
+        )
+
+    monkeypatch.setattr("kvcot.discovery.b2a_execute.run_b2a_calibration", fake_run_b2a_calibration)
+
+    cmd_b2a_calibrate(
+        Namespace(config=DISCOVERY_CONFIG, dry_run=False, execute=True, problem_index=None, limit=None)
+    )
+
+    assert captured_kwargs["cli_device_preflight"] == {
+        "verified": True, "visible_gpu_count": 1, "gpu_name": "NVIDIA GeForce RTX 3090", "device_index": 0,
+        "total_vram_bytes": 24 * 1024**3, "compute_capability": (8, 6), "driver_version": "555.42",
+        "cuda_runtime": "12.1", "cudnn_version": "8900", "policy_satisfied": True,
+    }
+
+    preflight_path = _find_attempt_dir(tmp_path) / "preflight.json"
+    assert preflight_path.is_file()
+    preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+    assert preflight["passed"] is True
+    assert preflight["device"]["gpu_name"] == "NVIDIA GeForce RTX 3090"
+    assert preflight["device"]["visible_gpu_count"] == 1
+
+
+def test_execute_writes_completion_record_on_gate_failure(monkeypatch, tmp_path):
+    """Independent-audit Gate H7.2: `invocation.json` is immutable and is
+    never rewritten with an end timestamp -- a separate `completion.json`
+    must exist recording the outcome and exit code, even when the gate
+    itself fails (not just on a clean pass)."""
+    import json
+    from types import SimpleNamespace
+
+    import torch
+
+    from kvcot.discovery import strict_device
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    fake_evidence = strict_device.StrictDeviceEvidence(
+        visible_gpu_count=1, gpu_name="NVIDIA GeForce RTX 3090", device_index=0,
+        total_vram_bytes=24 * 1024**3, compute_capability=(8, 6), driver_version="555.42",
+        cuda_runtime="12.1", cudnn_version="8900", policy_satisfied=True,
+    )
+    monkeypatch.setattr(strict_device, "verify_single_rtx3090", lambda *a, **k: fake_evidence)
+
+    def fake_run_b2a_calibration(*args, **kwargs):
+        return SimpleNamespace(
+            gate_result=SimpleNamespace(passed=False, failed_conditions=("some_condition",)),
+            final_gate_result=SimpleNamespace(passed=False, failed_conditions=("single_rtx3090_verified",)),
+            artifact_path=tmp_path / "final.json",
+        )
+
+    monkeypatch.setattr("kvcot.discovery.b2a_execute.run_b2a_calibration", fake_run_b2a_calibration)
+
+    exit_code = cmd_b2a_calibrate(
+        Namespace(config=DISCOVERY_CONFIG, dry_run=False, execute=True, problem_index=None, limit=None)
+    )
+    assert exit_code == 2
+
+    completion_path = _find_attempt_dir(tmp_path) / "completion.json"
+    assert completion_path.is_file()
+    completion = json.loads(completion_path.read_text(encoding="utf-8"))
+    assert completion["outcome"] == "gate_failed"
+    assert completion["exit_code"] == 2
+    assert completion["gate_passed"] is False
+    assert "finished_at" in completion
+
+
+def test_execute_writes_completion_record_even_on_uncaught_exception(monkeypatch, tmp_path):
+    """The completion record must exist even when the coordinator itself
+    raises (a genuine crash) -- never only on a clean return path."""
+    import json
+
+    import torch
+
+    from kvcot.discovery import strict_device
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    fake_evidence = strict_device.StrictDeviceEvidence(
+        visible_gpu_count=1, gpu_name="NVIDIA GeForce RTX 3090", device_index=0,
+        total_vram_bytes=24 * 1024**3, compute_capability=(8, 6), driver_version="555.42",
+        cuda_runtime="12.1", cudnn_version="8900", policy_satisfied=True,
+    )
+    monkeypatch.setattr(strict_device, "verify_single_rtx3090", lambda *a, **k: fake_evidence)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("simulated coordinator crash")
+
+    monkeypatch.setattr("kvcot.discovery.b2a_execute.run_b2a_calibration", boom)
+
+    with pytest.raises(RuntimeError, match="simulated coordinator crash"):
+        cmd_b2a_calibrate(
+            Namespace(config=DISCOVERY_CONFIG, dry_run=False, execute=True, problem_index=None, limit=None)
+        )
+
+    completion_path = _find_attempt_dir(tmp_path) / "completion.json"
+    assert completion_path.is_file()
+    completion = json.loads(completion_path.read_text(encoding="utf-8"))
+    assert completion["outcome"] == "exception"
+    assert completion["exit_code"] is None
+    assert completion["gate_passed"] is None
+
+
+def test_execute_refuses_and_writes_failure_when_device_preflight_fails(monkeypatch, tmp_path):
+    """A real device-verification failure (wrong GPU, wrong count, etc.)
+    must refuse BEFORE launching any worker, and record why."""
+    import json
+
+    import torch
+
+    from kvcot.discovery import strict_device
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    def boom(*a, **k):
+        raise strict_device.StrictDeviceError("B2A requires an RTX 3090, observed 'NVIDIA A100'")
+
+    monkeypatch.setattr(strict_device, "verify_single_rtx3090", boom)
+
+    with pytest.raises(SystemExit, match="device preflight failed"):
+        cmd_b2a_calibrate(
+            Namespace(config=DISCOVERY_CONFIG, dry_run=False, execute=True, problem_index=None, limit=None)
+        )
+
+    attempt_dir = _find_attempt_dir(tmp_path)
+    failure_path = attempt_dir / "failure.json"
+    assert failure_path.is_file()
+    failure = json.loads(failure_path.read_text(encoding="utf-8"))
+    assert failure["stage"] == "device_preflight"
+    assert "RTX 3090" in failure["reason"]
+    assert not (attempt_dir / "preflight.json").is_file()
+
+
 def test_rejects_bad_config_before_printing_anything(tmp_path, block_disallowed_imports):
     bad_config = tmp_path / "bad.yaml"
     bad_config.write_text(

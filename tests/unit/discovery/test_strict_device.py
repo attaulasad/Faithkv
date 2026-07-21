@@ -119,6 +119,42 @@ def test_device_gate_fails_when_verified_flag_itself_is_false():
     assert verify_device_gate_from_raw_evidence(bad, _valid_device_evidence()) is False
 
 
+def test_device_gate_passes_three_way_when_cli_preflight_agrees():
+    """Independent-audit Gate H4.3: when a CLI preflight observation is
+    supplied, it must be checked as a THIRD independent observation, never
+    silently ignored."""
+    assert verify_device_gate_from_raw_evidence(
+        _valid_device_evidence(), _valid_device_evidence(), _valid_device_evidence()
+    ) is True
+
+
+def test_device_gate_fails_when_cli_preflight_disagrees_with_workers():
+    """Both workers agree with each other but the CLI's OWN pre-launch
+    observation reports different hardware -- this must fail, exactly like
+    a FullKV/R-KV disagreement would."""
+    cli = _valid_device_evidence(gpu_name="NVIDIA GeForce RTX 3090 Ti")
+    assert verify_device_gate_from_raw_evidence(
+        _valid_device_evidence(), _valid_device_evidence(), cli
+    ) is False
+
+
+def test_device_gate_fails_when_cli_preflight_itself_is_invalid():
+    cli = _valid_device_evidence(verified=False)
+    assert verify_device_gate_from_raw_evidence(
+        _valid_device_evidence(), _valid_device_evidence(), cli
+    ) is False
+
+
+def test_device_gate_two_way_unaffected_when_cli_preflight_omitted():
+    """Backward compatibility: omitting `cli_device_preflight` (the
+    default, `None`) must behave exactly as the original two-way FullKV/
+    R-KV-only check."""
+    assert verify_device_gate_from_raw_evidence(_valid_device_evidence(), _valid_device_evidence()) is True
+    assert verify_device_gate_from_raw_evidence(
+        _valid_device_evidence(), _valid_device_evidence(), None
+    ) is True
+
+
 def test_device_gate_fails_on_cpu_disk_meta_offload_placement_evidence_absent_from_gate():
     """CPU/disk/meta placement is a SEPARATE check
     (`kvcot.discovery.runtime_evidence.derive_parameter_placement`'s

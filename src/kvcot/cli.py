@@ -2523,14 +2523,6 @@ def cmd_b2a_calibrate(args: argparse.Namespace) -> int:
             atomic_write_json(attempt.path / "failure.json", {"stage": "preflight", "blockers": blockers})
         raise SystemExit("b2a-calibrate --execute refused:\n" + "\n".join(f"  - {b}" for b in blockers))
 
-    if attempt is not None:
-        from kvcot.discovery.attempt_artifacts import atomic_write_json
-
-        atomic_write_json(
-            attempt.path / "preflight.json",
-            {"passed": True, "blockers": [], "config_hash": canonical_config_hash(config), "manifest_hash": manifest.manifest_hash()},
-        )
-
     import torch
 
     if not torch.cuda.is_available():
@@ -2541,30 +2533,92 @@ def cmd_b2a_calibrate(args: argparse.Namespace) -> int:
             )
         raise SystemExit("b2a-calibrate --execute requires CUDA; none is available on this machine.")
 
+    # Independent-audit Gate H4.3 repair: the CLI used to write a trivial
+    # `preflight.json` (`{"passed": True, ...}` -- a literal, never a real
+    # device observation) BEFORE even checking CUDA availability, and never
+    # verified the single-RTX-3090 policy at all before launching workers.
+    # `verify_single_rtx3090` is called here -- the SAME raw-evidence
+    # producer the workers themselves use (`kvcot.discovery.strict_device`)
+    # -- and its result is both written into `preflight.json` AND passed
+    # into the coordinator so the final gate can cross-check THREE
+    # independent observations (CLI, FullKV worker, R-KV worker), never
+    # just two.
+    from kvcot.discovery.strict_device import StrictDeviceError, verify_single_rtx3090
+
+    try:
+        device_preflight = verify_single_rtx3090(torch.cuda, torch_module=torch)
+    except StrictDeviceError as exc:
+        if attempt is not None:
+            from kvcot.discovery.attempt_artifacts import atomic_write_json
+            atomic_write_json(
+                attempt.path / "failure.json", {"stage": "device_preflight", "reason": str(exc)}
+            )
+        raise SystemExit(f"b2a-calibrate --execute refused: device preflight failed: {exc}")
+
+    if attempt is not None:
+        from kvcot.discovery.attempt_artifacts import atomic_write_json
+
+        atomic_write_json(
+            attempt.path / "preflight.json",
+            {
+                "passed": True, "blockers": [], "config_hash": canonical_config_hash(config),
+                "manifest_hash": manifest.manifest_hash(), "device": dict(device_preflight.__dict__),
+            },
+        )
+
     from kvcot.discovery.b2a_execute import run_b2a_calibration
     from kvcot.discovery.manifest import DEFAULT_MANIFEST_PATH
 
-    # The coordinator never loads a model itself (B1B-R3 §11) -- it launches
-    # the FullKV and R-KV workers as separate subprocesses, each re-loading
-    # config/manifest from these same paths independently.
-    artifact = run_b2a_calibration(
-        config, manifest, config_path=str(args.config), manifest_path=str(DEFAULT_MANIFEST_PATH),
-        attempt_directory=attempt.path,
-    )
-    final_passed = bool(artifact.final_gate_result is not None and artifact.final_gate_result.passed)
-    overall_passed = bool(artifact.gate_result.passed and final_passed)
-    print(f"b2a-calibrate result: passed={overall_passed}")
-    print(f"  artifact written: {artifact.artifact_path}")
-    if not overall_passed:
-        print(f"  failed_conditions={artifact.gate_result.failed_conditions}")
-        if artifact.final_gate_result is None:
-            print("  final_failed_conditions=['final_gate_result_missing']")
-        elif not artifact.final_gate_result.passed:
-            print(f"  final_failed_conditions={artifact.final_gate_result.failed_conditions}")
-        return 2
+    # Independent-audit Gate H7.2 repair: `invocation.json` is immutable
+    # (like every attempt artifact) and was never rewritten with an end
+    # timestamp -- a SEPARATE `completion.json` is now written exactly
+    # once, in a `finally` block, so it is guaranteed to exist whether this
+    # command reaches a gate result, a refusal, or an uncaught exception.
+    completion = {"outcome": "exception", "exit_code": None, "artifact_path": None, "gate_passed": None}
+    try:
+        # The coordinator never loads a model itself (B1B-R3 §11) -- it
+        # launches the FullKV and R-KV workers as separate subprocesses,
+        # each re-loading config/manifest from these same paths
+        # independently.
+        artifact = run_b2a_calibration(
+            config, manifest, config_path=str(args.config), manifest_path=str(DEFAULT_MANIFEST_PATH),
+            attempt_directory=attempt.path,
+            # Same `{"verified": True, **device.__dict__}` convention the
+            # workers themselves use (`kvcot.discovery.b2a_workers`) -- so
+            # the coordinator's raw-evidence gate treats all three
+            # observations (CLI, FullKV, R-KV) uniformly.
+            cli_device_preflight={"verified": True, **device_preflight.__dict__},
+        )
+        final_passed = bool(artifact.final_gate_result is not None and artifact.final_gate_result.passed)
+        overall_passed = bool(artifact.gate_result.passed and final_passed)
+        completion["artifact_path"] = str(artifact.artifact_path)
+        completion["gate_passed"] = overall_passed
+        print(f"b2a-calibrate result: passed={overall_passed}")
+        print(f"  artifact written: {artifact.artifact_path}")
+        if not overall_passed:
+            print(f"  failed_conditions={artifact.gate_result.failed_conditions}")
+            if artifact.final_gate_result is None:
+                print("  final_failed_conditions=['final_gate_result_missing']")
+            elif not artifact.final_gate_result.passed:
+                print(f"  final_failed_conditions={artifact.final_gate_result.failed_conditions}")
+            completion["outcome"] = "gate_failed"
+            completion["exit_code"] = 2
+            return 2
 
-    print("  stop: B2B pilot NOT started by this command.")
-    return 0
+        print("  stop: B2B pilot NOT started by this command.")
+        completion["outcome"] = "gate_passed"
+        completion["exit_code"] = 0
+        return 0
+    finally:
+        if attempt is not None:
+            import datetime as datetime_module
+
+            from kvcot.discovery.attempt_artifacts import atomic_write_json
+
+            atomic_write_json(
+                attempt.path / "completion.json",
+                {"finished_at": datetime_module.datetime.now(datetime_module.timezone.utc).isoformat(), **completion},
+            )
 
 
 # ----------------------------------------------------------------------------- main

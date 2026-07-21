@@ -1,6 +1,88 @@
 # Changelog
 
-## 2026-07-21 — Independent-audit repair pass on B1 (INCOMPLETE — GPU/B2A/B2B remain blocked; no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; prior commit `7ef13ae566e...` not reset/rebased/amended)
+## 2026-07-21 — Independent-audit repair pass on B1, round 2: close Gates H4-H8 (INCOMPLETE — GPU/B2A/B2B remain blocked; no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; prior commit `84d81a3c...` not reset/rebased/amended)
+
+Second forward-only repair pass on branch `research/b1b-r4-final-b2a-closure`,
+on top of round 1's commit (below), closing the majority of what round 1
+explicitly left open. Full detail: `docs/B1_INDEPENDENT_AUDIT_REPAIR.md`
+§3/§5; ledger: `docs/B1_FINAL_REPAIR_LEDGER.md`'s "Round 2" section.
+
+**Gate H4 (device/snapshot verification) — closed for the CPU-auditable
+path.** `kvcot.cli.cmd_b2a_calibrate --execute` used to write a trivial
+`preflight.json` literal before even checking CUDA availability, and never
+called the real device-verification function at all. It now calls
+`verify_single_rtx3090`, writes its actual result into `preflight.json`,
+and threads it into the coordinator as a third independent observation —
+`strict_device.verify_device_gate_from_raw_evidence` now cross-checks CLI,
+FullKV, and R-KV device evidence together (backward compatible: `None`
+preserves the original two-way check). New `snapshot_boundary
+.verify_snapshot_evidence_raw` re-validates a worker-reported snapshot's
+full content (repository identity, exact-SHA revision agreement,
+`local_files_only`, non-empty inventory, no incomplete/lock files,
+required files present) instead of trusting a bare `verified=True` plus
+one revision-string comparison.
+
+**Gate H5 (pre-branch memory estimate) — closed.** `check_pre_branch_memory`
+no longer takes an opaque caller-computed byte total — it derives K/V
+growth across the full bridge-plus-scored-token branch horizon, a
+conservative reallocation-headroom term, an explicit (not omitted)
+zero for R-KV's fixed-size query-cache window, and position-tracking
+growth, all from the snapshot's own real tensor shapes and the frozen
+horizon constants. Every component is independently visible on
+`PreBranchMemoryEvidence`.
+
+**Gate H6 (artifact content verification) — closed.** New module
+`kvcot.discovery.attempt_verification`: `verify_attempt_artifacts` parses
+every required pre-final artifact and cross-validates envelope/result
+hash agreement, timing/memory/pair-identity/semantic-swap/replay-evidence
+mirrors against their source, command correctness, and progress-journal
+validity — replacing the pure-existence `required_attempt_files
+.issubset(existing)` check the hostile audit flagged verbatim.
+`verify_worker_envelopes` replaces a bare `.is_file()` check similarly.
+
+**Gate H7 (provenance/progress lifecycle) — immutable start/end split and
+device-preflight artifact closed.** `cmd_b2a_calibrate --execute` now
+writes a separate, immutable `completion.json` (finished-at timestamp,
+outcome, exit code, artifact reference) in a `finally` block, guaranteed
+to exist whether the command passes, fails its gate, or crashes —
+`invocation.json` is never rewritten. `preflight.json` (from Gate H4) now
+doubles as the dedicated post-CUDA device-preflight artifact this gate
+asked for, distinct from the CPU-safe `provenance.json` written earlier.
+
+**Gate H8.2 (contract-consistency test) — built.** New
+`test_contract_consistency.py` (10 tests): every required timing phase is
+genuinely emitted in production code; `capture_and_parity` is permanently
+barred from reappearing; the dry-run's printed gate list exactly matches
+`FINAL_MANDATORY_GATE_CONDITIONS`; every mandatory gate has a real,
+directly-executed negative test; every attrition `STAGE_*` constant is
+registered in `STAGE_ORDER` in both directions; `WorkerEnvelope`'s
+failure fields match what `PartialWorkerEvidence` can populate; the
+mismatch schema is frozen; the old existence-only artifact check is
+barred from reappearing as code.
+
+**Not repaired this round (explicit):** H2.2's finer sub-phase
+granularity inside Pass 2's capture/parity work (assessed as requiring
+deep instrumentation surgery inside `pass2.py`/`capture.py`'s per-layer
+hook); H4.5/H4.7 (no new proof that prompt-tokenizer resolution can't
+fall back to network; tokenizer-only-validation distinction not
+re-examined); H6.4 (no progress-journal live-vs-materialized duplication
+detector); H7.4 (no dedicated full-stage-list completeness verifier);
+H8.6 (no standalone formal call-graph document); `manifest_prepare.py`'s
+3 pre-existing bare `except Exception:` instances remain uninvestigated.
+
+`python -m compileall src tests`: exit 0. `python -m pytest --collect-only
+-q`: 1107 tests collected. `python -m pytest -m "not gpu" -q`: 1093 passed,
+14 deselected (up from 1039 at the start of this round — 54 new tests,
+zero regressions). Both CLI dry-runs and `python -m kvcot --help` exit 0.
+`git diff --check`: exit 0 (CRLF-normalization warnings only).
+
+**B1 FINAL CPU CLOSURE VERDICT: INCOMPLETE — B2A/GPU REMAIN BLOCKED.**
+Remaining gaps are narrow and named (listed above), not open-ended. No
+B2A result exists. No B2B result exists. No real CUDA timing exists. No
+RTX 3090 memory measurement exists. No FaithKV method exists. Another
+independent audit is required before any GPU authorization.
+
+## 2026-07-21 — Independent-audit repair pass on B1, round 1: close Gates H1-H3, partial H4 (INCOMPLETE — GPU/B2A/B2B remain blocked; no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; prior commit `7ef13ae566e...` not reset/rebased/amended)
 
 Forward-only repair on branch `research/b1b-r4-final-b2a-closure`, starting
 commit `7ef13ae566e7c3e699e5143405baf76a81078edf` (self-reported "READY FOR

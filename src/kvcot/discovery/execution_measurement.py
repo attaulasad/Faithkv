@@ -180,6 +180,34 @@ def snapshot_tensor_bytes(snapshot: ModelStateSnapshot) -> int:
     return sum(tensor.numel() * tensor.element_size() for tensor in tensors)
 
 
+def snapshot_growth_bytes_per_token(snapshot: ModelStateSnapshot) -> int:
+    """Independent-audit Gate H5 repair: bytes ADDED across every layer's
+    key AND value cache for exactly one more decoded position, derived
+    entirely from the snapshot's OWN real tensor shapes/dtypes (never a
+    hard-coded head-count/head-dim/dtype-size constant) -- `key_cache[i]`
+    and `value_cache[i]` are real `(batch, num_kv_heads, seq_len,
+    head_dim)` tensors; one additional position adds
+    `num_kv_heads * head_dim * element_size` bytes to EACH of them."""
+    per_token = 0
+    for key_tensor, value_tensor in zip(snapshot.key_cache, snapshot.value_cache):
+        per_token += key_tensor.shape[1] * key_tensor.shape[-1] * key_tensor.element_size()
+        per_token += value_tensor.shape[1] * value_tensor.shape[-1] * value_tensor.element_size()
+    return per_token
+
+
+def snapshot_position_tracking_bytes_per_token(snapshot: ModelStateSnapshot) -> int:
+    """Bytes of int64 absolute-position bookkeeping
+    (`kvcot.generation.provenance.LayerProvenance`/`CompactionTracker`)
+    added per layer per KV head for one more decoded position -- derived
+    from the snapshot's own layer/head counts, never an unexplained
+    constant. `key_cache[i].shape[1]` is `num_key_value_heads` for that
+    layer (the same axis `snapshot_growth_bytes_per_token` reads)."""
+    per_token = 0
+    for key_tensor in snapshot.key_cache:
+        per_token += key_tensor.shape[1] * 8  # one int64 position per (layer, kv_head)
+    return per_token
+
+
 @dataclass(frozen=True)
 class PreBranchMemoryEvidence:
     phase: str
@@ -187,6 +215,20 @@ class PreBranchMemoryEvidence:
     reserved_before: int
     snapshot_clone_bytes: int
     selected_vector_bytes: int
+    # Independent-audit Gate H5 repair: componentized, each derived from a
+    # real shape/dtype/count rather than folded into one opaque
+    # `known_temporary_bytes` the caller had to compute itself.
+    bridge_token_count: int
+    scored_token_count: int
+    total_future_branch_tokens: int
+    per_token_kv_growth_bytes: int
+    complete_horizon_kv_growth_bytes: int
+    append_realloc_temporary_bytes: int
+    query_cache_growth_bytes: int
+    logits_bytes: int
+    log_softmax_bytes: int
+    nll_scalar_bytes: int
+    position_tracking_bytes: int
     known_temporary_bytes: int
     required_additional_bytes: int
     projected_peak_bytes: int
@@ -202,9 +244,38 @@ def check_pre_branch_memory(
     cuda: Any,
     snapshot: ModelStateSnapshot,
     selected_vector_bytes: int,
-    known_temporary_bytes: int,
+    vocab_size: int,
+    bridge_token_count: int,
+    scored_token_count: int,
     safety_limit_bytes: int = RTX3090_SAFETY_LIMIT_BYTES,
 ) -> PreBranchMemoryEvidence:
+    """Independent-audit Gate H5 repair: the prior version accounted only
+    `snapshot_clone_bytes` + `selected_vector_bytes` + a caller-supplied
+    opaque `known_temporary_bytes` -- omitting the K/V cache growth the
+    branch itself will cause across its full bridge-plus-scored horizon,
+    the temporary storage `torch.cat`-style reallocation needs while that
+    growth happens, and per-token bookkeeping (position tracking) growth.
+    Every new component below is derived from either the snapshot's own
+    real tensor shapes (`snapshot_growth_bytes_per_token`,
+    `snapshot_position_tracking_bytes_per_token`) or the frozen,
+    already-real `vocab_size`/horizon counts -- never an unexplained
+    constant. `append_realloc_temporary_bytes` is deliberately
+    conservative (documented, not presented as exact): PyTorch's
+    cache-append pattern briefly holds both the old and the newly-grown
+    tensor live during the copy, so one additional full horizon's worth of
+    growth is reserved as safety headroom. `query_cache_growth_bytes` is
+    explicitly `0`, not omitted -- R-KV's query cache is a fixed-size
+    window (`kvcot.generation.state`'s own docstring), so it does not grow
+    with the branch horizon."""
+    for name, value in (
+        ("selected_vector_bytes", selected_vector_bytes), ("vocab_size", vocab_size),
+        ("bridge_token_count", bridge_token_count), ("scored_token_count", scored_token_count),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{name} must be a non-negative int for the pre-branch memory guard, got {value!r}")
+    if len(snapshot.key_cache) == 0:
+        raise ValueError("snapshot has no layer K/V tensors -- cannot derive shape-based memory growth")
+
     cuda.synchronize()
     allocated = int(cuda.memory_allocated())
     reserved = int(cuda.memory_reserved())
@@ -212,7 +283,22 @@ def check_pre_branch_memory(
     # clone into its fresh live cache, so only one additional complete tensor
     # set can exist beside the already-accounted pristine snapshot.
     clone_bytes = snapshot_tensor_bytes(snapshot)
-    required = clone_bytes + int(selected_vector_bytes) + int(known_temporary_bytes)
+
+    total_future_branch_tokens = int(bridge_token_count) + int(scored_token_count)
+    per_token_kv_growth = snapshot_growth_bytes_per_token(snapshot)
+    complete_horizon_kv_growth = per_token_kv_growth * total_future_branch_tokens
+    append_realloc_temporary = complete_horizon_kv_growth
+    query_cache_growth = 0
+    logits_bytes = int(vocab_size) * 4
+    log_softmax_bytes = int(vocab_size) * 4
+    nll_scalar_bytes = int(scored_token_count) * 4
+    position_tracking_bytes = snapshot_position_tracking_bytes_per_token(snapshot) * total_future_branch_tokens
+    known_temporary = logits_bytes + log_softmax_bytes + nll_scalar_bytes + position_tracking_bytes
+
+    required = (
+        clone_bytes + int(selected_vector_bytes) + complete_horizon_kv_growth + append_realloc_temporary
+        + query_cache_growth + known_temporary
+    )
     projected = max(allocated, reserved) + required
     accepted = projected <= safety_limit_bytes
     return PreBranchMemoryEvidence(
@@ -221,7 +307,18 @@ def check_pre_branch_memory(
         reserved_before=reserved,
         snapshot_clone_bytes=clone_bytes,
         selected_vector_bytes=int(selected_vector_bytes),
-        known_temporary_bytes=int(known_temporary_bytes),
+        bridge_token_count=int(bridge_token_count),
+        scored_token_count=int(scored_token_count),
+        total_future_branch_tokens=total_future_branch_tokens,
+        per_token_kv_growth_bytes=per_token_kv_growth,
+        complete_horizon_kv_growth_bytes=complete_horizon_kv_growth,
+        append_realloc_temporary_bytes=append_realloc_temporary,
+        query_cache_growth_bytes=query_cache_growth,
+        logits_bytes=logits_bytes,
+        log_softmax_bytes=log_softmax_bytes,
+        nll_scalar_bytes=nll_scalar_bytes,
+        position_tracking_bytes=position_tracking_bytes,
+        known_temporary_bytes=known_temporary,
         required_additional_bytes=required,
         projected_peak_bytes=projected,
         safety_limit_bytes=safety_limit_bytes,

@@ -20,25 +20,33 @@ RTX3090_VRAM_MAX_BYTES = 26 * 1024**3
 
 
 def verify_device_gate_from_raw_evidence(
-    fullkv_device_evidence: dict[str, Any], rkv_device_evidence: dict[str, Any]
+    fullkv_device_evidence: dict[str, Any],
+    rkv_device_evidence: dict[str, Any],
+    cli_device_preflight: dict[str, Any] | None = None,
 ) -> bool:
-    """Independent-audit Gate H4.1/H4.2 repair: the final coordinator gate
-    must not derive `single_rtx3090_verified` from a worker-reported
+    """Independent-audit Gate H4.1/H4.2/H4.3 repair: the final coordinator
+    gate must not derive `single_rtx3090_verified` from a worker-reported
     `verified=True` boolean alone -- it must recompute the policy from RAW
-    fields, and require the two independently-launched worker processes to
-    AGREE on what hardware they actually observed.
+    fields, and require every independently-launched observation to AGREE
+    on what hardware was actually used.
 
-    Requires, independently for EACH worker's raw evidence dict: `verified
-    is True`; `visible_gpu_count == 1`; `device_index == 0` (the explicit
-    `cuda:0` this repository always requests); `gpu_name` contains "RTX
-    3090"; `total_vram_bytes` falls inside the frozen plausibility range;
-    and `driver_version`/`cuda_runtime`/`cudnn_version` are all non-empty.
+    Requires, independently for EACH raw evidence dict (FullKV worker, R-KV
+    worker, and -- when provided -- the CLI's own pre-launch preflight
+    observation): `verified is True`; `visible_gpu_count == 1`;
+    `device_index == 0` (the explicit `cuda:0` this repository always
+    requests); `gpu_name` contains "RTX 3090"; `total_vram_bytes` falls
+    inside the frozen plausibility range; and `driver_version`/
+    `cuda_runtime`/`cudnn_version` are all non-empty.
 
-    Then requires FullKV and R-KV to report the IDENTICAL `gpu_name`,
-    `device_index`, `total_vram_bytes`, `compute_capability`,
-    `driver_version`, `cuda_runtime`, and `cudnn_version` -- two workers
-    disagreeing about the hardware they ran on is itself a failure, never
-    silently accepted because each individually claimed `verified=True`."""
+    Then requires every provided observation to report the IDENTICAL
+    `gpu_name`, `device_index`, `total_vram_bytes`, `compute_capability`,
+    `driver_version`, `cuda_runtime`, and `cudnn_version` -- two (or three)
+    independent observations disagreeing about the hardware is itself a
+    failure, never silently accepted because each individually claimed
+    `verified=True`. `cli_device_preflight` is optional (backward
+    compatible with two-way FullKV/R-KV-only callers, e.g. CPU tests that
+    never launch the real CLI) -- when `None`, only FullKV/R-KV are
+    compared, exactly as before this three-way extension."""
 
     def _raw_ok(evidence: dict[str, Any]) -> bool:
         if evidence.get("verified") is not True:
@@ -59,15 +67,22 @@ def verify_device_gate_from_raw_evidence(
             return False
         return True
 
-    if not (_raw_ok(fullkv_device_evidence) and _raw_ok(rkv_device_evidence)):
+    observations = [fullkv_device_evidence, rkv_device_evidence]
+    if cli_device_preflight is not None:
+        observations.append(cli_device_preflight)
+
+    if not all(_raw_ok(observation) for observation in observations):
         return False
 
     agreement_fields = (
         "gpu_name", "device_index", "total_vram_bytes", "compute_capability",
         "driver_version", "cuda_runtime", "cudnn_version",
     )
+    reference = observations[0]
     return all(
-        fullkv_device_evidence.get(field) == rkv_device_evidence.get(field) for field in agreement_fields
+        observation.get(field) == reference.get(field)
+        for observation in observations[1:]
+        for field in agreement_fields
     )
 
 

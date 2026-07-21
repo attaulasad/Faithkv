@@ -5,11 +5,12 @@
 An independent audit found the prior "READY FOR INDEPENDENT AUDIT" verdict
 incomplete (loose `verified` booleans, a misleadingly-named timing phase,
 bare mismatch indices, total loss of partial worker evidence on failure,
-among other confirmed gaps). A forward-only repair pass closed Gates H1-H3
-and part of H4; Gates H5-H7 and the rest of H4/H8 remain open. See
+among other confirmed gaps). Two forward-only repair passes closed Gates
+H1, H3, H4, H5, H6, most of H2 and H7, and H8.2; remaining gaps are narrow
+and named (H2.2 sub-phase granularity, H4.5/H4.7, H6.4, H7.4, H8.6). See
 `docs/B1_INDEPENDENT_AUDIT_REPAIR.md` (authoritative for current status)
 and `docs/B1_FINAL_CPU_CLOSURE.md` (superseded, preserved as history).
-Non-GPU suite: 1039 passed, 14 deselected.
+Non-GPU suite: 1093 passed, 14 deselected.
 
 No B2A result exists. No B2B result exists. No RTX 3090 timing exists. No
 FaithKV method exists. Independent audit is required before any GPU
