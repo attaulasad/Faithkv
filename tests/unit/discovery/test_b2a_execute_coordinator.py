@@ -90,7 +90,10 @@ def _passing_payloads(manifest, config):
         actual_call_evidence=actual_calls, dataset_row_identity=row_identity,
         timing_evidence=[
             {"phase": "fullkv_worker_startup", "duration_seconds": 0.1, "completed": True},
+            {"phase": "snapshot_tokenizer_resolution", "duration_seconds": 0.2, "completed": True},
+            {"phase": "tokenizer_load", "duration_seconds": 0.3, "completed": True},
             {"phase": "model_load", "duration_seconds": 2.0, "completed": True},
+            {"phase": "post_load_validation", "duration_seconds": 0.05, "completed": True},
         ],
         software_versions={"torch": "2.0"},
     )
@@ -146,7 +149,10 @@ def _passing_payloads(manifest, config):
         no_op_identity=noop_identity,
         timing_evidence=[
             {"phase": "rkv_worker_startup", "duration_seconds": 0.1, "completed": True},
+            {"phase": "snapshot_tokenizer_resolution", "duration_seconds": 0.2, "completed": True},
+            {"phase": "tokenizer_load", "duration_seconds": 0.3, "completed": True},
             {"phase": "model_load", "duration_seconds": 2.0, "completed": True},
+            {"phase": "post_load_validation", "duration_seconds": 0.05, "completed": True},
         ],
         software_versions={"torch": "2.0"},
     )
@@ -197,6 +203,84 @@ def test_full_coordinator_flow_passes_and_writes_pass_artifact(config, manifest,
     assert payload["measurement"]["per_real_pair_seconds"] == 1.0  # max() of 12 identical 1.0s pairs
     assert payload["b2a_real_pair_evaluations_total"] == 12
     assert payload["b2a_noop_pair_evaluations_total"] == 1
+
+
+def test_startup_and_load_projection_sums_all_five_one_time_phases(config, manifest, monkeypatch, tmp_path):
+    """Independent-audit Gate H2.4: the startup/load projection component
+    used to sum only `{role}_worker_startup` + `model_load` (2.1s here:
+    0.1 + 2.0) -- it must now include `snapshot_tokenizer_resolution`
+    (0.2s), `tokenizer_load` (0.3s), and `post_load_validation` (0.05s) too,
+    for a total of 2.65s per worker, never silently undercounting one-time
+    setup cost incurred before measured inference."""
+    monkeypatch.setattr(b2a_execute, "_verify_resolved_prompt_identity", lambda c, m: None)
+    fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
+    runner = _fake_runner_writing(fullkv_payload, rkv_payload)
+    monkeypatch.setattr("kvcot.discovery.b2a_artifact.build_and_write_b2a_artifact", _patched_writer(tmp_path))
+
+    artifact = b2a_execute.run_b2a_calibration(
+        config, manifest, config_path=CONFIG_PATH, manifest_path=MANIFEST_PATH,
+        python_executable="fake-python", subprocess_runner=runner,
+    )
+    payload = json.loads(artifact.artifact_path.read_text(encoding="utf-8"))
+    projection = payload["runtime_projection"]
+    assert projection["fullkv_startup_and_model_load_seconds"] == pytest.approx(2.65)
+    assert projection["rkv_startup_and_model_load_seconds"] == pytest.approx(2.65)
+
+
+def test_startup_and_load_projection_fails_closed_when_a_one_time_phase_is_missing(config, manifest, monkeypatch, tmp_path):
+    """A worker payload missing one of the five required one-time setup
+    phases (here, `post_load_validation`) must refuse execution rather than
+    silently projecting an undercounted total."""
+    monkeypatch.setattr(b2a_execute, "_verify_resolved_prompt_identity", lambda c, m: None)
+    fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
+    fullkv_payload["timing_evidence"] = [
+        record for record in fullkv_payload["timing_evidence"] if record["phase"] != "post_load_validation"
+    ]
+    runner = _fake_runner_writing(fullkv_payload, rkv_payload)
+    monkeypatch.setattr("kvcot.discovery.b2a_artifact.build_and_write_b2a_artifact", _patched_writer(tmp_path))
+
+    with pytest.raises(b2a_execute.B2AExecutionRefused, match="post_load_validation"):
+        b2a_execute.run_b2a_calibration(
+            config, manifest, config_path=CONFIG_PATH, manifest_path=MANIFEST_PATH,
+            python_executable="fake-python", subprocess_runner=runner,
+        )
+
+
+def test_process_overhead_diagnostic_is_exported_without_double_counting(config, manifest, monkeypatch, tmp_path):
+    """Independent-audit Gate H2.5: coordinator-observed process duration,
+    worker-internal startup/inference durations, and the derived
+    unattributed overhead are all exported as a separate diagnostic --
+    never folded into `runtime_projection` itself (which stays exactly the
+    frozen §12 formula)."""
+    monkeypatch.setattr(b2a_execute, "_verify_resolved_prompt_identity", lambda c, m: None)
+    fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
+    runner = _fake_runner_writing(fullkv_payload, rkv_payload)
+    monkeypatch.setattr("kvcot.discovery.b2a_artifact.build_and_write_b2a_artifact", _patched_writer(tmp_path))
+
+    artifact = b2a_execute.run_b2a_calibration(
+        config, manifest, config_path=CONFIG_PATH, manifest_path=MANIFEST_PATH,
+        python_executable="fake-python", subprocess_runner=runner,
+    )
+    payload = json.loads(artifact.artifact_path.read_text(encoding="utf-8"))
+    diagnostic = payload["worker_processes"]["process_overhead_diagnostic"]
+    assert set(diagnostic) == {"fullkv", "rkv"}
+    for role in ("fullkv", "rkv"):
+        entry = diagnostic[role]
+        assert entry["coordinator_observed_process_seconds"] >= 0.0
+        assert entry["worker_internal_startup_and_load_seconds"] == pytest.approx(2.65)
+        assert entry["unattributed_process_overhead_seconds"] == pytest.approx(
+            entry["coordinator_observed_process_seconds"]
+            - entry["worker_internal_startup_and_load_seconds"]
+            - entry["worker_internal_inference_seconds"]
+        )
+    # `runtime_projection` itself must be untouched by this diagnostic --
+    # still exactly the frozen §12 formula's fields, nothing summed twice.
+    assert set(payload["runtime_projection"]) == {
+        "fullkv_startup_and_model_load_seconds", "rkv_startup_and_model_load_seconds",
+        "fullkv_natural_generation_seconds", "rkv_pass1_seconds", "rkv_pass2_seconds",
+        "per_example_inference_seconds", "example_count", "conservative_real_pair_seconds",
+        "real_pair_count", "projected_total_seconds",
+    }
 
 
 def test_gate_fails_when_rkv_trajectory_parity_false(config, manifest, monkeypatch, tmp_path):

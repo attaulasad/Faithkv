@@ -1,5 +1,11 @@
 # B1 final CPU execution-boundary closure
 
+> **SUPERSEDED.** The "READY FOR INDEPENDENT AUDIT" verdict below was
+> subsequently found **incomplete** by an independent audit. The historical
+> body of this document remains preserved unedited below. **
+> `docs/B1_INDEPENDENT_AUDIT_REPAIR.md` is authoritative for current
+> status** — current verdict: **INCOMPLETE — B2A/GPU REMAIN BLOCKED**.
+
 Starting ancestor: `3c853cff34e52d792cd0e5a96d1a5369f17f8047` on
 `research/b1b-r4-final-b2a-closure`. This is a forward-only repair. The
 frozen lock and `third_party/R-KV` pin are unchanged.

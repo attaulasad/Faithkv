@@ -38,6 +38,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -117,18 +118,62 @@ def main(argv: list[str] | None = None) -> int:
 
             result_dict = run_rkv_worker(config, manifest)
     except Exception as exc:  # noqa: BLE001 -- this process's only job is to report failure to the coordinator
-        restore_progress_environment()
+        from kvcot.discovery.worker_partial_evidence import WorkerBodyFailure
+
+        # Gate H1 repair: a `WorkerBodyFailure` carries real partial evidence
+        # (`.evidence`, a `PartialWorkerEvidence`) accumulated by the worker
+        # body before it failed -- threaded into the envelope instead of the
+        # bare `partial_measurements=None, determinism_policy=None` this
+        # branch used unconditionally before this repair. Any OTHER
+        # exception (e.g. `config`/`manifest` failing to load, before any
+        # worker body even started) genuinely has no partial evidence to
+        # report, and correctly falls through to the `None`/empty defaults.
+        partial_measurements: dict[str, Any] | None = None
+        determinism_policy: dict[str, Any] | None = None
+        failure_stage: str | None = None
+        last_completed_stage: str | None = None
+        is_oom = False
+        is_timeout = False
+        reported_exc: BaseException = exc
+        if isinstance(exc, WorkerBodyFailure):
+            evidence = exc.evidence
+            partial_measurements = evidence.model_dump(mode="json")
+            determinism_policy = evidence.determinism_policy
+            failure_stage = evidence.failing_stage
+            last_completed_stage = evidence.last_completed_stage
+            is_oom = evidence.is_oom
+            is_timeout = evidence.is_timeout
+            # Report the ORIGINAL failure (the real cause `WorkerBodyFailure`
+            # chains via `__cause__`), never the wrapper's own composed
+            # message, as `error_type`/`error_message` -- `traceback_module
+            # .format_exc()` inside `build_failure_envelope` still captures
+            # the full chained traceback (both exceptions), so nothing about
+            # the wrapper itself is lost either.
+            reported_exc = exc.__cause__ or exc
         envelope = build_failure_envelope(
             role=args.role, attempt_id=attempt_id, started_at=started_at,
-            requested_identities=requested_identities, resolved_identities={}, partial_measurements=None,
-            determinism_policy=None, software_versions=_software_versions(), hardware_metadata=default_hardware_metadata(),
-            exc=exc,
+            requested_identities=requested_identities, resolved_identities={},
+            partial_measurements=partial_measurements, determinism_policy=determinism_policy,
+            software_versions=_software_versions(), hardware_metadata=default_hardware_metadata(),
+            exc=reported_exc, failure_stage=failure_stage, last_completed_stage=last_completed_stage,
+            is_oom=is_oom, is_timeout=is_timeout,
+        )
+        # H1.4: the durable failure journal event is appended, and the
+        # atomic failure envelope written, BEFORE environment variables are
+        # restored -- `progress()`/`write_worker_envelope` do not read the
+        # env vars this process set (they close over already-resolved local
+        # `progress_path`/`attempt_id` values), so this ordering costs
+        # nothing and matches the required sequence exactly.
+        progress(
+            "failed", "failed",
+            {"failure_stage": failure_stage, "is_oom": is_oom, "error_type": type(reported_exc).__name__},
         )
         try:
             write_worker_envelope(envelope, output_path)
         except Exception:  # noqa: BLE001 -- the envelope write itself must never mask the real failure
             pass
-        print(f"b2a_worker_entry role={args.role} failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        restore_progress_environment()
+        print(f"b2a_worker_entry role={args.role} failed: {type(reported_exc).__name__}: {reported_exc}", file=sys.stderr)
         return 1
 
     restore_progress_environment()

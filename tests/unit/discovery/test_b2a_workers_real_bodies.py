@@ -464,8 +464,13 @@ def test_run_rkv_worker_requires_cuda_when_no_fake_backend_injected():
 
 def test_run_rkv_worker_fails_closed_when_fake_kv_cluster_disagrees_with_frozen_config():
     """A runtime R-KV mismatch (a fake `kv_cluster.budget` that disagrees
-    with the frozen config) must raise, never silently proceed."""
+    with the frozen config) must raise, never silently proceed. Gate H1:
+    every exception raised inside the worker body -- including this
+    deliberate `WorkerFailedError` refusal -- is now wrapped in a
+    `WorkerBodyFailure` carrying partial evidence, with the original
+    `WorkerFailedError` preserved as `__cause__` (never swallowed)."""
     from kvcot.discovery.b2a_workers import WorkerFailedError
+    from kvcot.discovery.worker_partial_evidence import WorkerBodyFailure
 
     config = _build_fake_discovery_config()
     manifest = _FakeManifest()
@@ -477,12 +482,19 @@ def test_run_rkv_worker_fails_closed_when_fake_kv_cluster_disagrees_with_frozen_
     for layer in model.model.layers:
         layer.self_attn.kv_cluster.budget = 999999999  # disagrees with config.rkv.budget
 
-    with pytest.raises(WorkerFailedError, match="runtime R-KV configuration disagrees"):
+    with pytest.raises(WorkerBodyFailure, match="runtime R-KV configuration disagrees") as exc_info:
         run_rkv_worker(
             config, manifest,
             _load_model=lambda: model, _load_tokenizer=lambda: _FakeTokenizer(),
             _fresh_cache_factory=lambda: _FakeCache(NUM_LAYERS), _cuda=_FakeCudaFacade(), _device="cpu",
         )
+    assert isinstance(exc_info.value.__cause__, WorkerFailedError)
+    assert exc_info.value.evidence.failing_stage == "model-load completion"
+    assert exc_info.value.evidence.is_oom is False
+    # Partial evidence genuinely accumulated before this failure (model
+    # load, determinism policy) survives on the typed evidence object.
+    assert exc_info.value.evidence.determinism_policy is not None
+    assert len(exc_info.value.evidence.timing_evidence) > 0
 
 
 def test_production_call_shape_never_passes_injection_kwargs():

@@ -256,6 +256,72 @@ def test_attempt_timeout_preserves_command_and_partial_logs(tmp_path):
     assert (attempt.path / "fullkv" / "stderr.log").read_text(encoding="utf-8") == "partial stderr"
 
 
+def test_attempt_timeout_writes_coordinator_authored_termination_record(tmp_path):
+    """Independent-audit Gate H1.5: a timed-out worker may never reach its
+    own atomic-envelope-write code -- the COORDINATOR must author a
+    separate `termination.json` distinguishing this from a worker-authored
+    failure envelope, never fabricating one as if the worker itself wrote
+    it."""
+    from kvcot.discovery.attempt_artifacts import create_attempt_directory
+
+    attempt = create_attempt_directory(root=tmp_path, attempt_id="timeout-termination-test")
+
+    def runner(argv, **kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd=argv, timeout=kwargs.get("timeout", 0), output="partial stdout", stderr="partial stderr"
+        )
+
+    with pytest.raises(WorkerFailedError, match="timed out"):
+        run_both_workers_via_subprocess(
+            "cfg.yaml", "manifest.json", python_executable="fake-python", subprocess_runner=runner,
+            attempt_directory=attempt.path,
+        )
+
+    termination_path = attempt.path / "fullkv" / "termination.json"
+    assert termination_path.is_file()
+    record = json.loads(termination_path.read_text(encoding="utf-8"))
+    assert record["attestor"] == "coordinator"
+    assert record["worker_role"] == "fullkv"
+    assert record["termination_kind"] == "timeout"
+    assert record["timed_out"] is True
+    assert record["return_code"] is None
+    assert record["worker_authored_envelope_present"] is False
+    import hashlib
+
+    assert record["stdout_sha256"] == hashlib.sha256(b"partial stdout").hexdigest()
+    assert record["stderr_sha256"] == hashlib.sha256(b"partial stderr").hexdigest()
+    # No worker-authored envelope exists at all for a real timeout -- the
+    # coordinator record must never claim otherwise.
+    assert not (attempt.path / "fullkv" / "envelope.json").is_file()
+
+
+def test_attempt_nonzero_exit_writes_coordinator_authored_termination_record(tmp_path):
+    """A worker that exits nonzero without ever writing its own atomic
+    envelope (e.g. a hard crash/segfault, simulated here by a fake runner
+    that returns a nonzero code and writes nothing) must still leave a
+    coordinator-authored termination record distinguishing it from a clean,
+    worker-authored failure envelope."""
+    from kvcot.discovery.attempt_artifacts import create_attempt_directory
+
+    attempt = create_attempt_directory(root=tmp_path, attempt_id="crash-termination-test")
+
+    def runner(argv, **kwargs):
+        return SimpleNamespace(returncode=139, stdout="", stderr="Segmentation fault")
+
+    with pytest.raises(WorkerFailedError, match="exited with code 139"):
+        run_both_workers_via_subprocess(
+            "cfg.yaml", "manifest.json", python_executable="fake-python", subprocess_runner=runner,
+            attempt_directory=attempt.path,
+        )
+
+    record = json.loads((attempt.path / "fullkv" / "termination.json").read_text(encoding="utf-8"))
+    assert record["attestor"] == "coordinator"
+    assert record["termination_kind"] == "nonzero_exit"
+    assert record["timed_out"] is False
+    assert record["return_code"] == 139
+    assert record["worker_authored_envelope_present"] is False
+
+
 def test_coordinator_raises_if_worker_reports_success_but_writes_no_file():
     def runner(argv, **kwargs):
         return SimpleNamespace(returncode=0, stdout="", stderr="")  # never writes the output file
@@ -297,6 +363,23 @@ def test_coordinator_cleans_up_temp_directory_after_success(tmp_path, monkeypatc
 
     assert len(created_dirs) == 1
     assert not created_dirs[0].exists()
+
+
+def test_coordinator_records_observed_process_seconds_for_both_workers():
+    """Independent-audit Gate H2.5: the coordinator measures each worker
+    subprocess launch's wall-clock duration itself (`time.perf_counter()`
+    around `_launch_worker`) -- this includes Python interpreter
+    startup/import overhead the worker's OWN internal `SynchronizedTimer`
+    never observes, and must be exported so it is visible rather than
+    silently absent."""
+    runner = _make_fake_runner(_fullkv_payload(), _rkv_payload())
+    result = run_both_workers_via_subprocess(
+        "cfg.yaml", "manifest.json", python_executable="fake-python", subprocess_runner=runner,
+    )
+    assert result.coordinator_observed_process_seconds is not None
+    assert set(result.coordinator_observed_process_seconds) == {"fullkv", "rkv"}
+    assert result.coordinator_observed_process_seconds["fullkv"] >= 0.0
+    assert result.coordinator_observed_process_seconds["rkv"] >= 0.0
 
 
 def test_validate_shared_identity_checks_all_four_fields():

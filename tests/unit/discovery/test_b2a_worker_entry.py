@@ -121,6 +121,86 @@ def test_main_writes_only_failure_envelope_not_a_result_file_on_exception(monkey
     assert "simulated worker crash" in captured.err
 
 
+def test_main_threads_worker_body_failure_partial_evidence_into_envelope(monkeypatch, tmp_path, capsys):
+    """Independent-audit Gate H1: when the worker body raises a
+    `WorkerBodyFailure` (real production behavior after the Gate H1 repair
+    to `run_fullkv_worker`/`run_rkv_worker`), the failure envelope must
+    carry the real partial evidence it accumulated -- never the bare
+    `partial_measurements=None, determinism_policy=None` this branch used
+    unconditionally before the repair."""
+    from kvcot.discovery.worker_partial_evidence import PartialWorkerEvidence, WorkerBodyFailure
+
+    _patch_loaders(monkeypatch)
+
+    def boom(config, manifest):
+        evidence = PartialWorkerEvidence(
+            role="rkv",
+            failing_stage="real_pair:0:5:9",
+            last_completed_stage="model-load completion",
+            determinism_policy={"framework_seed": 13},
+            timing_evidence=[{"phase": "model_load", "duration_seconds": 2.0, "completed": True}],
+            peak_cuda_allocated_bytes=123456,
+            is_oom=True,
+        )
+        raise WorkerBodyFailure(evidence, RuntimeError("CUDA out of memory during pair evaluation"))
+
+    monkeypatch.setattr("kvcot.discovery.b2a_workers.run_rkv_worker", boom)
+    output_path = tmp_path / "rkv_result.json"
+
+    exit_code = b2a_worker_entry.main(
+        ["--role", "rkv", "--config", "cfg.yaml", "--manifest", "manifest.json", "--output", str(output_path)]
+    )
+
+    assert exit_code == 1
+    assert not output_path.exists()
+
+    envelope_path = tmp_path / "rkv_result.json.envelope.json"
+    envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+    assert envelope["success"] is False
+    assert envelope["is_oom"] is True
+    assert envelope["is_timeout"] is False
+    assert envelope["failure_stage"] == "real_pair:0:5:9"
+    assert envelope["last_completed_stage"] == "model-load completion"
+    # `error_type`/`error_message` report the ORIGINAL cause, never the
+    # `WorkerBodyFailure` wrapper's own composed message.
+    assert envelope["error_type"] == "RuntimeError"
+    assert "CUDA out of memory" in envelope["error_message"]
+    assert envelope["partial_measurements"]["determinism_policy"] == {"framework_seed": 13}
+    assert envelope["partial_measurements"]["timing_evidence"] == [
+        {"phase": "model_load", "duration_seconds": 2.0, "completed": True}
+    ]
+    assert envelope["partial_measurements"]["peak_cuda_allocated_bytes"] == 123456
+    assert envelope["determinism_policy"] == {"framework_seed": 13}
+
+    captured = capsys.readouterr()
+    assert "CUDA out of memory" in captured.err
+
+
+def test_main_reports_no_partial_evidence_for_a_pre_body_failure(monkeypatch, tmp_path):
+    """A failure BEFORE any worker body ever started (e.g. `run_fullkv_worker`
+    itself is never even reached) genuinely has no partial evidence to
+    report -- the envelope's new typed fields must honestly default to
+    `None`/`False`, never a fabricated value."""
+    _patch_loaders(monkeypatch)
+
+    def boom(config, manifest):
+        raise RuntimeError("simulated worker crash")
+
+    monkeypatch.setattr("kvcot.discovery.b2a_workers.run_fullkv_worker", boom)
+    output_path = tmp_path / "fullkv_result.json"
+
+    exit_code = b2a_worker_entry.main(
+        ["--role", "fullkv", "--config", "cfg.yaml", "--manifest", "manifest.json", "--output", str(output_path)]
+    )
+    assert exit_code == 1
+    envelope = json.loads((tmp_path / "fullkv_result.json.envelope.json").read_text(encoding="utf-8"))
+    assert envelope["partial_measurements"] is None
+    assert envelope["determinism_policy"] is None
+    assert envelope["failure_stage"] is None
+    assert envelope["is_oom"] is False
+    assert envelope["is_timeout"] is False
+
+
 def test_main_requires_role_config_manifest_output_arguments():
     with pytest.raises(SystemExit):
         b2a_worker_entry.main(["--role", "fullkv"])  # missing required args

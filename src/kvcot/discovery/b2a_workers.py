@@ -317,6 +317,16 @@ class WorkerCoordinationResult:
     return_codes: dict[str, int] | None = None
     timeout_state: dict[str, bool] | None = None
     partial_success: bool = False
+    # Independent-audit Gate H2.5: wall-clock duration of each `_launch_worker`
+    # subprocess call as observed BY THE COORDINATOR (`time.perf_counter()`
+    # around the `subprocess_runner` call) -- includes Python interpreter
+    # startup/import overhead the worker's OWN internal `SynchronizedTimer`
+    # never sees (its first measurement only starts once the worker process
+    # is already running). Never summed into the existing runtime
+    # projection -- exported purely as a separate, honestly-labeled
+    # diagnostic so process-launch overhead is visible rather than silently
+    # absent.
+    coordinator_observed_process_seconds: dict[str, float] | None = None
 
 
 def _default_python_executable() -> str:
@@ -447,24 +457,77 @@ def run_both_workers_via_subprocess(
                 },
             )
 
-        def preserve_timeout_logs(role: str, exc: subprocess.TimeoutExpired) -> None:
+        def _last_progress_event(role: str) -> dict[str, Any] | None:
+            progress_path = tmp_dir / role / "progress.jsonl"
+            if not progress_path.is_file():
+                return None
+            last = None
+            for line in progress_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    last = json.loads(line)
+            return last
+
+        def _write_termination_record(
+            role: str, *, termination_kind: str, timed_out: bool, return_code: int | None,
+            command: list[str] | None, stdout: str, stderr: str,
+        ) -> None:
+            # H1.5: a timed-out or otherwise killed worker may never reach
+            # its own `finally`/atomic-envelope-write code -- this record is
+            # authored by the COORDINATOR (never fabricated as if the
+            # worker itself wrote it) so a post-mortem can distinguish "the
+            # worker wrote a real failure envelope" from "the worker died
+            # so abruptly nothing at all survived except this record".
             if not preserve:
                 return
-            from kvcot.discovery.attempt_artifacts import atomic_write_text
+            from kvcot.discovery.attempt_artifacts import atomic_write_json
+            from kvcot.utils.hashing import sha256_text
 
+            envelope_path = tmp_dir / role / "envelope.json"
+            atomic_write_json(
+                tmp_dir / role / "termination.json",
+                {
+                    "attestor": "coordinator",
+                    "worker_role": role,
+                    "attempt_id": attempt_id,
+                    "termination_kind": termination_kind,
+                    "timed_out": timed_out,
+                    "return_code": return_code,
+                    "command": command,
+                    "stdout_sha256": sha256_text(stdout),
+                    "stderr_sha256": sha256_text(stderr),
+                    "last_durable_progress_event": _last_progress_event(role),
+                    "worker_authored_envelope_present": envelope_path.is_file(),
+                },
+            )
+
+        def preserve_timeout_logs(role: str, exc: subprocess.TimeoutExpired) -> tuple[str, str]:
             stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
             stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            if not preserve:
+                return stdout, stderr
+            from kvcot.discovery.attempt_artifacts import atomic_write_text
+
             atomic_write_text(tmp_dir / role / "stdout.log", stdout)
             atomic_write_text(tmp_dir / role / "stderr.log", stderr)
+            return stdout, stderr
 
+        process_seconds: dict[str, float] = {}
         try:
             preserve_command("fullkv", fullkv_output)
+            _fullkv_launch_started = time.perf_counter()
             fullkv_proc = _launch_worker(
                 "fullkv", config_path, manifest_path, fullkv_output, python_executable, subprocess_runner,
                 B2A_WORKER_TIMEOUT_SECONDS, attempt_id,
             )
+            process_seconds["fullkv"] = time.perf_counter() - _fullkv_launch_started
         except subprocess.TimeoutExpired as exc:
-            preserve_timeout_logs("fullkv", exc)
+            process_seconds["fullkv"] = time.perf_counter() - _fullkv_launch_started
+            stdout, stderr = preserve_timeout_logs("fullkv", exc)
+            _write_termination_record(
+                "fullkv", termination_kind="timeout", timed_out=True, return_code=None,
+                command=list(exc.cmd) if exc.cmd is not None else None, stdout=stdout, stderr=stderr,
+            )
             err = WorkerFailedError(f"fullkv worker timed out after {B2A_WORKER_TIMEOUT_SECONDS}s: {exc}")
             err.partial_fullkv_result = None  # type: ignore[attr-defined]
             err.timed_out = True  # type: ignore[attr-defined]
@@ -474,6 +537,11 @@ def run_both_workers_via_subprocess(
             atomic_write_text(tmp_dir / "fullkv" / "stdout.log", getattr(fullkv_proc, "stdout", "") or "")
             atomic_write_text(tmp_dir / "fullkv" / "stderr.log", getattr(fullkv_proc, "stderr", "") or "")
         if fullkv_proc.returncode != 0:
+            _write_termination_record(
+                "fullkv", termination_kind="nonzero_exit", timed_out=False,
+                return_code=int(fullkv_proc.returncode), command=None,
+                stdout=getattr(fullkv_proc, "stdout", "") or "", stderr=getattr(fullkv_proc, "stderr", "") or "",
+            )
             err = WorkerFailedError(
                 f"fullkv worker exited with code {fullkv_proc.returncode}: "
                 f"stdout={getattr(fullkv_proc, 'stdout', '')!r} stderr={getattr(fullkv_proc, 'stderr', '')!r}"
@@ -489,12 +557,19 @@ def run_both_workers_via_subprocess(
 
         try:
             preserve_command("rkv", rkv_output)
+            _rkv_launch_started = time.perf_counter()
             rkv_proc = _launch_worker(
                 "rkv", config_path, manifest_path, rkv_output, python_executable, subprocess_runner,
                 B2A_WORKER_TIMEOUT_SECONDS, attempt_id,
             )
+            process_seconds["rkv"] = time.perf_counter() - _rkv_launch_started
         except subprocess.TimeoutExpired as exc:
-            preserve_timeout_logs("rkv", exc)
+            process_seconds["rkv"] = time.perf_counter() - _rkv_launch_started
+            stdout, stderr = preserve_timeout_logs("rkv", exc)
+            _write_termination_record(
+                "rkv", termination_kind="timeout", timed_out=True, return_code=None,
+                command=list(exc.cmd) if exc.cmd is not None else None, stdout=stdout, stderr=stderr,
+            )
             err = WorkerFailedError(f"rkv worker timed out after {B2A_WORKER_TIMEOUT_SECONDS}s: {exc}")
             err.partial_fullkv_result = fullkv_result  # type: ignore[attr-defined]
             err.timed_out = True  # type: ignore[attr-defined]
@@ -504,6 +579,11 @@ def run_both_workers_via_subprocess(
             atomic_write_text(tmp_dir / "rkv" / "stdout.log", getattr(rkv_proc, "stdout", "") or "")
             atomic_write_text(tmp_dir / "rkv" / "stderr.log", getattr(rkv_proc, "stderr", "") or "")
         if rkv_proc.returncode != 0:
+            _write_termination_record(
+                "rkv", termination_kind="nonzero_exit", timed_out=False,
+                return_code=int(rkv_proc.returncode), command=None,
+                stdout=getattr(rkv_proc, "stdout", "") or "", stderr=getattr(rkv_proc, "stderr", "") or "",
+            )
             err = WorkerFailedError(
                 f"rkv worker exited with code {rkv_proc.returncode}: "
                 f"stdout={getattr(rkv_proc, 'stdout', '')!r} stderr={getattr(rkv_proc, 'stderr', '')!r}"
@@ -544,6 +624,7 @@ def run_both_workers_via_subprocess(
             return_codes={"fullkv": int(fullkv_proc.returncode), "rkv": int(rkv_proc.returncode)},
             timeout_state={"fullkv": False, "rkv": False},
             partial_success=False,
+            coordinator_observed_process_seconds=dict(process_seconds),
         )
     finally:
         if not preserve:
@@ -725,6 +806,15 @@ def run_fullkv_worker(
 
     cuda = _cuda if _cuda is not None else torch.cuda
     _progress = _progress or _production_progress_callback("fullkv")
+    _last_completed_stage: dict = {"stage": None}
+    _underlying_progress = _progress
+
+    def _progress(stage, status, counters=None):
+        if status == "completed":
+            _last_completed_stage["stage"] = stage
+        if _underlying_progress is not None:
+            _underlying_progress(stage, status, counters)
+
     cuda_available = bool(cuda.is_available())
     if not cuda_available and _load_model is None:
         # Only the REAL (unfaked) production path requires CUDA -- a CPU
@@ -733,218 +823,227 @@ def run_fullkv_worker(
         # ran anything.
         raise WorkerFailedError("run_fullkv_worker requires CUDA; none is available.")
 
-    timer = SynchronizedTimer(cuda, _clock or time.perf_counter)
-    memory_meter = CudaMemoryMeasurer(cuda)
-    complete_worker_started_at = timer.begin_span()
+    try:
+        timer = SynchronizedTimer(cuda, _clock or time.perf_counter)
+        memory_meter = CudaMemoryMeasurer(cuda)
+        complete_worker_started_at = timer.begin_span()
 
-    def measured(phase, operation):
-        result = timer.measure(phase, lambda: memory_meter.observe(phase, operation))
-        if _progress is not None:
-            _progress(_progress_stage_for_phase(phase), "completed", {"timing_phase": phase})
-        return result
+        def measured(phase, operation):
+            result = timer.measure(phase, lambda: memory_meter.observe(phase, operation))
+            if _progress is not None:
+                _progress(_progress_stage_for_phase(phase), "completed", {"timing_phase": phase})
+            return result
 
-    measured("before_model_load", lambda: None)
+        measured("before_model_load", lambda: None)
 
-    # B1B-R4 §6: applied independently in THIS worker's own process, before
-    # any model inference -- never assumed shared with the R-KV worker
-    # process (a separate OS process, per B1B-R3 §11's process-separation
-    # requirement).
-    determinism_policy = timer.measure(
-        "fullkv_worker_startup",
-        lambda: apply_framework_seed(
-            config.generation.framework_seed, config.generation.attention_backend, cuda_available=cuda_available,
-        ),
-    )
-
-    model_snapshot = None
-    tokenizer_snapshot = None
-    device_evidence: dict[str, Any] = {"verified": False, "reason": "injected test backend"}
-    if _load_model is None:
-        from kvcot.discovery.snapshot_boundary import resolve_local_snapshot
-        from kvcot.discovery.strict_device import verify_single_rtx3090
-
-        device = verify_single_rtx3090(cuda, torch_module=torch)
-        device_evidence = {"verified": True, **device.__dict__}
-
-        def resolve_snapshots():
-            return (
-                resolve_local_snapshot(config.model.name, config.model.revision, "model"),
-                resolve_local_snapshot(config.model.tokenizer_name, config.model.tokenizer_revision, "tokenizer"),
-            )
-
-        model_snapshot, tokenizer_snapshot = timer.measure("snapshot_tokenizer_resolution", resolve_snapshots)
-        if _progress is not None:
-            _progress("snapshot resolution", "completed", None)
-        if model_snapshot.free_bytes < model_snapshot.total_bytes:
-            raise WorkerFailedError("insufficient free disk relative to verified local model snapshot size")
-    else:
-        timer.measure("snapshot_tokenizer_resolution", lambda: (None, None))
-
-    if _load_tokenizer is not None:
-        tokenizer = measured("tokenizer_load", _load_tokenizer)
-    else:
-        from transformers import AutoTokenizer
-
-        tokenizer = measured(
-            "tokenizer_load",
-            lambda: AutoTokenizer.from_pretrained(
-                tokenizer_snapshot.local_path, local_files_only=True, use_fast=True
+        # B1B-R4 §6: applied independently in THIS worker's own process, before
+        # any model inference -- never assumed shared with the R-KV worker
+        # process (a separate OS process, per B1B-R3 §11's process-separation
+        # requirement).
+        determinism_policy = timer.measure(
+            "fullkv_worker_startup",
+            lambda: apply_framework_seed(
+                config.generation.framework_seed, config.generation.attention_backend, cuda_available=cuda_available,
             ),
         )
-    if _progress is not None:
-        _progress("model-load start", "started", None)
-    if _load_model is not None:
-        model = measured("model_load", _load_model)
-    else:
-        from kvcot.discovery.strict_device import load_fullkv_discovery_model
 
-        model = measured(
-            "model_load", lambda: load_fullkv_discovery_model(config, model_snapshot.local_path, _device)
+        model_snapshot = None
+        tokenizer_snapshot = None
+        device_evidence: dict[str, Any] = {"verified": False, "reason": "injected test backend"}
+        if _load_model is None:
+            from kvcot.discovery.snapshot_boundary import resolve_local_snapshot
+            from kvcot.discovery.strict_device import verify_single_rtx3090
+
+            device = verify_single_rtx3090(cuda, torch_module=torch)
+            device_evidence = {"verified": True, **device.__dict__}
+
+            def resolve_snapshots():
+                return (
+                    resolve_local_snapshot(config.model.name, config.model.revision, "model"),
+                    resolve_local_snapshot(config.model.tokenizer_name, config.model.tokenizer_revision, "tokenizer"),
+                )
+
+            model_snapshot, tokenizer_snapshot = timer.measure("snapshot_tokenizer_resolution", resolve_snapshots)
+            if _progress is not None:
+                _progress("snapshot resolution", "completed", None)
+            if model_snapshot.free_bytes < model_snapshot.total_bytes:
+                raise WorkerFailedError("insufficient free disk relative to verified local model snapshot size")
+        else:
+            timer.measure("snapshot_tokenizer_resolution", lambda: (None, None))
+
+        if _load_tokenizer is not None:
+            tokenizer = measured("tokenizer_load", _load_tokenizer)
+        else:
+            from transformers import AutoTokenizer
+
+            tokenizer = measured(
+                "tokenizer_load",
+                lambda: AutoTokenizer.from_pretrained(
+                    tokenizer_snapshot.local_path, local_files_only=True, use_fast=True
+                ),
+            )
+        if _progress is not None:
+            _progress("model-load start", "started", None)
+        if _load_model is not None:
+            model = measured("model_load", _load_model)
+        else:
+            from kvcot.discovery.strict_device import load_fullkv_discovery_model
+
+            model = measured(
+                "model_load", lambda: load_fullkv_discovery_model(config, model_snapshot.local_path, _device)
+            )
+        runtime_identity = derive_runtime_identity(
+            model=model, tokenizer=tokenizer, requested_model_revision=config.model.revision,
+            requested_tokenizer_revision=config.model.tokenizer_revision,
+            verified_model_revision=None if model_snapshot is None else model_snapshot.resolved_revision,
+            verified_tokenizer_revision=None if tokenizer_snapshot is None else tokenizer_snapshot.resolved_revision,
         )
-    runtime_identity = derive_runtime_identity(
-        model=model, tokenizer=tokenizer, requested_model_revision=config.model.revision,
-        requested_tokenizer_revision=config.model.tokenizer_revision,
-        verified_model_revision=None if model_snapshot is None else model_snapshot.resolved_revision,
-        verified_tokenizer_revision=None if tokenizer_snapshot is None else tokenizer_snapshot.resolved_revision,
-    )
-    def validate_post_load():
-        assert_no_offloaded_parameters(model)
-        return derive_parameter_placement(model)
+        def validate_post_load():
+            assert_no_offloaded_parameters(model)
+            return derive_parameter_placement(model)
 
-    parameter_placement = timer.measure("post_load_validation", validate_post_load)
+        parameter_placement = timer.measure("post_load_validation", validate_post_load)
 
-    num_layers = len(model.model.layers)
-    num_kv_heads = model.config.num_key_value_heads
+        num_layers = len(model.model.layers)
+        num_kv_heads = model.config.num_key_value_heads
 
-    # B1B-R4 §14: reset peak memory stats AFTER load, BEFORE measured
-    # inference -- current model allocation is therefore included in the
-    # reset baseline, matching the R-KV worker's identical reset point.
-    measured("post_load_baseline", lambda: None)
+        # B1B-R4 §14: reset peak memory stats AFTER load, BEFORE measured
+        # inference -- current model allocation is therefore included in the
+        # reset baseline, matching the R-KV worker's identical reset point.
+        measured("post_load_baseline", lambda: None)
 
-    if _fresh_cache_factory is not None:
-        cache_factory = _fresh_cache_factory
-    else:
-        from transformers.cache_utils import DynamicCache
+        if _fresh_cache_factory is not None:
+            cache_factory = _fresh_cache_factory
+        else:
+            from transformers.cache_utils import DynamicCache
 
-        cache_factory = lambda: DynamicCache()  # noqa: E731
+            cache_factory = lambda: DynamicCache()  # noqa: E731
 
-    cache = reset_patched_state(model, cache_factory)
-    provenance = ModelProvenance(layers={i: LayerProvenance.empty(num_kv_heads) for i in range(num_layers)})
-    state = RealModelState(
-        model=model, cache=cache, model_provenance=provenance, compaction=CompactionTracker(),
-        absolute_position=0, device=_device,
-    )
+        cache = reset_patched_state(model, cache_factory)
+        provenance = ModelProvenance(layers={i: LayerProvenance.empty(num_kv_heads) for i in range(num_layers)})
+        state = RealModelState(
+            model=model, cache=cache, model_provenance=provenance, compaction=CompactionTracker(),
+            absolute_position=0, device=_device,
+        )
 
-    prompt_token_ids = list(manifest.prompt_token_ids)
-    actual_calls = ActualModelCallRecorder()
-    raw_prefill = build_real_prefill_fn(_device, actual_calls)
-    raw_decode = build_real_decode_one_fn(_device, actual_calls)
+        prompt_token_ids = list(manifest.prompt_token_ids)
+        actual_calls = ActualModelCallRecorder()
+        raw_prefill = build_real_prefill_fn(_device, actual_calls)
+        raw_decode = build_real_decode_one_fn(_device, actual_calls)
 
-    def timed_prefill(state, tokens):
-        return timer.measure("fullkv_prefill", lambda: raw_prefill(state, tokens))
+        def timed_prefill(state, tokens):
+            return timer.measure("fullkv_prefill", lambda: raw_prefill(state, tokens))
 
-    def timed_decode(state, token):
-        return timer.measure("fullkv_decode", lambda: raw_decode(state, token))
+        def timed_decode(state, token):
+            return timer.measure("fullkv_decode", lambda: raw_decode(state, token))
 
-    recorder = CallTraceRecorder(
-        timed_prefill, timed_decode
-    )
-    raw_answer_fn = build_math500_answer_fn(tokenizer, manifest.gold_answer)
+        recorder = CallTraceRecorder(
+            timed_prefill, timed_decode
+        )
+        raw_answer_fn = build_math500_answer_fn(tokenizer, manifest.gold_answer)
 
-    def answer_fn(ids):
-        return timer.measure("answer_verification", lambda: raw_answer_fn(ids))
-    provenance_record = NaturalRunProvenance(
-        model_name=config.model.name, model_revision=config.model.revision,
-        tokenizer_name=config.model.tokenizer_name, tokenizer_revision=config.model.tokenizer_revision,
-        rkv_revision=config.rkv.upstream_revision, config_sha256=canonical_config_hash(config),
-        dataset_name=manifest.dataset_repo, example_id=manifest.unique_id,
-    )
+        def answer_fn(ids):
+            return timer.measure("answer_verification", lambda: raw_answer_fn(ids))
+        provenance_record = NaturalRunProvenance(
+            model_name=config.model.name, model_revision=config.model.revision,
+            tokenizer_name=config.model.tokenizer_name, tokenizer_revision=config.model.tokenizer_revision,
+            rkv_revision=config.rkv.upstream_revision, config_sha256=canonical_config_hash(config),
+            dataset_name=manifest.dataset_repo, example_id=manifest.unique_id,
+        )
 
-    trace = measured(
-        "fullkv_complete_natural_generation",
-        lambda: run_natural_pass1(
-            provenance_record, prompt_token_ids, state, recorder.prefill, recorder.decode_one,
-            config.generation.max_new_tokens, tokenizer.eos_token_id, answer_fn,
-        ),
-    )
-    wall_seconds = next(
-        record.duration_seconds for record in timer.records
-        if record.phase == "fullkv_complete_natural_generation"
-    )
+        trace = measured(
+            "fullkv_complete_natural_generation",
+            lambda: run_natural_pass1(
+                provenance_record, prompt_token_ids, state, recorder.prefill, recorder.decode_one,
+                config.generation.max_new_tokens, tokenizer.eos_token_id, answer_fn,
+            ),
+        )
+        wall_seconds = next(
+            record.duration_seconds for record in timer.records
+            if record.phase == "fullkv_complete_natural_generation"
+        )
 
-    if not actual_calls.batch_size_verified:
-        raise WorkerFailedError("no valid actual model-call batch evidence was recorded")
-    batch_size = actual_calls.events[0].batch_size
+        if not actual_calls.batch_size_verified:
+            raise WorkerFailedError("no valid actual model-call batch evidence was recorded")
+        batch_size = actual_calls.events[0].batch_size
 
-    memory_meter.observe("fullkv_complete_worker", lambda: None)
-    timer.finish_span("fullkv_complete_worker", complete_worker_started_at)
-    peak_allocated = memory_meter.maximum_peak_allocated
-    peak_reserved = memory_meter.maximum_peak_reserved
-    first_memory = memory_meter.records[0]
-    memory = MemoryEvidence(
-        allocated_before_reset_bytes=first_memory.allocated_before,
-        reserved_before_reset_bytes=first_memory.reserved_before,
-        peak_allocated_bytes=peak_allocated, peak_reserved_bytes=peak_reserved,
-        reset_point="explicit_phase_owned_resets",
-    )
+        memory_meter.observe("fullkv_complete_worker", lambda: None)
+        timer.finish_span("fullkv_complete_worker", complete_worker_started_at)
+        peak_allocated = memory_meter.maximum_peak_allocated
+        peak_reserved = memory_meter.maximum_peak_reserved
+        first_memory = memory_meter.records[0]
+        memory = MemoryEvidence(
+            allocated_before_reset_bytes=first_memory.allocated_before,
+            reserved_before_reset_bytes=first_memory.reserved_before,
+            peak_allocated_bytes=peak_allocated, peak_reserved_bytes=peak_reserved,
+            reset_point="explicit_phase_owned_resets",
+        )
 
-    runtime_generation = build_runtime_generation_record(
-        batch_size=batch_size, max_new_tokens=config.generation.max_new_tokens, eos_token_id=tokenizer.eos_token_id,
-        attention_backend=config.generation.attention_backend, framework_seed=config.generation.framework_seed,
-        prompt_token_count=len(prompt_token_ids),
-    )
+        runtime_generation = build_runtime_generation_record(
+            batch_size=batch_size, max_new_tokens=config.generation.max_new_tokens, eos_token_id=tokenizer.eos_token_id,
+            attention_backend=config.generation.attention_backend, framework_seed=config.generation.framework_seed,
+            prompt_token_count=len(prompt_token_ids),
+        )
 
-    return FullKVWorkerResult(
-        role="fullkv",
-        model_revision=config.model.revision,
-        tokenizer_revision=config.model.tokenizer_revision,
-        dataset_repo=manifest.dataset_repo,
-        dataset_revision=manifest.dataset_revision,
-        manifest_hash=manifest.manifest_hash(),
-        prompt_token_ids_sha256=manifest.prompt_token_ids_sha256,
-        prompt_token_count=len(prompt_token_ids),
-        natural_generated_token_ids=list(trace.generated_token_ids),
-        natural_answer=trace.natural_answer,
-        natural_answer_status=trace.natural_answer_status,
-        cap_hit=trace.cap_hit,
-        prefill_call_count=recorder.prefill_call_count,
-        decode_call_count=recorder.decode_call_count,
-        call_boundary_trace_hash=recorder.ordered_call_kinds_and_tokens_hash(),
-        wall_seconds=wall_seconds,
-        determinism_policy=determinism_policy.__dict__,
-        runtime_generation=runtime_generation.__dict__,
-        runtime_generation_config_hash=runtime_generation.canonical_hash(),
-        parameter_placement=parameter_placement.__dict__,
-        runtime_identity=runtime_identity.__dict__,
-        memory=memory.__dict__,
-        peak_cuda_allocated_bytes=peak_allocated,
-        peak_cuda_reserved_bytes=peak_reserved,
-        every_parameter_on_cuda=parameter_placement.every_parameter_on_cuda,
-        batch_size=batch_size,
-        actual_batch_size_verified=actual_calls.batch_size_verified,
-        actual_call_evidence=actual_calls.export(),
-        snapshot_evidence={
-            "verified": model_snapshot is not None and tokenizer_snapshot is not None,
-            "model": None if model_snapshot is None else model_snapshot.__dict__,
-            "tokenizer": None if tokenizer_snapshot is None else tokenizer_snapshot.__dict__,
-        },
-        device_evidence=device_evidence,
-        dataset_row_identity={
-            "dataset_repo": manifest.dataset_repo,
-            "dataset_revision": manifest.dataset_revision,
-            "example_index": manifest.example_index,
-            "unique_id": manifest.unique_id,
-            "raw_content_hash": getattr(manifest, "raw_content_hash", None),
-            "manifest_canonical_hash": manifest.manifest_hash(),
-            "rendered_user_message_sha256": getattr(manifest, "rendered_user_message_sha256", None),
-            "chat_template_source_sha256": getattr(manifest, "chat_template_source_sha256", None),
-            "prompt_token_ids_sha256": manifest.prompt_token_ids_sha256,
-            "prompt_token_count": len(prompt_token_ids),
-        },
-        timing_evidence=timer.export(),
-        memory_phase_evidence=memory_meter.export(),
-        software_versions={"torch": torch.__version__},
-    ).model_dump(mode="json")
+        return FullKVWorkerResult(
+            role="fullkv",
+            model_revision=config.model.revision,
+            tokenizer_revision=config.model.tokenizer_revision,
+            dataset_repo=manifest.dataset_repo,
+            dataset_revision=manifest.dataset_revision,
+            manifest_hash=manifest.manifest_hash(),
+            prompt_token_ids_sha256=manifest.prompt_token_ids_sha256,
+            prompt_token_count=len(prompt_token_ids),
+            natural_generated_token_ids=list(trace.generated_token_ids),
+            natural_answer=trace.natural_answer,
+            natural_answer_status=trace.natural_answer_status,
+            cap_hit=trace.cap_hit,
+            prefill_call_count=recorder.prefill_call_count,
+            decode_call_count=recorder.decode_call_count,
+            call_boundary_trace_hash=recorder.ordered_call_kinds_and_tokens_hash(),
+            wall_seconds=wall_seconds,
+            determinism_policy=determinism_policy.__dict__,
+            runtime_generation=runtime_generation.__dict__,
+            runtime_generation_config_hash=runtime_generation.canonical_hash(),
+            parameter_placement=parameter_placement.__dict__,
+            runtime_identity=runtime_identity.__dict__,
+            memory=memory.__dict__,
+            peak_cuda_allocated_bytes=peak_allocated,
+            peak_cuda_reserved_bytes=peak_reserved,
+            every_parameter_on_cuda=parameter_placement.every_parameter_on_cuda,
+            batch_size=batch_size,
+            actual_batch_size_verified=actual_calls.batch_size_verified,
+            actual_call_evidence=actual_calls.export(),
+            snapshot_evidence={
+                "verified": model_snapshot is not None and tokenizer_snapshot is not None,
+                "model": None if model_snapshot is None else model_snapshot.__dict__,
+                "tokenizer": None if tokenizer_snapshot is None else tokenizer_snapshot.__dict__,
+            },
+            device_evidence=device_evidence,
+            dataset_row_identity={
+                "dataset_repo": manifest.dataset_repo,
+                "dataset_revision": manifest.dataset_revision,
+                "example_index": manifest.example_index,
+                "unique_id": manifest.unique_id,
+                "raw_content_hash": getattr(manifest, "raw_content_hash", None),
+                "manifest_canonical_hash": manifest.manifest_hash(),
+                "rendered_user_message_sha256": getattr(manifest, "rendered_user_message_sha256", None),
+                "chat_template_source_sha256": getattr(manifest, "chat_template_source_sha256", None),
+                "prompt_token_ids_sha256": manifest.prompt_token_ids_sha256,
+                "prompt_token_count": len(prompt_token_ids),
+            },
+            timing_evidence=timer.export(),
+            memory_phase_evidence=memory_meter.export(),
+            software_versions={"torch": torch.__version__},
+        ).model_dump(mode="json")
+    except Exception as exc:
+        from kvcot.discovery.worker_partial_evidence import WorkerBodyFailure, capture_partial_evidence
+
+        evidence = capture_partial_evidence(
+            role="fullkv", failing_stage=_last_completed_stage["stage"] or "unknown", exc=exc,
+            scope=locals(),
+        )
+        raise WorkerBodyFailure(evidence, exc) from exc
 
 
 def run_rkv_worker(
@@ -1025,462 +1124,524 @@ def run_rkv_worker(
 
     cuda = _cuda if _cuda is not None else torch.cuda
     _progress = _progress or _production_progress_callback("rkv")
+    _last_completed_stage: dict = {"stage": None}
+    _underlying_progress = _progress
+
+    def _progress(stage, status, counters=None):
+        if status == "completed":
+            _last_completed_stage["stage"] = stage
+        if _underlying_progress is not None:
+            _underlying_progress(stage, status, counters)
+
     cuda_available = bool(cuda.is_available())
     if not cuda_available and _load_model is None:
         raise WorkerFailedError("run_rkv_worker requires CUDA; none is available.")
 
-    timer = SynchronizedTimer(cuda, _clock or time.perf_counter)
-    memory_meter = CudaMemoryMeasurer(cuda)
-    complete_worker_started_at = timer.begin_span()
+    try:
+        timer = SynchronizedTimer(cuda, _clock or time.perf_counter)
+        memory_meter = CudaMemoryMeasurer(cuda)
+        complete_worker_started_at = timer.begin_span()
 
-    def measured(phase, operation):
-        result = timer.measure(phase, lambda: memory_meter.observe(phase, operation))
+        def measured(phase, operation):
+            result = timer.measure(phase, lambda: memory_meter.observe(phase, operation))
+            if _progress is not None:
+                _progress(_progress_stage_for_phase(phase), "completed", {"timing_phase": phase})
+            return result
+
+        measured("before_model_load", lambda: None)
+
+        determinism_policy = timer.measure(
+            "rkv_worker_startup",
+            lambda: apply_framework_seed(
+                config.generation.framework_seed, config.generation.attention_backend, cuda_available=cuda_available,
+            ),
+        )
+
+        model_snapshot = None
+        tokenizer_snapshot = None
+        device_evidence: dict[str, Any] = {"verified": False, "reason": "injected test backend"}
+        if _load_model is None:
+            from kvcot.discovery.snapshot_boundary import resolve_local_snapshot
+            from kvcot.discovery.strict_device import verify_single_rtx3090
+
+            device = verify_single_rtx3090(cuda, torch_module=torch)
+            device_evidence = {"verified": True, **device.__dict__}
+
+            def resolve_snapshots():
+                return (
+                    resolve_local_snapshot(config.model.name, config.model.revision, "model"),
+                    resolve_local_snapshot(config.model.tokenizer_name, config.model.tokenizer_revision, "tokenizer"),
+                )
+
+            model_snapshot, tokenizer_snapshot = timer.measure("snapshot_tokenizer_resolution", resolve_snapshots)
+            if _progress is not None:
+                _progress("snapshot resolution", "completed", None)
+            if model_snapshot.free_bytes < model_snapshot.total_bytes:
+                raise WorkerFailedError("insufficient free disk relative to verified local model snapshot size")
+        else:
+            timer.measure("snapshot_tokenizer_resolution", lambda: (None, None))
+
+        if _load_tokenizer is not None:
+            tokenizer = measured("tokenizer_load", _load_tokenizer)
+        else:
+            from transformers import AutoTokenizer
+
+            tokenizer = measured(
+                "tokenizer_load",
+                lambda: AutoTokenizer.from_pretrained(
+                    tokenizer_snapshot.local_path, local_files_only=True, use_fast=True
+                ),
+            )
         if _progress is not None:
-            _progress(_progress_stage_for_phase(phase), "completed", {"timing_phase": phase})
-        return result
+            _progress("model-load start", "started", None)
+        if _load_model is not None:
+            model = measured("model_load", _load_model)
+        else:
+            from kvcot.discovery.strict_device import load_rkv_discovery_model
 
-    measured("before_model_load", lambda: None)
+            model = measured(
+                "model_load",
+                lambda: load_rkv_discovery_model(
+                    config, model_snapshot.local_path, tokenizer_snapshot.local_path, _device
+                ),
+            )
+        runtime_check = verify_runtime_matches_frozen(config.rkv, model)
+        if not runtime_check.passed:
+            raise WorkerFailedError(
+                f"runtime R-KV configuration disagrees with the frozen config on: {runtime_check.mismatched_fields} "
+                f"(frozen_hash={runtime_check.frozen_hash}, runtime_hash={runtime_check.runtime_hash})"
+            )
+        runtime_identity = derive_runtime_identity(
+            model=model, tokenizer=tokenizer, requested_model_revision=config.model.revision,
+            requested_tokenizer_revision=config.model.tokenizer_revision,
+            verified_model_revision=None if model_snapshot is None else model_snapshot.resolved_revision,
+            verified_tokenizer_revision=None if tokenizer_snapshot is None else tokenizer_snapshot.resolved_revision,
+        )
+        def validate_post_load():
+            assert_no_offloaded_parameters(model)
+            return derive_parameter_placement(model)
 
-    determinism_policy = timer.measure(
-        "rkv_worker_startup",
-        lambda: apply_framework_seed(
-            config.generation.framework_seed, config.generation.attention_backend, cuda_available=cuda_available,
-        ),
-    )
+        parameter_placement = timer.measure("post_load_validation", validate_post_load)
+        num_layers = len(model.model.layers)
+        num_kv_heads = model.config.num_key_value_heads
 
-    model_snapshot = None
-    tokenizer_snapshot = None
-    device_evidence: dict[str, Any] = {"verified": False, "reason": "injected test backend"}
-    if _load_model is None:
-        from kvcot.discovery.snapshot_boundary import resolve_local_snapshot
-        from kvcot.discovery.strict_device import verify_single_rtx3090
+        measured("post_load_baseline", lambda: None)
 
-        device = verify_single_rtx3090(cuda, torch_module=torch)
-        device_evidence = {"verified": True, **device.__dict__}
+        if _fresh_cache_factory is not None:
+            cache_factory = _fresh_cache_factory
+        else:
+            from transformers.cache_utils import DynamicCache
 
-        def resolve_snapshots():
-            return (
-                resolve_local_snapshot(config.model.name, config.model.revision, "model"),
-                resolve_local_snapshot(config.model.tokenizer_name, config.model.tokenizer_revision, "tokenizer"),
+            cache_factory = lambda: DynamicCache()  # noqa: E731
+
+        def _fresh_state() -> RealModelState:
+            cache = reset_patched_state(model, cache_factory)
+            provenance = ModelProvenance(layers={i: LayerProvenance.empty(num_kv_heads) for i in range(num_layers)})
+            return RealModelState(
+                model=model, cache=cache, model_provenance=provenance, compaction=CompactionTracker(),
+                absolute_position=0, device=_device,
             )
 
-        model_snapshot, tokenizer_snapshot = timer.measure("snapshot_tokenizer_resolution", resolve_snapshots)
-        if _progress is not None:
-            _progress("snapshot resolution", "completed", None)
-        if model_snapshot.free_bytes < model_snapshot.total_bytes:
-            raise WorkerFailedError("insufficient free disk relative to verified local model snapshot size")
-    else:
-        timer.measure("snapshot_tokenizer_resolution", lambda: (None, None))
+        actual_calls = ActualModelCallRecorder()
+        instrumented = _RkvHarnessInstrumentation(
+            build_real_prefill_fn(_device, actual_calls),
+            build_real_decode_one_fn(_device, actual_calls),
+            build_real_snapshot_fn(),
+            timer,
+        )
 
-    if _load_tokenizer is not None:
-        tokenizer = measured("tokenizer_load", _load_tokenizer)
-    else:
-        from transformers import AutoTokenizer
+        identity = IdentitySeedParts(
+            global_seed=config.generation.framework_seed, dataset_name=manifest.dataset_repo,
+            problem_index=manifest.example_index, model_revision=config.model.revision,
+            rkv_revision=config.rkv.upstream_revision,
+        )
+        answer_verifier = build_math500_answer_fn(tokenizer, manifest.gold_answer)
 
-        tokenizer = measured(
-            "tokenizer_load",
-            lambda: AutoTokenizer.from_pretrained(
-                tokenizer_snapshot.local_path, local_files_only=True, use_fast=True
+        def timed_answer_verifier(ids):
+            return timer.measure("answer_verification", lambda: answer_verifier(ids))
+        provenance_record = NaturalRunProvenance(
+            model_name=config.model.name, model_revision=config.model.revision,
+            tokenizer_name=config.model.tokenizer_name, tokenizer_revision=config.model.tokenizer_revision,
+            rkv_revision=config.rkv.upstream_revision, config_sha256=canonical_config_hash(config),
+            dataset_name=manifest.dataset_repo, example_id=manifest.unique_id,
+        )
+
+        prompt_token_ids = list(manifest.prompt_token_ids)
+        assert len(prompt_token_ids) > 0, "structurally impossible: an empty prompt must never reach Pass 1"
+
+        example_attrition = AttritionCounters()
+        pair_attrition = AttritionCounters()
+
+        vocab_size = int(getattr(model.config, "vocab_size", 0))
+        if vocab_size <= 0:
+            raise WorkerFailedError("model.config.vocab_size must be positive for the pre-branch memory guard")
+
+        def _pre_branch_guard(target, kind):
+            # log-softmax materializes float32 output alongside the current
+            # vocabulary logits; account for both using the actual vocabulary.
+            known_temporary_bytes = 2 * vocab_size * 4
+            return check_pre_branch_memory(
+                phase=f"{kind}:{target.event_plan.compaction_event_id}",
+                cuda=cuda,
+                snapshot=target.pristine_snapshot,
+                selected_vector_bytes=target.persistent_tensor_bytes,
+                known_temporary_bytes=known_temporary_bytes,
+            )
+
+        example_result = run_example(
+            example_id=manifest.unique_id, model_revision=config.model.revision,
+            rkv_revision=config.rkv.upstream_revision, provenance=provenance_record,
+            prompt_token_ids=prompt_token_ids, pass1_initial_state=_fresh_state(),
+            pass2_initial_state_factory=_fresh_state, prefill_fn=instrumented.prefill,
+            decode_one_fn=instrumented.decode_one, snapshot_fn=instrumented.snapshot,
+            max_new_tokens=config.generation.max_new_tokens, eos_token_id=tokenizer.eos_token_id,
+            answer_fn=timed_answer_verifier, num_hidden_layers=num_layers, num_key_value_heads=num_kv_heads,
+            identity=identity,
+            branch_step_fn=build_real_branch_step_fn_restore_once(
+                model, _device, actual_calls, consume_owned_snapshot=True
             ),
+            example_attrition=example_attrition, pair_attrition=pair_attrition,
+            # B1B-R4 §7: exactly ONE no-op pair evaluation for the whole B2A
+            # example, not one per selected event.
+            pair_execution_policy=PairExecutionPolicy(no_op_mode=NoOpMode.B2A_SINGLE_CALIBRATION),
+            pre_branch_guard=_pre_branch_guard,
+            operation_runner=measured,
+            pair_phase_runner=timer.measure,
+            # The generic CPU harness retains a monotonic diagnostic default;
+            # execute mode overrides it. Authoritative B2A timing is the
+            # synchronized `measured`/`timer.measure` evidence above.
+            clock_fn=_clock or time.perf_counter,
         )
-    if _progress is not None:
-        _progress("model-load start", "started", None)
-    if _load_model is not None:
-        model = measured("model_load", _load_model)
-    else:
-        from kvcot.discovery.strict_device import load_rkv_discovery_model
+        if example_result.aborted:
+            # Independent-audit Gate H1: `run_example` returns (rather than
+            # raises) when its own pair-evaluation loop is cut short by an
+            # unexpected exception (e.g. a real CUDA OOM mid-pair) so every
+            # pair completed before the abort survives on `example_result`.
+            # Promoting it to a raised exception HERE (inside this
+            # function's own `try` block) means the outer partial-evidence
+            # capture below sees `example_result` already bound in
+            # `locals()` -- every pair/attrition/mutation record the
+            # aborted example accumulated is threaded into the worker's
+            # failure envelope, never silently reported as if the worker
+            # had merely produced a smaller-than-expected count.
+            raise RuntimeError(
+                f"pair-evaluation loop aborted at stage={example_result.invalid_stage!r}: "
+                f"{example_result.abort_failure_type}: {example_result.abort_failure_message}"
+            )
 
-        model = measured(
-            "model_load",
-            lambda: load_rkv_discovery_model(
-                config, model_snapshot.local_path, tokenizer_snapshot.local_path, _device
+        # Independent-audit Gate H2 repair: this phase used to be named
+        # `capture_and_parity` -- but it only ever timed the comparison
+        # below (`compare_call_boundary_traces`, a POST-Pass-2 call-
+        # boundary-shape comparison), never the actual target capture,
+        # K/V-gathering, survivor parity, or absolute-position parity work,
+        # all of which genuinely happen EARLIER, inside `run_example`'s
+        # Pass 2 step -- already-real, already-synchronized, non-
+        # overlapping timings under `rkv_pass2_prefill`/`rkv_pass2_decode`/
+        # `snapshot_creation` (recorded by `instrumented.prefill`/
+        # `.decode_one`/`.snapshot` above). Renamed to match what THIS
+        # specific measurement actually is; the real capture/parity timing
+        # evidence lives in those other, already-required phases instead of
+        # being fabricated under this one's now-accurate name.
+        call_boundary_comparison = timer.measure(
+            "call_trace_comparison",
+            lambda: compare_call_boundary_traces(instrumented.pass1_trace, instrumented.pass2_trace),
+        )
+        if not actual_calls.batch_size_verified:
+            raise WorkerFailedError("no valid actual model-call batch evidence was recorded")
+        batch_size = actual_calls.events[0].batch_size
+        from kvcot.utils.hashing import sha256_int_ids, sha256_json
+
+        pass1_compaction_positions = [event.absolute_event_position for event in example_result.trace.compaction_events]
+        pass2_compaction_positions = list(example_result.pass2_compaction_event_positions)
+        compaction_lists_match = pass1_compaction_positions == pass2_compaction_positions
+        trajectory = derive_trajectory_parity_evidence(
+            pass2_result_valid=example_result.valid,
+            pass2_invalid_reason=example_result.pass2_invalid_reason,
+            call_boundary_all_match=call_boundary_comparison.all_match,
+            target_capture_gather_parities=tuple(
+                ev.gather_parity_passed for ev in example_result.minimized_target_evidence
             ),
-        )
-    runtime_check = verify_runtime_matches_frozen(config.rkv, model)
-    if not runtime_check.passed:
-        raise WorkerFailedError(
-            f"runtime R-KV configuration disagrees with the frozen config on: {runtime_check.mismatched_fields} "
-            f"(frozen_hash={runtime_check.frozen_hash}, runtime_hash={runtime_check.runtime_hash})"
-        )
-    runtime_identity = derive_runtime_identity(
-        model=model, tokenizer=tokenizer, requested_model_revision=config.model.revision,
-        requested_tokenizer_revision=config.model.tokenizer_revision,
-        verified_model_revision=None if model_snapshot is None else model_snapshot.resolved_revision,
-        verified_tokenizer_revision=None if tokenizer_snapshot is None else tokenizer_snapshot.resolved_revision,
-    )
-    def validate_post_load():
-        assert_no_offloaded_parameters(model)
-        return derive_parameter_placement(model)
-
-    parameter_placement = timer.measure("post_load_validation", validate_post_load)
-    num_layers = len(model.model.layers)
-    num_kv_heads = model.config.num_key_value_heads
-
-    measured("post_load_baseline", lambda: None)
-
-    if _fresh_cache_factory is not None:
-        cache_factory = _fresh_cache_factory
-    else:
-        from transformers.cache_utils import DynamicCache
-
-        cache_factory = lambda: DynamicCache()  # noqa: E731
-
-    def _fresh_state() -> RealModelState:
-        cache = reset_patched_state(model, cache_factory)
-        provenance = ModelProvenance(layers={i: LayerProvenance.empty(num_kv_heads) for i in range(num_layers)})
-        return RealModelState(
-            model=model, cache=cache, model_provenance=provenance, compaction=CompactionTracker(),
-            absolute_position=0, device=_device,
-        )
-
-    actual_calls = ActualModelCallRecorder()
-    instrumented = _RkvHarnessInstrumentation(
-        build_real_prefill_fn(_device, actual_calls),
-        build_real_decode_one_fn(_device, actual_calls),
-        build_real_snapshot_fn(),
-        timer,
-    )
-
-    identity = IdentitySeedParts(
-        global_seed=config.generation.framework_seed, dataset_name=manifest.dataset_repo,
-        problem_index=manifest.example_index, model_revision=config.model.revision,
-        rkv_revision=config.rkv.upstream_revision,
-    )
-    answer_verifier = build_math500_answer_fn(tokenizer, manifest.gold_answer)
-
-    def timed_answer_verifier(ids):
-        return timer.measure("answer_verification", lambda: answer_verifier(ids))
-    provenance_record = NaturalRunProvenance(
-        model_name=config.model.name, model_revision=config.model.revision,
-        tokenizer_name=config.model.tokenizer_name, tokenizer_revision=config.model.tokenizer_revision,
-        rkv_revision=config.rkv.upstream_revision, config_sha256=canonical_config_hash(config),
-        dataset_name=manifest.dataset_repo, example_id=manifest.unique_id,
-    )
-
-    prompt_token_ids = list(manifest.prompt_token_ids)
-    assert len(prompt_token_ids) > 0, "structurally impossible: an empty prompt must never reach Pass 1"
-
-    example_attrition = AttritionCounters()
-    pair_attrition = AttritionCounters()
-
-    vocab_size = int(getattr(model.config, "vocab_size", 0))
-    if vocab_size <= 0:
-        raise WorkerFailedError("model.config.vocab_size must be positive for the pre-branch memory guard")
-
-    def _pre_branch_guard(target, kind):
-        # log-softmax materializes float32 output alongside the current
-        # vocabulary logits; account for both using the actual vocabulary.
-        known_temporary_bytes = 2 * vocab_size * 4
-        return check_pre_branch_memory(
-            phase=f"{kind}:{target.event_plan.compaction_event_id}",
-            cuda=cuda,
-            snapshot=target.pristine_snapshot,
-            selected_vector_bytes=target.persistent_tensor_bytes,
-            known_temporary_bytes=known_temporary_bytes,
-        )
-
-    example_result = run_example(
-        example_id=manifest.unique_id, model_revision=config.model.revision,
-        rkv_revision=config.rkv.upstream_revision, provenance=provenance_record,
-        prompt_token_ids=prompt_token_ids, pass1_initial_state=_fresh_state(),
-        pass2_initial_state_factory=_fresh_state, prefill_fn=instrumented.prefill,
-        decode_one_fn=instrumented.decode_one, snapshot_fn=instrumented.snapshot,
-        max_new_tokens=config.generation.max_new_tokens, eos_token_id=tokenizer.eos_token_id,
-        answer_fn=timed_answer_verifier, num_hidden_layers=num_layers, num_key_value_heads=num_kv_heads,
-        identity=identity,
-        branch_step_fn=build_real_branch_step_fn_restore_once(
-            model, _device, actual_calls, consume_owned_snapshot=True
-        ),
-        example_attrition=example_attrition, pair_attrition=pair_attrition,
-        # B1B-R4 §7: exactly ONE no-op pair evaluation for the whole B2A
-        # example, not one per selected event.
-        pair_execution_policy=PairExecutionPolicy(no_op_mode=NoOpMode.B2A_SINGLE_CALIBRATION),
-        pre_branch_guard=_pre_branch_guard,
-        operation_runner=measured,
-        pair_phase_runner=timer.measure,
-        # The generic CPU harness retains a monotonic diagnostic default;
-        # execute mode overrides it. Authoritative B2A timing is the
-        # synchronized `measured`/`timer.measure` evidence above.
-        clock_fn=_clock or time.perf_counter,
-    )
-
-    call_boundary_comparison = timer.measure(
-        "capture_and_parity",
-        lambda: compare_call_boundary_traces(instrumented.pass1_trace, instrumented.pass2_trace),
-    )
-    if not actual_calls.batch_size_verified:
-        raise WorkerFailedError("no valid actual model-call batch evidence was recorded")
-    batch_size = actual_calls.events[0].batch_size
-    from kvcot.utils.hashing import sha256_int_ids, sha256_json
-
-    pass1_compaction_positions = [event.absolute_event_position for event in example_result.trace.compaction_events]
-    pass2_compaction_positions = list(example_result.pass2_compaction_event_positions)
-    compaction_lists_match = pass1_compaction_positions == pass2_compaction_positions
-    trajectory = derive_trajectory_parity_evidence(
-        pass2_result_valid=example_result.valid,
-        pass2_invalid_reason=example_result.pass2_invalid_reason,
-        call_boundary_all_match=call_boundary_comparison.all_match,
-        target_capture_gather_parities=tuple(
-            ev.gather_parity_passed for ev in example_result.minimized_target_evidence
-        ),
-        target_capture_absolute_parities=tuple(
-            ev.absolute_position_parity_passed for ev in example_result.minimized_target_evidence
-        ),
-        compaction_lists_match=compaction_lists_match,
-    )
-    pair_completion = derive_pair_completion_evidence(trace=example_result.trace, example_result=example_result)
-    semantic_swap_checks = derive_semantic_swap_check_evidence(example_result)
-    pair_identity = derive_pair_identity_evidence(example_result)
-    observed_retention_ratio = derive_observed_retention_ratio(example_result)
-    no_op_parity = derive_no_op_numerical_parity(example_result)
-
-    attempted_identities = list(example_result.attempted_pair_identities)
-    completed_identities = list(example_result.completed_pair_identities)
-    completed_keys = {tuple(sorted(identity.items())) for identity in completed_identities}
-    failed_identities = []
-    for identity in attempted_identities:
-        if tuple(sorted(identity.items())) in completed_keys:
-            continue
-        detail = next(
-            (
-                item for item in pair_completion.pair_failure_details
-                if item.compaction_event_id == identity["compaction_event_id"]
-                and item.layer_index == identity["layer_index"]
-                and item.kv_head_index == identity["kv_head_index"]
-                and item.evicted_absolute_position == identity["candidate_absolute_position"]
-                and item.donor_absolute_position == identity["donor_absolute_position"]
-                and item.pair_kind == identity["pair_kind"]
+            target_capture_absolute_parities=tuple(
+                ev.absolute_position_parity_passed for ev in example_result.minimized_target_evidence
             ),
-            None,
+            compaction_lists_match=compaction_lists_match,
         )
-        failed_identities.append({
-            **identity,
-            "failure_stage": None if detail is None else detail.stage,
-            "failure_detail": None if detail is None else detail.detail,
-        })
-    no_op_records = [record for record in example_result.pair_records if record.is_noop_control]
-    no_op_reports = [
-        report for report in example_result.semantic_mutation_reports
-        if report["pair_identity"]["pair_kind"] == "no_op"
-    ]
-    no_op_evidence = {}
-    if len(no_op_records) == 1 and len(no_op_reports) == 1:
-        record = no_op_records[0]
-        report = no_op_reports[0]
-        differences = [abs(a - b) for a, b in zip(record.baseline_per_token_nll, record.swapped_per_token_nll)]
-        no_op_evidence = {
-            "baseline_nll": list(record.baseline_per_token_nll),
-            "no_op_nll": list(record.swapped_per_token_nll),
-            "baseline_nll_sha256": sha256_json(list(record.baseline_per_token_nll)),
-            "no_op_nll_sha256": sha256_json(list(record.swapped_per_token_nll)),
-            "baseline_mean_nll": sum(record.baseline_per_token_nll) / len(record.baseline_per_token_nll),
-            "no_op_mean_nll": sum(record.swapped_per_token_nll) / len(record.swapped_per_token_nll),
-            "mean_difference": record.swap_gain,
-            "maximum_absolute_per_token_difference": max(differences),
-            "starting_snapshot_sha256": report.get("starting_snapshot_sha256"),
-            "semantic_mutation_report": report,
-            "physical_byte_delta": record.net_physical_bytes_changed,
-            "provenance_before_sha256": report.get("provenance_before_sha256"),
-            "provenance_after_sha256": report.get("provenance_after_sha256"),
-            "kept_index_before_sha256": report.get("kept_index_before_sha256"),
-            "kept_index_after_sha256": report.get("kept_index_after_sha256"),
+        pair_completion = derive_pair_completion_evidence(trace=example_result.trace, example_result=example_result)
+        semantic_swap_checks = derive_semantic_swap_check_evidence(example_result)
+        pair_identity = derive_pair_identity_evidence(example_result)
+        observed_retention_ratio = derive_observed_retention_ratio(example_result)
+        no_op_parity = derive_no_op_numerical_parity(example_result)
+
+        attempted_identities = list(example_result.attempted_pair_identities)
+        completed_identities = list(example_result.completed_pair_identities)
+        completed_keys = {tuple(sorted(identity.items())) for identity in completed_identities}
+        failed_identities = []
+        for identity in attempted_identities:
+            if tuple(sorted(identity.items())) in completed_keys:
+                continue
+            detail = next(
+                (
+                    item for item in pair_completion.pair_failure_details
+                    if item.compaction_event_id == identity["compaction_event_id"]
+                    and item.layer_index == identity["layer_index"]
+                    and item.kv_head_index == identity["kv_head_index"]
+                    and item.evicted_absolute_position == identity["candidate_absolute_position"]
+                    and item.donor_absolute_position == identity["donor_absolute_position"]
+                    and item.pair_kind == identity["pair_kind"]
+                ),
+                None,
+            )
+            failed_identities.append({
+                **identity,
+                "failure_stage": None if detail is None else detail.stage,
+                "failure_detail": None if detail is None else detail.detail,
+            })
+        no_op_records = [record for record in example_result.pair_records if record.is_noop_control]
+        no_op_reports = [
+            report for report in example_result.semantic_mutation_reports
+            if report["pair_identity"]["pair_kind"] == "no_op"
+        ]
+        no_op_evidence = {}
+        if len(no_op_records) == 1 and len(no_op_reports) == 1:
+            record = no_op_records[0]
+            report = no_op_reports[0]
+            differences = [abs(a - b) for a, b in zip(record.baseline_per_token_nll, record.swapped_per_token_nll)]
+            no_op_evidence = {
+                "baseline_nll": list(record.baseline_per_token_nll),
+                "no_op_nll": list(record.swapped_per_token_nll),
+                "baseline_nll_sha256": sha256_json(list(record.baseline_per_token_nll)),
+                "no_op_nll_sha256": sha256_json(list(record.swapped_per_token_nll)),
+                "baseline_mean_nll": sum(record.baseline_per_token_nll) / len(record.baseline_per_token_nll),
+                "no_op_mean_nll": sum(record.swapped_per_token_nll) / len(record.swapped_per_token_nll),
+                "mean_difference": record.swap_gain,
+                "maximum_absolute_per_token_difference": max(differences),
+                "starting_snapshot_sha256": report.get("starting_snapshot_sha256"),
+                "semantic_mutation_report": report,
+                "physical_byte_delta": record.net_physical_bytes_changed,
+                "provenance_before_sha256": report.get("provenance_before_sha256"),
+                "provenance_after_sha256": report.get("provenance_after_sha256"),
+                "kept_index_before_sha256": report.get("kept_index_before_sha256"),
+                "kept_index_after_sha256": report.get("kept_index_after_sha256"),
+            }
+        # Independent-audit Gate H3 repair: `first_mismatch` used to return
+        # only a bare index -- diagnosing a mismatch required re-running
+        # the model to see what the expected/observed values actually were.
+        # `build_mismatch_record` (`kvcot.discovery.mismatch`) captures the
+        # expected/observed values and lengths at the first point of
+        # divergence directly, distinguishing a genuine value difference
+        # from either sequence simply ending first, never indexing beyond
+        # either sequence.
+        from kvcot.discovery.mismatch import build_mismatch_record
+
+        def first_mismatch(left, right):
+            return build_mismatch_record(left, right).first_mismatch_index
+
+        pass1_calls = [
+            {"call_kind": event.kind, "token_ids": list(event.token_ids), "token_count": len(event.token_ids)}
+            for event in instrumented.pass1_trace.events
+        ]
+        pass2_calls = [
+            {"call_kind": event.kind, "token_ids": list(event.token_ids), "token_count": len(event.token_ids)}
+            for event in instrumented.pass2_trace.events
+        ]
+        actual_call_export = actual_calls.export()
+        pass1_actual_calls = actual_call_export[: len(pass1_calls)]
+        pass2_actual_calls = actual_call_export[len(pass1_calls) : len(pass1_calls) + len(pass2_calls)]
+        pass1_token_ids = list(example_result.trace.full_token_ids)
+        pass2_fed_token_ids = list(example_result.pass2_replayed_token_ids)
+        pass1_compaction_positions_list = list(pass1_compaction_positions)
+        pass2_compaction_positions_list = list(pass2_compaction_positions)
+        replay_evidence = {
+            "pass1_token_ids": pass1_token_ids,
+            "pass1_token_sha256": sha256_int_ids(pass1_token_ids),
+            "pass2_fed_token_ids": pass2_fed_token_ids,
+            "pass2_token_sha256": sha256_int_ids(pass2_fed_token_ids),
+            "token_first_mismatch": first_mismatch(pass1_token_ids, pass2_fed_token_ids),
+            "token_mismatch": build_mismatch_record(pass1_token_ids, pass2_fed_token_ids).export(),
+            "pass1_calls": pass1_calls,
+            "pass2_calls": pass2_calls,
+            "pass1_call_sha256": sha256_json(pass1_calls),
+            "pass2_call_sha256": sha256_json(pass2_calls),
+            "call_first_mismatch": first_mismatch(pass1_calls, pass2_calls),
+            "call_mismatch": build_mismatch_record(pass1_calls, pass2_calls).export(),
+            "pass1_actual_calls": pass1_actual_calls,
+            "pass2_actual_calls": pass2_actual_calls,
+            "pass1_actual_call_sha256": sha256_json(pass1_actual_calls),
+            "pass2_actual_call_sha256": sha256_json(pass2_actual_calls),
+            "actual_call_first_mismatch": first_mismatch(pass1_actual_calls, pass2_actual_calls),
+            "actual_call_mismatch": build_mismatch_record(pass1_actual_calls, pass2_actual_calls).export(),
+            "pass1_compaction_positions": pass1_compaction_positions_list,
+            "pass2_compaction_positions": pass2_compaction_positions_list,
+            "pass1_compaction_sha256": sha256_json(pass1_compaction_positions_list),
+            "pass2_compaction_sha256": sha256_json(pass2_compaction_positions_list),
+            "compaction_first_mismatch": first_mismatch(pass1_compaction_positions_list, pass2_compaction_positions_list),
+            "compaction_mismatch": build_mismatch_record(
+                pass1_compaction_positions_list, pass2_compaction_positions_list
+            ).export(),
+            "complete_compaction_trace_match": compaction_lists_match,
         }
-    def first_mismatch(left, right):
-        for index, (left_value, right_value) in enumerate(zip(left, right)):
-            if left_value != right_value:
-                return index
-        return None if len(left) == len(right) else min(len(left), len(right))
+        pass1_synchronized_seconds = next(
+            (record.duration_seconds for record in timer.records if record.phase == "rkv_complete_pass1"), 0.0
+        )
+        pass2_synchronized_seconds = next(
+            (record.duration_seconds for record in timer.records if record.phase == "rkv_complete_pass2"), 0.0
+        )
+        real_pair_synchronized_seconds = [
+            record.duration_seconds for record in timer.records
+            if record.phase.startswith("real_pair:") and record.phase.count(":") == 3
+        ]
+        no_op_synchronized_seconds = [
+            record.duration_seconds for record in timer.records
+            if record.phase.startswith("no_op_pair:") and record.phase.count(":") == 3
+        ]
 
-    pass1_calls = [
-        {"call_kind": event.kind, "token_ids": list(event.token_ids), "token_count": len(event.token_ids)}
-        for event in instrumented.pass1_trace.events
-    ]
-    pass2_calls = [
-        {"call_kind": event.kind, "token_ids": list(event.token_ids), "token_count": len(event.token_ids)}
-        for event in instrumented.pass2_trace.events
-    ]
-    actual_call_export = actual_calls.export()
-    pass1_actual_calls = actual_call_export[: len(pass1_calls)]
-    pass2_actual_calls = actual_call_export[len(pass1_calls) : len(pass1_calls) + len(pass2_calls)]
-    replay_evidence = {
-        "pass1_token_ids": list(example_result.trace.full_token_ids),
-        "pass1_token_sha256": sha256_int_ids(list(example_result.trace.full_token_ids)),
-        "pass2_fed_token_ids": list(example_result.pass2_replayed_token_ids),
-        "pass2_token_sha256": sha256_int_ids(list(example_result.pass2_replayed_token_ids)),
-        "token_first_mismatch": first_mismatch(
-            list(example_result.trace.full_token_ids), list(example_result.pass2_replayed_token_ids)
-        ),
-        "pass1_calls": pass1_calls,
-        "pass2_calls": pass2_calls,
-        "pass1_call_sha256": sha256_json(pass1_calls),
-        "pass2_call_sha256": sha256_json(pass2_calls),
-        "call_first_mismatch": first_mismatch(pass1_calls, pass2_calls),
-        "pass1_actual_calls": pass1_actual_calls,
-        "pass2_actual_calls": pass2_actual_calls,
-        "pass1_actual_call_sha256": sha256_json(pass1_actual_calls),
-        "pass2_actual_call_sha256": sha256_json(pass2_actual_calls),
-        "actual_call_first_mismatch": first_mismatch(pass1_actual_calls, pass2_actual_calls),
-        "pass1_compaction_positions": pass1_compaction_positions,
-        "pass2_compaction_positions": pass2_compaction_positions,
-        "pass1_compaction_sha256": sha256_json(pass1_compaction_positions),
-        "pass2_compaction_sha256": sha256_json(pass2_compaction_positions),
-        "compaction_first_mismatch": first_mismatch(pass1_compaction_positions, pass2_compaction_positions),
-        "complete_compaction_trace_match": compaction_lists_match,
-    }
-    pass1_synchronized_seconds = next(
-        (record.duration_seconds for record in timer.records if record.phase == "rkv_complete_pass1"), 0.0
-    )
-    pass2_synchronized_seconds = next(
-        (record.duration_seconds for record in timer.records if record.phase == "rkv_complete_pass2"), 0.0
-    )
-    real_pair_synchronized_seconds = [
-        record.duration_seconds for record in timer.records
-        if record.phase.startswith("real_pair:") and record.phase.count(":") == 3
-    ]
-    no_op_synchronized_seconds = [
-        record.duration_seconds for record in timer.records
-        if record.phase.startswith("no_op_pair:") and record.phase.count(":") == 3
-    ]
+        selected_event_count_exact = pair_completion.selected_compaction_events == B2A_SELECTED_EVENTS
+        real_pair_count_exact = (
+            pair_completion.attempted_real_pair_count == B2A_REAL_PAIR_EVALUATIONS_TOTAL
+            and pair_completion.completed_real_pair_count == B2A_REAL_PAIR_EVALUATIONS_TOTAL
+        )
+        no_op_count_exact = (
+            pair_completion.attempted_no_op_pair_count == B2A_NOOP_PAIR_EVALUATIONS_TOTAL
+            and pair_completion.completed_no_op_pair_count == B2A_NOOP_PAIR_EVALUATIONS_TOTAL
+        )
+        all_required_pair_evaluations_completed = (
+            real_pair_count_exact and no_op_count_exact and pair_completion.failed_real_pair_count == 0
+        )
 
-    selected_event_count_exact = pair_completion.selected_compaction_events == B2A_SELECTED_EVENTS
-    real_pair_count_exact = (
-        pair_completion.attempted_real_pair_count == B2A_REAL_PAIR_EVALUATIONS_TOTAL
-        and pair_completion.completed_real_pair_count == B2A_REAL_PAIR_EVALUATIONS_TOTAL
-    )
-    no_op_count_exact = (
-        pair_completion.attempted_no_op_pair_count == B2A_NOOP_PAIR_EVALUATIONS_TOTAL
-        and pair_completion.completed_no_op_pair_count == B2A_NOOP_PAIR_EVALUATIONS_TOTAL
-    )
-    all_required_pair_evaluations_completed = (
-        real_pair_count_exact and no_op_count_exact and pair_completion.failed_real_pair_count == 0
-    )
+        memory_meter.observe("rkv_complete_worker", lambda: None)
+        timer.finish_span("rkv_complete_worker", complete_worker_started_at)
+        peak_allocated = memory_meter.maximum_peak_allocated
+        peak_reserved = memory_meter.maximum_peak_reserved
+        first_memory = memory_meter.records[0]
+        memory = MemoryEvidence(
+            allocated_before_reset_bytes=first_memory.allocated_before,
+            reserved_before_reset_bytes=first_memory.reserved_before,
+            peak_allocated_bytes=peak_allocated, peak_reserved_bytes=peak_reserved,
+            reset_point="explicit_phase_owned_resets",
+        )
+        runtime_generation = build_runtime_generation_record(
+            batch_size=batch_size, max_new_tokens=config.generation.max_new_tokens, eos_token_id=tokenizer.eos_token_id,
+            attention_backend=config.generation.attention_backend, framework_seed=config.generation.framework_seed,
+            prompt_token_count=len(prompt_token_ids),
+        )
 
-    memory_meter.observe("rkv_complete_worker", lambda: None)
-    timer.finish_span("rkv_complete_worker", complete_worker_started_at)
-    peak_allocated = memory_meter.maximum_peak_allocated
-    peak_reserved = memory_meter.maximum_peak_reserved
-    first_memory = memory_meter.records[0]
-    memory = MemoryEvidence(
-        allocated_before_reset_bytes=first_memory.allocated_before,
-        reserved_before_reset_bytes=first_memory.reserved_before,
-        peak_allocated_bytes=peak_allocated, peak_reserved_bytes=peak_reserved,
-        reset_point="explicit_phase_owned_resets",
-    )
-    runtime_generation = build_runtime_generation_record(
-        batch_size=batch_size, max_new_tokens=config.generation.max_new_tokens, eos_token_id=tokenizer.eos_token_id,
-        attention_backend=config.generation.attention_backend, framework_seed=config.generation.framework_seed,
-        prompt_token_count=len(prompt_token_ids),
-    )
+        return RKVWorkerResult(
+            role="rkv",
+            model_revision=config.model.revision,
+            tokenizer_revision=config.model.tokenizer_revision,
+            dataset_repo=manifest.dataset_repo,
+            dataset_revision=manifest.dataset_revision,
+            manifest_hash=manifest.manifest_hash(),
+            prompt_token_ids_sha256=manifest.prompt_token_ids_sha256,
+            prompt_token_count=len(prompt_token_ids),
+            rkv_upstream_revision=config.rkv.upstream_revision,
+            runtime_rkv_config_hash=runtime_check.runtime_hash,
+            frozen_rkv_config_hash=runtime_check.frozen_hash,
+            rkv_config_hash_match=runtime_check.passed,
+            example_valid=example_result.valid,
+            natural_answer_status=(
+                answer_verifier.last_result.status if answer_verifier.last_result is not None else "unverifiable"
+            ),
+            token_identical_replay=trajectory.token_identical_replay,
+            prefill_decode_boundary_parity=trajectory.prefill_decode_boundary_parity,
+            compaction_position_equality=trajectory.compaction_position_equality,
+            capture_gather_parity=trajectory.capture_gather_parity,
+            absolute_position_parity=trajectory.absolute_position_parity,
+            no_op_numerical_parity=no_op_parity,
+            pass1_call_boundary={
+                "prefill_call_count": instrumented.pass1_trace.prefill_call_count,
+                "prefill_token_count": instrumented.pass1_trace.prefill_token_count,
+                "decode_call_count": instrumented.pass1_trace.decode_call_count,
+                "ordered_trace_hash": instrumented.pass1_trace.ordered_call_kinds_and_tokens_hash(),
+            },
+            pass2_call_boundary={
+                "prefill_call_count": instrumented.pass2_trace.prefill_call_count,
+                "prefill_token_count": instrumented.pass2_trace.prefill_token_count,
+                "decode_call_count": instrumented.pass2_trace.decode_call_count,
+                "ordered_trace_hash": instrumented.pass2_trace.ordered_call_kinds_and_tokens_hash(),
+            },
+            observed_total_compaction_events=pair_completion.observed_total_compaction_events,
+            eligible_compaction_events=pair_completion.eligible_compaction_events,
+            selected_compaction_events=pair_completion.selected_compaction_events,
+            events_with_at_least_one_completed_real_pair=pair_completion.events_with_at_least_one_completed_real_pair,
+            events_with_all_four_real_pairs_completed=pair_completion.events_with_all_four_real_pairs_completed,
+            attempted_real_pair_count=pair_completion.attempted_real_pair_count,
+            completed_real_pair_count=pair_completion.completed_real_pair_count,
+            failed_real_pair_count=pair_completion.failed_real_pair_count,
+            attempted_no_op_pair_count=pair_completion.attempted_no_op_pair_count,
+            completed_no_op_pair_count=pair_completion.completed_no_op_pair_count,
+            pair_failure_details=list(pair_completion.pair_failure_details),
+            semantic_swap_checks_required=semantic_swap_checks.checks_required,
+            semantic_swap_checks_attempted=semantic_swap_checks.checks_attempted,
+            semantic_swap_checks_passed=semantic_swap_checks.checks_passed,
+            semantic_swap_checks_failed=semantic_swap_checks.checks_failed,
+            unique_completed_real_pair_count=pair_identity.unique_completed_real_pair_count,
+            events_with_exactly_four_unique_real_pairs=pair_identity.events_with_exactly_four_unique_real_pairs,
+            has_duplicate_real_pair_identity=pair_identity.has_duplicate_real_pair_identity,
+            has_duplicate_no_op_pair_identity=pair_identity.has_duplicate_no_op_pair_identity,
+            selected_event_count_exact=selected_event_count_exact,
+            real_pair_count_exact=real_pair_count_exact,
+            no_op_count_exact=no_op_count_exact,
+            all_required_pair_evaluations_completed=all_required_pair_evaluations_completed,
+            observed_retention_ratio=observed_retention_ratio,
+            wall_seconds_pass1=pass1_synchronized_seconds,
+            wall_seconds_pass2=pass2_synchronized_seconds,
+            wall_seconds_targeted_capture=instrumented.targeted_capture_wall_seconds,
+            real_pair_wall_seconds=real_pair_synchronized_seconds,
+            no_op_pair_wall_seconds=no_op_synchronized_seconds,
+            determinism_policy=determinism_policy.__dict__,
+            runtime_generation=runtime_generation.__dict__,
+            runtime_generation_config_hash=runtime_generation.canonical_hash(),
+            parameter_placement=parameter_placement.__dict__,
+            runtime_identity=runtime_identity.__dict__,
+            memory={
+                **memory.__dict__,
+                "pre_branch_guards": [evidence.__dict__ for evidence in example_result.pre_branch_memory_evidence],
+            },
+            minimized_target_evidence=[ev.__dict__ for ev in example_result.minimized_target_evidence],
+            peak_cuda_allocated_bytes=peak_allocated,
+            peak_cuda_reserved_bytes=peak_reserved,
+            every_parameter_on_cuda=parameter_placement.every_parameter_on_cuda,
+            batch_size=batch_size,
+            actual_batch_size_verified=actual_calls.batch_size_verified,
+            actual_call_evidence=actual_call_export,
+            snapshot_evidence={
+                "verified": model_snapshot is not None and tokenizer_snapshot is not None,
+                "model": None if model_snapshot is None else model_snapshot.__dict__,
+                "tokenizer": None if tokenizer_snapshot is None else tokenizer_snapshot.__dict__,
+            },
+            device_evidence=device_evidence,
+            selected_event_evidence=list(example_result.selected_event_evidence),
+            attempted_pair_identities=attempted_identities,
+            completed_pair_identities=completed_identities,
+            failed_pair_identities=failed_identities,
+            no_op_identity=next(
+                (identity for identity in attempted_identities if identity["pair_kind"] == "no_op"), None
+            ),
+            semantic_mutation_reports=list(example_result.semantic_mutation_reports),
+            no_op_evidence=no_op_evidence,
+            replay_evidence=replay_evidence,
+            dataset_row_identity={
+                "dataset_repo": manifest.dataset_repo,
+                "dataset_revision": manifest.dataset_revision,
+                "example_index": manifest.example_index,
+                "unique_id": manifest.unique_id,
+                "raw_content_hash": getattr(manifest, "raw_content_hash", None),
+                "manifest_canonical_hash": manifest.manifest_hash(),
+                "rendered_user_message_sha256": getattr(manifest, "rendered_user_message_sha256", None),
+                "chat_template_source_sha256": getattr(manifest, "chat_template_source_sha256", None),
+                "prompt_token_ids_sha256": manifest.prompt_token_ids_sha256,
+                "prompt_token_count": len(prompt_token_ids),
+            },
+            timing_evidence=timer.export(),
+            memory_phase_evidence=memory_meter.export(),
+            software_versions={"torch": torch.__version__},
+        ).model_dump(mode="json")
+    except Exception as exc:
+        from kvcot.discovery.worker_partial_evidence import WorkerBodyFailure, capture_partial_evidence
 
-    return RKVWorkerResult(
-        role="rkv",
-        model_revision=config.model.revision,
-        tokenizer_revision=config.model.tokenizer_revision,
-        dataset_repo=manifest.dataset_repo,
-        dataset_revision=manifest.dataset_revision,
-        manifest_hash=manifest.manifest_hash(),
-        prompt_token_ids_sha256=manifest.prompt_token_ids_sha256,
-        prompt_token_count=len(prompt_token_ids),
-        rkv_upstream_revision=config.rkv.upstream_revision,
-        runtime_rkv_config_hash=runtime_check.runtime_hash,
-        frozen_rkv_config_hash=runtime_check.frozen_hash,
-        rkv_config_hash_match=runtime_check.passed,
-        example_valid=example_result.valid,
-        natural_answer_status=(
-            answer_verifier.last_result.status if answer_verifier.last_result is not None else "unverifiable"
-        ),
-        token_identical_replay=trajectory.token_identical_replay,
-        prefill_decode_boundary_parity=trajectory.prefill_decode_boundary_parity,
-        compaction_position_equality=trajectory.compaction_position_equality,
-        capture_gather_parity=trajectory.capture_gather_parity,
-        absolute_position_parity=trajectory.absolute_position_parity,
-        no_op_numerical_parity=no_op_parity,
-        pass1_call_boundary={
-            "prefill_call_count": instrumented.pass1_trace.prefill_call_count,
-            "prefill_token_count": instrumented.pass1_trace.prefill_token_count,
-            "decode_call_count": instrumented.pass1_trace.decode_call_count,
-            "ordered_trace_hash": instrumented.pass1_trace.ordered_call_kinds_and_tokens_hash(),
-        },
-        pass2_call_boundary={
-            "prefill_call_count": instrumented.pass2_trace.prefill_call_count,
-            "prefill_token_count": instrumented.pass2_trace.prefill_token_count,
-            "decode_call_count": instrumented.pass2_trace.decode_call_count,
-            "ordered_trace_hash": instrumented.pass2_trace.ordered_call_kinds_and_tokens_hash(),
-        },
-        observed_total_compaction_events=pair_completion.observed_total_compaction_events,
-        eligible_compaction_events=pair_completion.eligible_compaction_events,
-        selected_compaction_events=pair_completion.selected_compaction_events,
-        events_with_at_least_one_completed_real_pair=pair_completion.events_with_at_least_one_completed_real_pair,
-        events_with_all_four_real_pairs_completed=pair_completion.events_with_all_four_real_pairs_completed,
-        attempted_real_pair_count=pair_completion.attempted_real_pair_count,
-        completed_real_pair_count=pair_completion.completed_real_pair_count,
-        failed_real_pair_count=pair_completion.failed_real_pair_count,
-        attempted_no_op_pair_count=pair_completion.attempted_no_op_pair_count,
-        completed_no_op_pair_count=pair_completion.completed_no_op_pair_count,
-        pair_failure_details=list(pair_completion.pair_failure_details),
-        semantic_swap_checks_required=semantic_swap_checks.checks_required,
-        semantic_swap_checks_attempted=semantic_swap_checks.checks_attempted,
-        semantic_swap_checks_passed=semantic_swap_checks.checks_passed,
-        semantic_swap_checks_failed=semantic_swap_checks.checks_failed,
-        unique_completed_real_pair_count=pair_identity.unique_completed_real_pair_count,
-        events_with_exactly_four_unique_real_pairs=pair_identity.events_with_exactly_four_unique_real_pairs,
-        has_duplicate_real_pair_identity=pair_identity.has_duplicate_real_pair_identity,
-        has_duplicate_no_op_pair_identity=pair_identity.has_duplicate_no_op_pair_identity,
-        selected_event_count_exact=selected_event_count_exact,
-        real_pair_count_exact=real_pair_count_exact,
-        no_op_count_exact=no_op_count_exact,
-        all_required_pair_evaluations_completed=all_required_pair_evaluations_completed,
-        observed_retention_ratio=observed_retention_ratio,
-        wall_seconds_pass1=pass1_synchronized_seconds,
-        wall_seconds_pass2=pass2_synchronized_seconds,
-        wall_seconds_targeted_capture=instrumented.targeted_capture_wall_seconds,
-        real_pair_wall_seconds=real_pair_synchronized_seconds,
-        no_op_pair_wall_seconds=no_op_synchronized_seconds,
-        determinism_policy=determinism_policy.__dict__,
-        runtime_generation=runtime_generation.__dict__,
-        runtime_generation_config_hash=runtime_generation.canonical_hash(),
-        parameter_placement=parameter_placement.__dict__,
-        runtime_identity=runtime_identity.__dict__,
-        memory={
-            **memory.__dict__,
-            "pre_branch_guards": [evidence.__dict__ for evidence in example_result.pre_branch_memory_evidence],
-        },
-        minimized_target_evidence=[ev.__dict__ for ev in example_result.minimized_target_evidence],
-        peak_cuda_allocated_bytes=peak_allocated,
-        peak_cuda_reserved_bytes=peak_reserved,
-        every_parameter_on_cuda=parameter_placement.every_parameter_on_cuda,
-        batch_size=batch_size,
-        actual_batch_size_verified=actual_calls.batch_size_verified,
-        actual_call_evidence=actual_call_export,
-        snapshot_evidence={
-            "verified": model_snapshot is not None and tokenizer_snapshot is not None,
-            "model": None if model_snapshot is None else model_snapshot.__dict__,
-            "tokenizer": None if tokenizer_snapshot is None else tokenizer_snapshot.__dict__,
-        },
-        device_evidence=device_evidence,
-        selected_event_evidence=list(example_result.selected_event_evidence),
-        attempted_pair_identities=attempted_identities,
-        completed_pair_identities=completed_identities,
-        failed_pair_identities=failed_identities,
-        no_op_identity=next(
-            (identity for identity in attempted_identities if identity["pair_kind"] == "no_op"), None
-        ),
-        semantic_mutation_reports=list(example_result.semantic_mutation_reports),
-        no_op_evidence=no_op_evidence,
-        replay_evidence=replay_evidence,
-        dataset_row_identity={
-            "dataset_repo": manifest.dataset_repo,
-            "dataset_revision": manifest.dataset_revision,
-            "example_index": manifest.example_index,
-            "unique_id": manifest.unique_id,
-            "raw_content_hash": getattr(manifest, "raw_content_hash", None),
-            "manifest_canonical_hash": manifest.manifest_hash(),
-            "rendered_user_message_sha256": getattr(manifest, "rendered_user_message_sha256", None),
-            "chat_template_source_sha256": getattr(manifest, "chat_template_source_sha256", None),
-            "prompt_token_ids_sha256": manifest.prompt_token_ids_sha256,
-            "prompt_token_count": len(prompt_token_ids),
-        },
-        timing_evidence=timer.export(),
-        memory_phase_evidence=memory_meter.export(),
-        software_versions={"torch": torch.__version__},
-    ).model_dump(mode="json")
+        evidence = capture_partial_evidence(
+            role="rkv", failing_stage=_last_completed_stage["stage"] or "unknown", exc=exc,
+            scope=locals(),
+        )
+        raise WorkerBodyFailure(evidence, exc) from exc

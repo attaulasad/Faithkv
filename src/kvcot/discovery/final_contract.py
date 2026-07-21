@@ -67,7 +67,16 @@ RKV_REQUIRED_TIMING_PHASES: tuple[str, ...] = (
     "rkv_complete_pass1",
     "rkv_pass2_prefill",
     "rkv_pass2_decode",
-    "capture_and_parity",
+    # Independent-audit Gate H2 repair: this phase used to be named
+    # `capture_and_parity` despite only ever timing the POST-Pass-2 call-
+    # boundary trace comparison (`compare_call_boundary_traces`), never the
+    # actual target capture/gather/parity work -- which genuinely happens
+    # earlier, inside `rkv_pass2_prefill`/`rkv_pass2_decode`/
+    # `snapshot_creation` (all three already required above, all three
+    # already real, synchronized, non-overlapping timings). Renamed to
+    # match what it actually measures; nothing about the underlying
+    # measurement changed, only its name.
+    "call_trace_comparison",
     "compact_target_conversion",
     "snapshot_creation",
     "rkv_complete_pass2",

@@ -1,5 +1,14 @@
 # B1 Final Repair Ledger
 
+> **SUPERSEDED.** An independent audit subsequently found the "Complete"
+> status of every row below to be incomplete against the actual executable
+> code (loose `verified` booleans, a misleadingly-named timing phase, bare
+> mismatch indices, and total loss of partial worker evidence on failure,
+> among other confirmed gaps). The historical rows below are preserved
+> unedited. **See §"Independent-audit repair pass" at the end of this file,
+> and `docs/B1_INDEPENDENT_AUDIT_REPAIR.md`, for the current, authoritative
+> status.**
+
 Starting commit: `3c853cff34e52d792cd0e5a96d1a5369f17f8047`.
 
 | ID | Defect / risk / root cause | Files and implementation | Focused tests | Full-suite status | Open questions | Status |
@@ -22,3 +31,27 @@ Starting commit: `3c853cff34e52d792cd0e5a96d1a5369f17f8047`.
 Final validation: compilation passed; 1,012 tests collected; 998 passed and
 14 GPU-marked tests were deselected. The final verdict is **READY FOR
 INDEPENDENT AUDIT — B2A/GPU REMAIN BLOCKED**.
+
+---
+
+## Independent-audit repair pass (forward-only, on top of `7ef13ae566e7c3e699e5143405baf76a81078edf`)
+
+Full detail, evidence citations, and remaining-gap list:
+`docs/B1_INDEPENDENT_AUDIT_REPAIR.md`. Summary table below; historical rows
+above are NOT edited or re-marked.
+
+| ID | Confirmed defect | Risk | Root cause | Files changed | Focused tests | Full-suite result | Open questions | Status |
+|---|---|---|---|---|---|---|---|---|
+| H1 | Worker failure envelope discarded ALL partial evidence (`partial_measurements=None, determinism_policy=None` unconditional) | High | No structured partial-evidence capture existed; worker bodies had no `try/except` around ~280-line bodies | `worker_partial_evidence.py` (new), `b2a_workers.py`, `orchestrator.py`, `attrition.py`, `worker_envelope.py`, `b2a_worker_entry.py` | `test_worker_partial_evidence.py`, `test_orchestrator_partial_failure.py`, +tests in `test_b2a_worker_entry.py`/`test_b2a_workers.py` | 1039 passed, 14 deselected | None for the repaired paths; `manifest_prepare.py`'s 3 bare `except Exception:` not investigated | Complete |
+| H2 | `capture_and_parity` phase measured a post-hoc trace comparison, not real capture/parity work; startup/load projection summed only 2 of 5 real one-time phases; no process-launch overhead diagnostic | Medium | Misleading phase name; incomplete phase-sum list; no coordinator-side process timing | `b2a_workers.py`, `final_contract.py`, `b2a_execute.py` | 3 new tests in `test_b2a_execute_coordinator.py`, 1 in `test_b2a_workers.py` | 1039 passed, 14 deselected | H2.3's generic call-nesting spy-test framework not built | Complete for the confirmed defects; H2.3 framework open |
+| H3 | Mismatch evidence exported only a bare index, no expected/observed values; Pass-2-invalid `ExampleResult` discarded the actual replayed tokens | High | No canonical mismatch schema; `orchestrator.py` failure-path constructor omitted an already-computed field | `mismatch.py` (new), `b2a_workers.py`, `orchestrator.py` | `test_mismatch.py` (7), 1 new orchestrator test | 1039 passed, 14 deselected | H3.4-H3.6's full ordered-call-entry-at-mismatch and dedicated schema fields on `RKVWorkerResult` itself not added | Partial |
+| H4 | Coordinator derived `single_rtx3090_verified` from a bare worker-reported `verified=True`, no raw-field recomputation, no cross-worker agreement check | High (GPU-time; unreachable here) | Gate trusted a self-reported flag instead of recomputing | `strict_device.py`, `b2a_execute.py` | 10 new tests in `test_strict_device.py` | 1039 passed, 14 deselected | No CLI preflight artifact; no typed snapshot-evidence re-validation; H4.5/H4.7 not (re-)verified | Partial |
+| H5 | Pre-branch memory guard omits shape-derived branch-horizon K/V growth, query-cache growth, per-token temporary storage beyond a fixed logits/log-softmax term | Medium (GPU-time; unreachable here) | Not repaired this pass | none | none | — | Full componentized estimate (H5.2) not built | Open |
+| H6 | Final artifact gates (`attempt_files_verified`, `worker_envelopes_verified`) are existence-only checks (`issubset(existing)`, `.is_file()`) | High (GPU-time; unreachable here) | Not repaired this pass | none | none | — | Canonical content/hash-verifying attempt verifier (H6.2-H6.7) not built | Open |
+| H7 | No immutable start/end artifact split; no dedicated post-CUDA device preflight artifact distinct from CPU-safe provenance | Medium | Not repaired this pass | none | none | — | H7.1-H7.5 largely open; `collect_execution_provenance`/`build_attempt_references` already cover a real subset | Open |
+| H8 | Hostile audit re-run; CI workflow verified (not modified, already correct) | — | — | (audit only) | — | 1039 passed, 14 deselected; `python -m compileall`, `--collect-only`, both CLI dry-runs, `python -m kvcot --help`, `git diff --check` all exit 0 | H8.2's unified contract-consistency test not built | Partial |
+
+**Independent-audit repair pass verdict: B1 FINAL CPU CLOSURE VERDICT:
+INCOMPLETE — B2A/GPU REMAIN BLOCKED.** No B2A result exists. No B2B result
+exists. No real CUDA timing exists. No RTX 3090 memory measurement exists.
+No FaithKV method exists.

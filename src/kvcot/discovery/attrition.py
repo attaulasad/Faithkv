@@ -43,6 +43,26 @@ STAGE_SCHEMA_VALIDATION_FAILURE = "schema_validation_failure"
 # construction itself raised) and from `STAGE_CAPTURE_GATHER_PARITY_FAILURE`
 # (that one is Pass-2-level, evaluated before any pair is ever attempted).
 STAGE_SEMANTIC_SWAP_PARITY_FAILURE = "semantic_swap_parity_failure"
+# Independent-audit Gate H1 repair: `STAGE_PASS2_TOKEN_MISMATCH` and its
+# siblings above all cover `run_pass2_capture` RETURNING NORMALLY with
+# `.valid=False` -- a detected trajectory mismatch. Before this repair, an
+# exception RAISED during `run_pass2_capture` itself (e.g. a real CUDA OOM
+# mid-capture) was not caught anywhere in `kvcot.discovery.orchestrator
+# .run_example` and propagated out uncaught, losing Pass 1's already-valid
+# `trace` and every attrition/timing record accumulated so far. This is a
+# structurally different failure (a crash, not a detected mismatch) and
+# gets its own stage rather than being folded into
+# `STAGE_NATURAL_RUN_INVALID`/`STAGE_PASS2_TOKEN_MISMATCH`.
+STAGE_PASS2_EXECUTION_EXCEPTION = "pass2_execution_exception"
+# Same reasoning, for the per-pair evaluation loop: every existing stage
+# below this one covers a pair-building call that RETURNED an explicit
+# failure (a `PairBuildResult` with `.record is None` or `.valid_flag is
+# False`) -- never an exception escaping `build_swap_pair_record`/
+# `pre_branch_guard` itself (e.g. a real CUDA OOM while evaluating one of
+# the 12 real pairs). `run_example` now catches that and returns
+# immediately with `ExampleResult.aborted=True`, preserving every pair
+# already completed in the loop rather than losing the whole example.
+STAGE_UNEXPECTED_PAIR_EXCEPTION = "unexpected_pair_exception"
 
 STAGE_ORDER: tuple[str, ...] = (
     STAGE_NATURAL_RUN_INVALID,
@@ -60,6 +80,8 @@ STAGE_ORDER: tuple[str, ...] = (
     STAGE_BRANCH_EVALUATION_FAILURE,
     STAGE_SCHEMA_VALIDATION_FAILURE,
     STAGE_SEMANTIC_SWAP_PARITY_FAILURE,
+    STAGE_PASS2_EXECUTION_EXCEPTION,
+    STAGE_UNEXPECTED_PAIR_EXCEPTION,
 )
 
 

@@ -240,14 +240,32 @@ def run_b2a_calibration(
                 raise B2AExecutionRefused(f"required timing phase {phase!r} is not a positive completed duration")
             return float(value)
 
-        fullkv_startup_and_load = (
-            required_phase_seconds(fullkv.timing_evidence, "fullkv_worker_startup")
-            + required_phase_seconds(fullkv.timing_evidence, "model_load")
+        # Independent-audit Gate H2 repair: this projection used to sum only
+        # `{role}_worker_startup` + `model_load`, silently omitting snapshot
+        # resolution, tokenizer loading, and post-load runtime/no-offload
+        # validation -- all genuinely one-time cost incurred before
+        # measured inference, all already real, synchronized, non-
+        # overlapping `timer.measure()` calls in `run_fullkv_worker`/
+        # `run_rkv_worker` (`kvcot.discovery.b2a_workers`): `{role}
+        # _worker_startup` -> `snapshot_tokenizer_resolution` ->
+        # `tokenizer_load` -> `model_load` -> `post_load_validation`, each a
+        # separate top-level `timer.measure()` call in strict sequence, so
+        # summing all five is exact, never double-counted. Every phase
+        # summed is listed here explicitly, per the audit's "list every
+        # included phase; prove they do not overlap; prove none is
+        # omitted" requirement.
+        _ONE_TIME_SETUP_PHASES = (
+            "{role}_worker_startup", "snapshot_tokenizer_resolution", "tokenizer_load", "model_load",
+            "post_load_validation",
         )
-        rkv_startup_and_load = (
-            required_phase_seconds(rkv.timing_evidence, "rkv_worker_startup")
-            + required_phase_seconds(rkv.timing_evidence, "model_load")
-        )
+
+        def _startup_and_load_seconds(records, role: str) -> float:
+            return sum(
+                required_phase_seconds(records, phase.format(role=role)) for phase in _ONE_TIME_SETUP_PHASES
+            )
+
+        fullkv_startup_and_load = _startup_and_load_seconds(fullkv.timing_evidence, "fullkv")
+        rkv_startup_and_load = _startup_and_load_seconds(rkv.timing_evidence, "rkv")
         runtime_projection = build_runtime_projection(
             fullkv_startup_and_model_load_seconds=fullkv_startup_and_load,
             rkv_startup_and_model_load_seconds=rkv_startup_and_load,
@@ -259,6 +277,32 @@ def run_b2a_calibration(
         per_example_total = runtime_projection.per_example_inference_seconds
         per_real_pair_seconds = runtime_projection.conservative_real_pair_seconds
         projected_gpu_hours = runtime_projection.projected_total_seconds / 3600.0
+
+        # Independent-audit Gate H2.5: the Python worker subprocess's own
+        # launch/import overhead occurs OUTSIDE its internal
+        # `SynchronizedTimer` (that timer's first measurement only starts
+        # once the worker process is already running and has imported
+        # everything it needs) -- measured separately here, at the
+        # coordinator, and exported as its own diagnostic. Never folded
+        # into `runtime_projection` (which stays exactly the frozen §12
+        # formula) -- this is purely an honesty-preserving export so
+        # process-launch overhead is visible rather than silently absent.
+        worker_internal_startup_and_load = {"fullkv": fullkv_startup_and_load, "rkv": rkv_startup_and_load}
+        worker_internal_inference = {"fullkv": fullkv.wall_seconds, "rkv": rkv.wall_seconds_pass1 + rkv.wall_seconds_pass2}
+        observed_process_seconds = coordination.coordinator_observed_process_seconds or {}
+        process_overhead_diagnostic = {
+            role: {
+                "coordinator_observed_process_seconds": observed_process_seconds.get(role),
+                "worker_internal_startup_and_load_seconds": worker_internal_startup_and_load[role],
+                "worker_internal_inference_seconds": worker_internal_inference[role],
+                "unattributed_process_overhead_seconds": (
+                    None if observed_process_seconds.get(role) is None
+                    else observed_process_seconds[role]
+                    - worker_internal_startup_and_load[role] - worker_internal_inference[role]
+                ),
+            }
+            for role in ("fullkv", "rkv")
+        }
 
         measurement = B2AOneExampleMeasurement(
             fullkv_natural_generation_wall_seconds=fullkv.wall_seconds,
@@ -552,11 +596,18 @@ def run_b2a_calibration(
             and bool(fullkv.actual_call_evidence) and bool(rkv.actual_call_evidence)
             and all(call.get("batch_size") == 1 for call in fullkv.actual_call_evidence + rkv.actual_call_evidence)
         )
+        from kvcot.discovery.strict_device import verify_device_gate_from_raw_evidence
+
         final_gate_result = evaluate_final_gates({
             "git_clean_verified": git_clean_verified,
             "rkv_submodule_match": rkv_submodule_match,
-            "single_rtx3090_verified": (
-                fullkv.device_evidence.get("verified") is True and rkv.device_evidence.get("verified") is True
+            # Independent-audit Gate H4.1/H4.2 repair: recomputed from raw
+            # device-evidence fields on BOTH workers (visible GPU count,
+            # device index, GPU name, VRAM range, driver/CUDA/cuDNN
+            # presence) and their mutual agreement -- never a bare
+            # worker-reported `verified=True` boolean.
+            "single_rtx3090_verified": verify_device_gate_from_raw_evidence(
+                fullkv.device_evidence, rkv.device_evidence
             ),
             "local_model_snapshot_verified": snapshot_verified(fullkv, "model") and snapshot_verified(rkv, "model"),
             "local_tokenizer_snapshot_verified": (
@@ -627,6 +678,8 @@ def run_b2a_calibration(
                 "return_codes": coordination.return_codes,
                 "timeout_state": coordination.timeout_state,
                 "partial_success": coordination.partial_success,
+                "coordinator_observed_process_seconds": coordination.coordinator_observed_process_seconds,
+                "process_overhead_diagnostic": process_overhead_diagnostic,
             },
             "measurement": measurement.model_dump(mode="json"),
             "runtime_projection": runtime_projection.__dict__,

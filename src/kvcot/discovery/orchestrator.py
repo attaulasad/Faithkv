@@ -29,11 +29,13 @@ from kvcot.discovery.attrition import (
     STAGE_MISSING_TARGET_SNAPSHOT,
     STAGE_NATURAL_RUN_INVALID,
     STAGE_OBSERVED_SURVIVOR_MISMATCH,
+    STAGE_PASS2_EXECUTION_EXCEPTION,
     STAGE_PASS2_TOKEN_MISMATCH,
     STAGE_PREFILL_CONTRACT_VIOLATION,
     STAGE_SCHEMA_VALIDATION_FAILURE,
     STAGE_SEMANTIC_SWAP_PARITY_FAILURE,
     STAGE_UNCERTAINTY_MISSING,
+    STAGE_UNEXPECTED_PAIR_EXCEPTION,
     AttritionCounters,
     PairFailureDetail,
 )
@@ -165,6 +167,18 @@ class ExampleResult:
     selected_event_evidence: tuple[dict[str, Any], ...] = ()
     pass2_replayed_token_ids: tuple[int, ...] = ()
     pass2_compaction_event_positions: tuple[int, ...] = ()
+    # Independent-audit Gate H1: `True` only when the per-pair evaluation
+    # loop below was cut short by an unexpected exception (e.g. a real CUDA
+    # OOM mid-pair) rather than completing every planned pair for every
+    # selected event. Every list/count field above is still whatever was
+    # genuinely completed before the abort -- never discarded, never
+    # padded out to look complete. A caller (`kvcot.discovery.b2a_workers`)
+    # must never treat an aborted `ExampleResult` as if it were a normal,
+    # merely-attrition-affected completion.
+    aborted: bool = False
+    abort_failure_type: str | None = None
+    abort_failure_message: str | None = None
+    abort_is_oom: bool = False
 
 
 def run_example(
@@ -217,9 +231,24 @@ def run_example(
                 eos_token_id, answer_fn,
             ),
         )
-    except Exception:
+    except Exception as exc:
+        # Independent-audit Gate H1 hostile-audit follow-up: `run_natural_pass1`
+        # only ever raises (never returns an "invalid" sentinel -- see its
+        # own contract) or returns a valid trace, so ANY exception here is a
+        # genuine, unexpected failure (e.g. a real CUDA OOM during natural
+        # generation), not a normal "answer didn't validate" case -- yet the
+        # exception's type/message used to be discarded entirely, mapped to
+        # the bare `STAGE_NATURAL_RUN_INVALID` funnel stage with no other
+        # evidence. The stage NAME is unchanged (existing funnel consumers
+        # are unaffected), but `aborted`/`abort_failure_type`/
+        # `abort_failure_message`/`abort_is_oom` now preserve what actually
+        # happened, exactly like the Pass-2 and per-pair equivalents below.
         example_attrition.record_dropped(STAGE_NATURAL_RUN_INVALID)
-        return ExampleResult(example_id, False, STAGE_NATURAL_RUN_INVALID, None, ())
+        return ExampleResult(
+            example_id, False, STAGE_NATURAL_RUN_INVALID, None, (),
+            aborted=True, abort_failure_type=type(exc).__name__, abort_failure_message=str(exc),
+            abort_is_oom=("out of memory" in str(exc).lower() or type(exc).__name__ == "OutOfMemoryError"),
+        )
 
     if trace.natural_answer_status != "correct":
         example_attrition.record_dropped(STAGE_ANSWER_INCORRECT_OR_UNVERIFIABLE)
@@ -239,17 +268,42 @@ def run_example(
         example_attrition.record_dropped(stage)
         return ExampleResult(example_id, False, stage, trace, ())
 
-    pass2_result = operation_runner(
-        "rkv_complete_pass2",
-        lambda: run_pass2_capture(
-            plan, trace.full_token_ids, pass2_initial_state_factory(), prefill_fn, decode_one_fn, snapshot_fn
-        ),
-    )
+    try:
+        pass2_result = operation_runner(
+            "rkv_complete_pass2",
+            lambda: run_pass2_capture(
+                plan, trace.full_token_ids, pass2_initial_state_factory(), prefill_fn, decode_one_fn, snapshot_fn
+            ),
+        )
+    except Exception as exc:
+        # Independent-audit Gate H1: distinct from the `pass2_result.valid
+        # is False` branch below (a normal return reporting a DETECTED
+        # trajectory mismatch) -- this is Pass 2 execution itself raising
+        # (e.g. a real CUDA OOM mid-capture). Pass 1's already-valid
+        # `trace` and both attrition counters' state so far are preserved
+        # in the returned `ExampleResult` rather than lost to a bare
+        # propagating exception.
+        example_attrition.record_dropped(STAGE_PASS2_EXECUTION_EXCEPTION)
+        return ExampleResult(
+            example_id, False, STAGE_PASS2_EXECUTION_EXCEPTION, trace, (),
+            aborted=True, abort_failure_type=type(exc).__name__, abort_failure_message=str(exc),
+            abort_is_oom=("out of memory" in str(exc).lower() or type(exc).__name__ == "OutOfMemoryError"),
+        )
     if not pass2_result.valid:
         stage = _PASS2_REASON_TO_STAGE[pass2_result.invalid_reason]
         example_attrition.record_dropped(stage)
+        # Independent-audit Gate H3.7 repair: `pass2_result.replayed_token_ids`
+        # is real diagnostic evidence -- Pass 2 replays every fed token
+        # before detecting a mismatch, so this is exactly the sequence a
+        # human (or `kvcot.discovery.mismatch.build_mismatch_record`) needs
+        # to see WHAT was actually fed, compared against `trace
+        # .full_token_ids`, to diagnose a `pass2_token_mismatch` without
+        # re-running the model. Previously discarded here (defaulting to
+        # the empty-tuple `ExampleResult.pass2_replayed_token_ids` field),
+        # leaving only the bare stage name.
         return ExampleResult(
-            example_id, False, stage, trace, (), pass2_invalid_reason=pass2_result.invalid_reason
+            example_id, False, stage, trace, (), pass2_invalid_reason=pass2_result.invalid_reason,
+            pass2_replayed_token_ids=tuple(pass2_result.replayed_token_ids),
         )
 
     example_attrition.record_passed()
@@ -354,114 +408,169 @@ def run_example(
             else:
                 attempted_no_op += 1
             pair_attrition.record_entered()
-            if pre_branch_guard is not None:
-                guard_evidence = pre_branch_guard(target_capture, kind)
-                pre_branch_memory_evidence.append(guard_evidence)
-                if not guard_evidence.accepted:
-                    semantic_mutation_reports.append({
-                        "pair_identity": identity_record,
-                        "attempted": False,
-                        "passed": False,
-                        "k_slot_change_count": 0,
-                        "v_slot_change_count": 0,
-                        "provenance_update_count": 0,
-                        "kept_index_update_count": 0,
-                        "physical_byte_delta": 0,
-                        "failure_reason": guard_evidence.rejection_reason,
-                    })
-                    pair_attrition.record_dropped(STAGE_BRANCH_EVALUATION_FAILURE)
+            try:
+                if pre_branch_guard is not None:
+                    guard_evidence = pre_branch_guard(target_capture, kind)
+                    pre_branch_memory_evidence.append(guard_evidence)
+                    if not guard_evidence.accepted:
+                        semantic_mutation_reports.append({
+                            "pair_identity": identity_record,
+                            "attempted": False,
+                            "passed": False,
+                            "k_slot_change_count": 0,
+                            "v_slot_change_count": 0,
+                            "provenance_update_count": 0,
+                            "kept_index_update_count": 0,
+                            "physical_byte_delta": 0,
+                            "failure_reason": guard_evidence.rejection_reason,
+                        })
+                        pair_attrition.record_dropped(STAGE_BRANCH_EVALUATION_FAILURE)
+                        pair_failure_details.append(
+                            PairFailureDetail(
+                                compaction_event_id=target_capture.event_plan.compaction_event_id,
+                                layer_index=target_capture.event_plan.layer_index,
+                                kv_head_index=target_capture.event_plan.kv_head_index,
+                                evicted_absolute_position=evicted_pos,
+                                donor_absolute_position=donor_pos,
+                                pair_kind=kind,
+                                stage=STAGE_BRANCH_EVALUATION_FAILURE,
+                                detail=guard_evidence.rejection_reason,
+                                elapsed_seconds=0.0,
+                            )
+                        )
+                        continue
+                # B1B-R4 §12: one non-overlapping wall-clock measurement
+                # around the ENTIRE pair-construction call (clone/restore,
+                # semantic swap, bridge-plus-scored evaluation for BOTH
+                # baseline and swapped branches) -- never an aggregate
+                # bucket shared across every pair in this loop.
+                pair_start = clock_fn()
+                result = operation_runner(
+                    f"{kind}_pair:{target_capture.event_plan.compaction_event_id}:{evicted_pos}:{donor_pos}",
+                    lambda: build_swap_pair_record(
+                        example_id=example_id,
+                        model_revision=model_revision,
+                        rkv_revision=rkv_revision,
+                        target_capture=target_capture,
+                        evicted_absolute_position=evicted_pos,
+                        donor_absolute_position=donor_pos,
+                        trace=trace,
+                        branch_step_fn=branch_step_fn,
+                        phase_runner=pair_phase_runner,
+                    ),
+                )
+                pair_elapsed = clock_fn() - pair_start
+                ev = target_capture.event_plan
+
+                mutation = result.semantic_mutation_report or {
+                    "attempted": result.semantic_swap_check_attempted,
+                    "passed": result.semantic_swap_check_passed,
+                    "k_slot_change_count": 0,
+                    "v_slot_change_count": 0,
+                    "provenance_update_count": 0,
+                    "kept_index_update_count": 0,
+                    "physical_byte_delta": 0,
+                    "failure_reason": result.failure_detail,
+                }
+                semantic_mutation_reports.append({"pair_identity": identity_record, **mutation})
+
+                if kind == "real" and result.semantic_swap_check_attempted:
+                    semantic_swap_checks_attempted += 1
+                    if result.semantic_swap_check_passed:
+                        semantic_swap_checks_passed += 1
+
+                def _record_pair_failure(stage: str, detail: str | None) -> None:
+                    pair_attrition.record_dropped(stage)
                     pair_failure_details.append(
                         PairFailureDetail(
-                            compaction_event_id=target_capture.event_plan.compaction_event_id,
-                            layer_index=target_capture.event_plan.layer_index,
-                            kv_head_index=target_capture.event_plan.kv_head_index,
+                            compaction_event_id=ev.compaction_event_id,
+                            layer_index=ev.layer_index,
+                            kv_head_index=ev.kv_head_index,
                             evicted_absolute_position=evicted_pos,
                             donor_absolute_position=donor_pos,
                             pair_kind=kind,
-                            stage=STAGE_BRANCH_EVALUATION_FAILURE,
-                            detail=guard_evidence.rejection_reason,
-                            elapsed_seconds=0.0,
+                            stage=stage,
+                            detail=detail,
+                            elapsed_seconds=pair_elapsed,
                         )
                     )
+
+                if result.record is None:
+                    _record_pair_failure(_PAIR_STAGE_MAP[result.failure_stage], result.failure_detail)
                     continue
-            # B1B-R4 §12: one non-overlapping wall-clock measurement around
-            # the ENTIRE pair-construction call (clone/restore, semantic
-            # swap, bridge-plus-scored evaluation for BOTH baseline and
-            # swapped branches) -- never an aggregate bucket shared across
-            # every pair in this loop.
-            pair_start = clock_fn()
-            result = operation_runner(
-                f"{kind}_pair:{target_capture.event_plan.compaction_event_id}:{evicted_pos}:{donor_pos}",
-                lambda: build_swap_pair_record(
-                    example_id=example_id,
-                    model_revision=model_revision,
-                    rkv_revision=rkv_revision,
-                    target_capture=target_capture,
-                    evicted_absolute_position=evicted_pos,
-                    donor_absolute_position=donor_pos,
-                    trace=trace,
-                    branch_step_fn=branch_step_fn,
-                    phase_runner=pair_phase_runner,
-                ),
-            )
-            pair_elapsed = clock_fn() - pair_start
-            ev = target_capture.event_plan
-
-            mutation = result.semantic_mutation_report or {
-                "attempted": result.semantic_swap_check_attempted,
-                "passed": result.semantic_swap_check_passed,
-                "k_slot_change_count": 0,
-                "v_slot_change_count": 0,
-                "provenance_update_count": 0,
-                "kept_index_update_count": 0,
-                "physical_byte_delta": 0,
-                "failure_reason": result.failure_detail,
-            }
-            semantic_mutation_reports.append({"pair_identity": identity_record, **mutation})
-
-            if kind == "real" and result.semantic_swap_check_attempted:
-                semantic_swap_checks_attempted += 1
-                if result.semantic_swap_check_passed:
-                    semantic_swap_checks_passed += 1
-
-            def _record_pair_failure(stage: str, detail: str | None) -> None:
-                pair_attrition.record_dropped(stage)
+                if not result.record.valid_flag:
+                    # B1B-R4.1 §18: a pair whose record WAS constructed but
+                    # whose derived parity check failed (e.g. a real
+                    # snapshot's semantic swap did not update provenance/
+                    # kept-index bookkeeping) -- schema-valid, but not a
+                    # success.
+                    _record_pair_failure(STAGE_SEMANTIC_SWAP_PARITY_FAILURE, result.record.invalid_reason)
+                    continue
+                if _has_no_recorded_uncertainty_anywhere(result.record):
+                    _record_pair_failure(STAGE_UNCERTAINTY_MISSING, "uncertainty_missing")
+                    continue
+                pair_attrition.record_passed()
+                pair_records.append(result.record)
+                completed_pair_identities.append(identity_record)
+                if kind == "real":
+                    completed_real += 1
+                    real_pair_wall_seconds.append(pair_elapsed)
+                else:
+                    completed_no_op += 1
+                    no_op_pair_wall_seconds.append(pair_elapsed)
+            except Exception as exc:
+                # Independent-audit Gate H1: every branch above that
+                # detects an EXPECTED failure mode reports it as data (a
+                # `PairFailureDetail`) and `continue`s to the next pair --
+                # this catches only a genuinely UNEXPECTED exception (e.g.
+                # a real CUDA OOM inside `pre_branch_guard`/
+                # `build_swap_pair_record`). Every pair completed in
+                # earlier loop iterations (`pair_records`,
+                # `attempted_pair_identities`, `completed_pair_identities`,
+                # `semantic_mutation_reports`, `pre_branch_memory_evidence`,
+                # both attrition counters) is preserved in the returned
+                # `ExampleResult` rather than lost to a bare propagating
+                # exception.
+                pair_attrition.record_dropped(STAGE_UNEXPECTED_PAIR_EXCEPTION)
                 pair_failure_details.append(
                     PairFailureDetail(
-                        compaction_event_id=ev.compaction_event_id,
-                        layer_index=ev.layer_index,
-                        kv_head_index=ev.kv_head_index,
+                        compaction_event_id=target_capture.event_plan.compaction_event_id,
+                        layer_index=target_capture.event_plan.layer_index,
+                        kv_head_index=target_capture.event_plan.kv_head_index,
                         evicted_absolute_position=evicted_pos,
                         donor_absolute_position=donor_pos,
                         pair_kind=kind,
-                        stage=stage,
-                        detail=detail,
-                        elapsed_seconds=pair_elapsed,
+                        stage=STAGE_UNEXPECTED_PAIR_EXCEPTION,
+                        detail=f"{type(exc).__name__}: {exc}",
+                        elapsed_seconds=0.0,
                     )
                 )
-
-            if result.record is None:
-                _record_pair_failure(_PAIR_STAGE_MAP[result.failure_stage], result.failure_detail)
-                continue
-            if not result.record.valid_flag:
-                # B1B-R4.1 §18: a pair whose record WAS constructed but
-                # whose derived parity check failed (e.g. a real snapshot's
-                # semantic swap did not update provenance/kept-index
-                # bookkeeping) -- schema-valid, but not a success.
-                _record_pair_failure(STAGE_SEMANTIC_SWAP_PARITY_FAILURE, result.record.invalid_reason)
-                continue
-            if _has_no_recorded_uncertainty_anywhere(result.record):
-                _record_pair_failure(STAGE_UNCERTAINTY_MISSING, "uncertainty_missing")
-                continue
-            pair_attrition.record_passed()
-            pair_records.append(result.record)
-            completed_pair_identities.append(identity_record)
-            if kind == "real":
-                completed_real += 1
-                real_pair_wall_seconds.append(pair_elapsed)
-            else:
-                completed_no_op += 1
-                no_op_pair_wall_seconds.append(pair_elapsed)
+                return ExampleResult(
+                    example_id, True, None, trace, tuple(pair_records),
+                    attempted_real_pair_count=attempted_real,
+                    attempted_no_op_pair_count=attempted_no_op,
+                    completed_real_pair_count=completed_real,
+                    completed_no_op_pair_count=completed_no_op,
+                    real_pair_wall_seconds=tuple(real_pair_wall_seconds),
+                    no_op_pair_wall_seconds=tuple(no_op_pair_wall_seconds),
+                    pass2_invalid_reason=None,
+                    minimized_target_evidence=minimized_target_evidence,
+                    selected_event_ids=tuple(e.compaction_event_id for e in plan.events),
+                    pair_failure_details=tuple(pair_failure_details),
+                    semantic_swap_checks_attempted=semantic_swap_checks_attempted,
+                    semantic_swap_checks_passed=semantic_swap_checks_passed,
+                    pre_branch_memory_evidence=tuple(pre_branch_memory_evidence),
+                    attempted_pair_identities=tuple(attempted_pair_identities),
+                    completed_pair_identities=tuple(completed_pair_identities),
+                    semantic_mutation_reports=tuple(semantic_mutation_reports),
+                    selected_event_evidence=selected_event_evidence,
+                    pass2_replayed_token_ids=pass2_replayed_token_ids,
+                    pass2_compaction_event_positions=pass2_compaction_event_positions,
+                    aborted=True,
+                    abort_failure_type=type(exc).__name__,
+                    abort_failure_message=str(exc),
+                    abort_is_oom=("out of memory" in str(exc).lower() or type(exc).__name__ == "OutOfMemoryError"),
+                )
 
     return ExampleResult(
         example_id, True, None, trace, tuple(pair_records),

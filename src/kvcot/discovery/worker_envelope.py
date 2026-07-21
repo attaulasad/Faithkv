@@ -38,6 +38,17 @@ class WorkerEnvelope(BaseModel):
     error_message: str | None
     traceback: str | None
     result_sha256: str | None = None
+    # Independent-audit Gate H1: explicit, typed, top-level fields for the
+    # scientifically load-bearing scalars a post-mortem needs first --
+    # never buried only inside the unconstrained `partial_measurements`
+    # blob. `None`/`False` for a success envelope or for a failure that
+    # never reached `kvcot.discovery.worker_partial_evidence
+    # .capture_partial_evidence` at all (e.g. config load failed before any
+    # worker body ran).
+    failure_stage: str | None = None
+    last_completed_stage: str | None = None
+    is_oom: bool = False
+    is_timeout: bool = False
 
 
 def new_attempt_id() -> str:
@@ -82,6 +93,10 @@ def build_failure_envelope(
     software_versions: dict[str, str],
     hardware_metadata: dict[str, Any],
     exc: BaseException,
+    failure_stage: str | None = None,
+    last_completed_stage: str | None = None,
+    is_oom: bool = False,
+    is_timeout: bool = False,
 ) -> WorkerEnvelope:
     return WorkerEnvelope(
         role=role, attempt_id=attempt_id, started_at=started_at, finished_at=now_iso(), success=False,
@@ -89,7 +104,8 @@ def build_failure_envelope(
         partial_measurements=partial_measurements, determinism_policy=determinism_policy,
         software_versions=software_versions, hardware_metadata=hardware_metadata,
         error_type=type(exc).__name__, error_message=str(exc), traceback=traceback_module.format_exc(),
-        result_sha256=None,
+        result_sha256=None, failure_stage=failure_stage, last_completed_stage=last_completed_stage,
+        is_oom=is_oom, is_timeout=is_timeout,
     )
 
 

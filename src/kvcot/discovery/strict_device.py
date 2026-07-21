@@ -10,6 +10,67 @@ class StrictDeviceError(RuntimeError):
     pass
 
 
+# Independent-audit Gate H4: a real RTX 3090 reports total VRAM somewhat
+# below its nominal 24 GiB (driver/firmware reservation) -- this range is
+# deliberately generous (20-26 GiB) so it rejects a clearly-wrong card
+# (e.g. a 16 GiB or 48 GiB device) without being sensitive to the exact
+# reporting quirks of a specific driver version.
+RTX3090_VRAM_MIN_BYTES = 20 * 1024**3
+RTX3090_VRAM_MAX_BYTES = 26 * 1024**3
+
+
+def verify_device_gate_from_raw_evidence(
+    fullkv_device_evidence: dict[str, Any], rkv_device_evidence: dict[str, Any]
+) -> bool:
+    """Independent-audit Gate H4.1/H4.2 repair: the final coordinator gate
+    must not derive `single_rtx3090_verified` from a worker-reported
+    `verified=True` boolean alone -- it must recompute the policy from RAW
+    fields, and require the two independently-launched worker processes to
+    AGREE on what hardware they actually observed.
+
+    Requires, independently for EACH worker's raw evidence dict: `verified
+    is True`; `visible_gpu_count == 1`; `device_index == 0` (the explicit
+    `cuda:0` this repository always requests); `gpu_name` contains "RTX
+    3090"; `total_vram_bytes` falls inside the frozen plausibility range;
+    and `driver_version`/`cuda_runtime`/`cudnn_version` are all non-empty.
+
+    Then requires FullKV and R-KV to report the IDENTICAL `gpu_name`,
+    `device_index`, `total_vram_bytes`, `compute_capability`,
+    `driver_version`, `cuda_runtime`, and `cudnn_version` -- two workers
+    disagreeing about the hardware they ran on is itself a failure, never
+    silently accepted because each individually claimed `verified=True`."""
+
+    def _raw_ok(evidence: dict[str, Any]) -> bool:
+        if evidence.get("verified") is not True:
+            return False
+        if evidence.get("visible_gpu_count") != 1:
+            return False
+        if evidence.get("device_index") != 0:
+            return False
+        gpu_name = str(evidence.get("gpu_name") or "")
+        if "RTX 3090" not in gpu_name.upper():
+            return False
+        vram = evidence.get("total_vram_bytes")
+        if not isinstance(vram, (int, float)) or isinstance(vram, bool):
+            return False
+        if not (RTX3090_VRAM_MIN_BYTES <= vram <= RTX3090_VRAM_MAX_BYTES):
+            return False
+        if not evidence.get("driver_version") or not evidence.get("cuda_runtime") or not evidence.get("cudnn_version"):
+            return False
+        return True
+
+    if not (_raw_ok(fullkv_device_evidence) and _raw_ok(rkv_device_evidence)):
+        return False
+
+    agreement_fields = (
+        "gpu_name", "device_index", "total_vram_bytes", "compute_capability",
+        "driver_version", "cuda_runtime", "cudnn_version",
+    )
+    return all(
+        fullkv_device_evidence.get(field) == rkv_device_evidence.get(field) for field in agreement_fields
+    )
+
+
 @dataclass(frozen=True)
 class StrictDeviceEvidence:
     visible_gpu_count: int
