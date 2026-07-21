@@ -122,6 +122,7 @@ SEMANTIC_ROLE_BY_RELATIVE_PATH: dict[str, str] = {
     "process_outcome.json": "process_outcome",
     "failure.json": "failure",
     "final_write_failure.json": "final_write_failure",
+    "final_verification_failure.json": "final_verification_failure",
 }
 _SEMANTIC_ROLE_BY_WORKER_FILE: dict[str, str] = {
     "command.json": "worker_command",

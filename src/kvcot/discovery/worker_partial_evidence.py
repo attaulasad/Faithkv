@@ -25,8 +25,9 @@ failure envelope instead of `None`.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterator, NoReturn
 
 from pydantic import BaseModel, Field
 
@@ -74,6 +75,20 @@ class WorkerExecutionState:
 
     def complete(self, stage: str | None = None) -> None:
         self.last_completed_stage = stage if stage is not None else self.current_stage
+
+    @contextmanager
+    def track(self, stage: str) -> Iterator[None]:
+        """R1 (residual independent-audit repair): the preferred call shape
+        for a material operation that is not already routed through
+        `SynchronizedTimer.measure` -- `enter(stage)` before the body runs,
+        `complete(stage)` only if the body returns normally. On an
+        exception, `complete` is never reached, so `current_stage` stays at
+        `stage` and `last_completed_stage` stays at whatever finished
+        before it -- `failing_stage` and `last_completed_stage` can never
+        collide for an operation wrapped this way."""
+        self.enter(stage)
+        yield
+        self.complete(stage)
 
 
 class PartialWorkerEvidence(BaseModel):
@@ -328,3 +343,23 @@ class WorkerBodyFailure(RuntimeError):
         self.__cause__ = cause
         self.is_oom = evidence.is_oom
         self.is_timeout = evidence.is_timeout
+
+
+def raise_worker_body_failure(
+    *, role: str, execution_state: WorkerExecutionState, exc: BaseException, scope: dict[str, Any]
+) -> NoReturn:
+    """R1: the one call site `run_fullkv_worker`/`run_rkv_worker` use to
+    convert a caught exception into a partial-evidence-bearing
+    `WorkerBodyFailure` -- used both by their outer `except` blocks and by
+    any narrower guard (e.g. the CUDA-availability preflight) that needs
+    the identical treatment, so the capture-and-wrap logic exists in
+    exactly one place."""
+    evidence = capture_partial_evidence(
+        role=role,
+        failing_stage=execution_state.current_stage,
+        exc=exc,
+        scope=scope,
+        attempt_id=execution_state.attempt_id,
+        last_completed_stage=execution_state.last_completed_stage,
+    )
+    raise WorkerBodyFailure(evidence, exc) from exc

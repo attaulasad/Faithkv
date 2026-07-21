@@ -635,6 +635,127 @@ def test_generation_config_hash_mismatch_fails_the_gate(config, manifest, monkey
     assert "generation_config_hash_match" in artifact.gate_result.failed_conditions
 
 
+# ---------------------------------------------------------------------------
+# R4 (residual independent-audit repair): production must independently
+# verify the COMPLETED `final.json` after writing it, not merely trust that
+# the write itself succeeded.
+# ---------------------------------------------------------------------------
+
+
+def _real_attempt_directory(tmp_path) -> Path:
+    from kvcot.discovery.attempt_artifacts import create_attempt_directory
+
+    return create_attempt_directory(root=tmp_path / "decisions").path
+
+
+def _install_fake_coordination(monkeypatch, fullkv_payload, rkv_payload):
+    """Bypasses `run_both_workers_via_subprocess`'s full atomic-envelope
+    subprocess contract (already covered elsewhere, e.g.
+    `test_b2a_workers.py`) -- this test is scoped to R4's post-final-write
+    verification integration, not worker-subprocess plumbing. Still writes
+    a real `process_outcome.json` into the real `attempt_directory` so the
+    rest of the coordinator's attempt-directory bookkeeping runs for real."""
+    from kvcot.discovery import b2a_workers
+    from kvcot.discovery.attempt_artifacts import atomic_write_json
+    from kvcot.discovery.b2a_workers import FullKVWorkerResult, RKVWorkerResult, WorkerCoordinationResult
+
+    def fake_run_both_workers_via_subprocess(config_path, manifest_path, *, python_executable, subprocess_runner, attempt_directory):
+        atomic_write_json(Path(attempt_directory) / "process_outcome.json", {
+            "attempt_id": Path(attempt_directory).name.rsplit("_", 1)[-1],
+            "return_codes": {"fullkv": 0, "rkv": 0},
+            "timeout_state": {"fullkv": False, "rkv": False},
+            "partial_success": False,
+            "coordinator_observed_process_seconds": {"fullkv": 1.0, "rkv": 1.0},
+        })
+        return WorkerCoordinationResult(
+            fullkv=FullKVWorkerResult.model_validate(fullkv_payload),
+            rkv=RKVWorkerResult.model_validate(rkv_payload),
+            shared_identity_ok=True, shared_identity_mismatches=(),
+            attempt_directory=str(attempt_directory), return_codes={"fullkv": 0, "rkv": 0},
+            timeout_state={"fullkv": False, "rkv": False}, partial_success=False,
+            coordinator_observed_process_seconds={"fullkv": 1.0, "rkv": 1.0},
+        )
+
+    monkeypatch.setattr(b2a_workers, "run_both_workers_via_subprocess", fake_run_both_workers_via_subprocess)
+
+
+def test_final_manifest_is_verified_and_a_valid_artifact_succeeds(config, manifest, monkeypatch, tmp_path):
+    """Proves production actually CALLS the final verifier after writing
+    `final.json` (via a spy) and that a genuinely valid final artifact
+    still succeeds -- the new call is not merely present but inert."""
+    monkeypatch.setattr(b2a_execute, "_verify_resolved_prompt_identity", lambda c, m: None)
+    fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
+    attempt_directory = _real_attempt_directory(tmp_path)
+    _install_fake_coordination(monkeypatch, fullkv_payload, rkv_payload)
+
+    from kvcot.discovery import attempt_verification
+
+    real_verify = attempt_verification.verify_final_reference_manifest
+    calls = {"n": 0}
+
+    def spying_verify(directory):
+        calls["n"] += 1
+        assert directory == attempt_directory
+        return real_verify(directory)
+
+    monkeypatch.setattr(attempt_verification, "verify_final_reference_manifest", spying_verify)
+
+    artifact = b2a_execute.run_b2a_calibration(
+        config, manifest, config_path=CONFIG_PATH, manifest_path=MANIFEST_PATH,
+        python_executable="fake-python", subprocess_runner=None, attempt_directory=attempt_directory,
+    )
+
+    assert calls["n"] == 1
+    assert artifact.artifact_path == attempt_directory / "final.json"
+    assert not (attempt_directory / "final_verification_failure.json").exists()
+
+
+def test_final_verification_failure_raises_writes_failure_record_and_preserves_prior_artifacts(
+    config, manifest, monkeypatch, tmp_path
+):
+    """A `final.json` that fails post-write verification (simulated here via
+    a controlled fake -- `verify_final_reference_manifest` itself is
+    already exhaustively tested against real corruption in
+    `test_attempt_verification.py`) must: raise (never return a successful
+    `B2ACalibrationArtifact`), write `final_verification_failure.json`, and
+    leave every prior artifact -- including `final.json` and
+    `completion.json` themselves -- byte-for-byte unchanged."""
+    monkeypatch.setattr(b2a_execute, "_verify_resolved_prompt_identity", lambda c, m: None)
+    fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
+    attempt_directory = _real_attempt_directory(tmp_path)
+    _install_fake_coordination(monkeypatch, fullkv_payload, rkv_payload)
+
+    from kvcot.discovery import attempt_verification
+
+    monkeypatch.setattr(
+        attempt_verification, "verify_final_reference_manifest",
+        lambda directory: (False, ("injected: final.json reference manifest does not match disk",)),
+    )
+
+    with pytest.raises(b2a_execute.B2AFinalVerificationError, match="injected: final.json reference manifest"):
+        b2a_execute.run_b2a_calibration(
+            config, manifest, config_path=CONFIG_PATH, manifest_path=MANIFEST_PATH,
+            python_executable="fake-python", subprocess_runner=None, attempt_directory=attempt_directory,
+        )
+
+    final_path = attempt_directory / "final.json"
+    completion_path = attempt_directory / "completion.json"
+    assert final_path.is_file()
+    assert completion_path.is_file()
+    final_bytes_before = final_path.read_bytes()
+    completion_bytes_before = completion_path.read_bytes()
+
+    failure_path = attempt_directory / "final_verification_failure.json"
+    assert failure_path.is_file()
+    failure_record = json.loads(failure_path.read_text(encoding="utf-8"))
+    assert failure_record["reasons"] == ["injected: final.json reference manifest does not match disk"]
+    assert failure_record["intended_final_relative_path"] == "final.json"
+
+    # Nothing already written was overwritten by the failure handling.
+    assert final_path.read_bytes() == final_bytes_before
+    assert completion_path.read_bytes() == completion_bytes_before
+
+
 def test_prompt_identity_refusal_before_any_worker_launch_still_writes_fail_artifact(config, manifest, monkeypatch, tmp_path):
     def _boom(c, m):
         raise b2a_execute.B2AExecutionRefused("simulated prompt identity mismatch")

@@ -148,7 +148,14 @@ def test_failure_during_pass2_reports_pass2_prefill(monkeypatch):
     _inject_phase_failure(monkeypatch, lambda phase: phase == "rkv_pass2_prefill", fail_at=1)
     evidence = _run_controlled_rkv_expecting_failure(monkeypatch)
     assert evidence.failing_stage == "rkv_pass2_prefill"
-    assert evidence.last_completed_stage == "rkv_complete_pass1"
+    # R1: Pass 2's own fresh initial-state construction (`_fresh_state`,
+    # called via `pass2_initial_state_factory` immediately before the first
+    # prefill) is now itself a tracked stage, nested inside
+    # "rkv_complete_pass2" -- the genuinely last-completed stage before the
+    # injected prefill failure, more granular than the previous
+    # "rkv_complete_pass1" (which predates Pass 2 entirely).
+    assert evidence.last_completed_stage == "cache and state construction"
+    assert evidence.failing_stage != evidence.last_completed_stage
     assert evidence.example_aborted is True
     assert evidence.pass1_token_ids  # Pass 1 evidence survives the Pass 2 failure
 
@@ -231,7 +238,10 @@ def test_failure_during_result_construction_reports_result_construction(monkeypa
     monkeypatch.setattr(b2a_workers, "RKVWorkerResult", _Boom)
     evidence = _run_controlled_rkv_expecting_failure(monkeypatch)
     assert evidence.failing_stage == "result construction"
-    assert evidence.last_completed_stage == "call_trace_comparison"
+    # R1: "post-run evidence derivation" is now its own tracked stage,
+    # completing after "call_trace_comparison" and before "result
+    # construction" -- this is the more accurate immediate predecessor now.
+    assert evidence.last_completed_stage == "post-run evidence derivation"
     # F2: a result-serialization failure preserves the COMPLETE run's
     # already-produced evidence.
     assert len([i for i in evidence.completed_pair_identities if i["pair_kind"] == "real"]) == 12
@@ -261,6 +271,235 @@ def test_fullkv_failure_during_result_construction(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# R1 (residual independent-audit repair): totality of worker stage tracking.
+# Every material operation the worker body performs must be bounded by
+# `WorkerExecutionState` so `failing_stage` can never collide with
+# `last_completed_stage` -- these inject failures at the specific points
+# that were previously untracked gaps between two already-tracked stages.
+# ---------------------------------------------------------------------------
+
+
+def test_cuda_availability_check_failure_produces_partial_evidence_fullkv():
+    """Item 1: the CUDA-availability call itself (never just a clean
+    `False`) is guarded on its own -- an unexpected exception from it must
+    still produce a `WorkerBodyFailure`, not a bare unwrapped crash."""
+    class _ExplodingCuda(_FakeCudaFacade):
+        def is_available(self):
+            raise RuntimeError("injected cuda availability failure")
+
+    config = _build_fake_discovery_config()
+    with pytest.raises(WorkerBodyFailure) as info:
+        run_fullkv_worker(
+            config, _FakeManifest(),
+            _load_model=lambda: _FakeModel(), _load_tokenizer=lambda: _FakeTokenizer(),
+            _fresh_cache_factory=lambda: _FakeCache(NUM_LAYERS), _cuda=_ExplodingCuda(), _device="cpu",
+        )
+    evidence = info.value.evidence
+    assert evidence.failing_stage == "cuda availability check"
+    assert evidence.last_completed_stage is None
+    assert "injected cuda availability failure" in evidence.failure_message
+
+
+def test_cuda_availability_check_failure_produces_partial_evidence_rkv(monkeypatch):
+    _install_controlled_environment(monkeypatch)
+    config = _build_controlled_discovery_config()
+    model = _ControlledModel(config.rkv)
+
+    class _ExplodingCuda(_FakeCudaFacade):
+        def is_available(self):
+            raise RuntimeError("injected cuda availability failure")
+
+    with pytest.raises(WorkerBodyFailure) as info:
+        run_rkv_worker(
+            config, _FakeManifest(),
+            _load_model=lambda: model, _load_tokenizer=lambda: _ControlledTokenizer(),
+            _fresh_cache_factory=lambda: _FakeCache(CONTROLLED_NUM_LAYERS),
+            _cuda=_ExplodingCuda(), _device="cpu",
+        )
+    evidence = info.value.evidence
+    assert evidence.failing_stage == "cuda availability check"
+    assert evidence.last_completed_stage is None
+
+
+def test_cuda_clean_refusal_is_not_wrapped_when_no_fake_backend_injected():
+    """The deliberate "no CUDA available" refusal (a clean `False` return,
+    never an exception) must stay a plain, unwrapped `WorkerFailedError` --
+    unchanged by the new guard around the availability call itself."""
+    from kvcot.discovery.b2a_workers import WorkerFailedError
+
+    with pytest.raises(WorkerFailedError, match="requires CUDA"):
+        run_fullkv_worker(_build_fake_discovery_config(), _FakeManifest())
+
+
+def test_failure_during_runtime_identity_derivation_reports_that_stage(monkeypatch):
+    """Item 2."""
+    _install_controlled_environment(monkeypatch)
+    config = _build_controlled_discovery_config()
+    model = _ControlledModel(config.rkv)
+
+    def exploding_identity(**kwargs):
+        raise RuntimeError("injected runtime identity derivation failure")
+
+    monkeypatch.setattr("kvcot.discovery.runtime_evidence.derive_runtime_identity", exploding_identity)
+    with pytest.raises(WorkerBodyFailure) as info:
+        run_rkv_worker(
+            config, _FakeManifest(),
+            _load_model=lambda: model, _load_tokenizer=lambda: _ControlledTokenizer(),
+            _fresh_cache_factory=lambda: _FakeCache(CONTROLLED_NUM_LAYERS),
+            _cuda=_FakeCudaFacade(), _device="cpu",
+        )
+    evidence = info.value.evidence
+    assert evidence.failing_stage == "runtime identity derivation"
+    assert evidence.last_completed_stage == "runtime R-KV config verification"
+    assert evidence.failing_stage != evidence.last_completed_stage
+
+
+def test_failure_during_model_architecture_extraction_reports_that_stage(monkeypatch):
+    """Item 3."""
+    _install_controlled_environment(monkeypatch)
+    config = _build_controlled_discovery_config()
+    model = _ControlledModel(config.rkv)
+
+    class _ExplodingConfig:
+        def __init__(self, real_config):
+            self._real = real_config
+
+        def __getattr__(self, name):
+            if name == "num_key_value_heads":
+                raise RuntimeError("injected model architecture extraction failure")
+            return getattr(self._real, name)
+
+    model.config = _ExplodingConfig(model.config)
+    with pytest.raises(WorkerBodyFailure) as info:
+        run_rkv_worker(
+            config, _FakeManifest(),
+            _load_model=lambda: model, _load_tokenizer=lambda: _ControlledTokenizer(),
+            _fresh_cache_factory=lambda: _FakeCache(CONTROLLED_NUM_LAYERS),
+            _cuda=_FakeCudaFacade(), _device="cpu",
+        )
+    evidence = info.value.evidence
+    assert evidence.failing_stage == "model architecture extraction"
+    assert evidence.last_completed_stage == "post_load_validation"
+    assert evidence.failing_stage != evidence.last_completed_stage
+
+
+def test_failure_during_cache_and_state_construction_reports_that_stage(monkeypatch):
+    """Item 4."""
+    _install_controlled_environment(monkeypatch)
+    config = _build_controlled_discovery_config()
+    model = _ControlledModel(config.rkv)
+
+    def exploding_reset(*args, **kwargs):
+        raise RuntimeError("injected cache and state construction failure")
+
+    monkeypatch.setattr("kvcot.generation.state.reset_patched_state", exploding_reset)
+    with pytest.raises(WorkerBodyFailure) as info:
+        run_rkv_worker(
+            config, _FakeManifest(),
+            _load_model=lambda: model, _load_tokenizer=lambda: _ControlledTokenizer(),
+            _fresh_cache_factory=lambda: _FakeCache(CONTROLLED_NUM_LAYERS),
+            _cuda=_FakeCudaFacade(), _device="cpu",
+        )
+    evidence = info.value.evidence
+    assert evidence.failing_stage == "cache and state construction"
+    assert evidence.last_completed_stage == "answer verifier construction"
+    assert evidence.failing_stage != evidence.last_completed_stage
+
+
+def test_failure_during_answer_verifier_construction_reports_that_stage(monkeypatch):
+    """Item 5."""
+    _install_controlled_environment(monkeypatch)
+    config = _build_controlled_discovery_config()
+    model = _ControlledModel(config.rkv)
+
+    def exploding_answer_fn(*args, **kwargs):
+        raise RuntimeError("injected answer verifier construction failure")
+
+    monkeypatch.setattr("kvcot.discovery.math500_verification.build_math500_answer_fn", exploding_answer_fn)
+    with pytest.raises(WorkerBodyFailure) as info:
+        run_rkv_worker(
+            config, _FakeManifest(),
+            _load_model=lambda: model, _load_tokenizer=lambda: _ControlledTokenizer(),
+            _fresh_cache_factory=lambda: _FakeCache(CONTROLLED_NUM_LAYERS),
+            _cuda=_FakeCudaFacade(), _device="cpu",
+        )
+    evidence = info.value.evidence
+    assert evidence.failing_stage == "answer verifier construction"
+    assert evidence.last_completed_stage == "post_load_baseline"
+    assert evidence.failing_stage != evidence.last_completed_stage
+
+
+def test_failure_during_pass1_plan_construction_reports_that_stage(monkeypatch):
+    """Item 6: an unexpected exception from `build_pass1_plan` -- AFTER
+    Pass 1 itself already completed -- must report this construction step,
+    never the already-completed `rkv_complete_pass1` stage."""
+    _inject_phase_failure(monkeypatch, lambda phase: phase == "pass1_plan_construction", fail_at=1)
+    evidence = _run_controlled_rkv_expecting_failure(monkeypatch)
+    assert evidence.failing_stage == "pass1_plan_construction"
+    assert evidence.last_completed_stage == "rkv_complete_pass1"
+    assert evidence.failing_stage != evidence.last_completed_stage
+
+
+def test_failure_during_post_run_evidence_derivation_reports_that_stage(monkeypatch):
+    """Item 7: a failure deriving evidence AFTER `run_example` returns must
+    report this derivation step, never a stale pair/pass sub-phase name."""
+    _install_controlled_environment(monkeypatch)
+    config = _build_controlled_discovery_config()
+    model = _ControlledModel(config.rkv)
+
+    def exploding(**kwargs):
+        raise RuntimeError("injected post-run evidence derivation failure")
+
+    monkeypatch.setattr("kvcot.discovery.b2a_evidence.derive_trajectory_parity_evidence", exploding)
+    with pytest.raises(WorkerBodyFailure) as info:
+        run_rkv_worker(
+            config, _FakeManifest(),
+            _load_model=lambda: model, _load_tokenizer=lambda: _ControlledTokenizer(),
+            _fresh_cache_factory=lambda: _FakeCache(CONTROLLED_NUM_LAYERS),
+            _cuda=_FakeCudaFacade(), _device="cpu",
+        )
+    evidence = info.value.evidence
+    assert evidence.failing_stage == "post-run evidence derivation"
+    assert evidence.last_completed_stage == "call_trace_comparison"
+    assert evidence.failing_stage != evidence.last_completed_stage
+    # Evidence from the already-complete run survives this later failure.
+    assert len([i for i in evidence.completed_pair_identities if i["pair_kind"] == "real"]) == 12
+    assert evidence.no_op_identity is not None
+
+
+def test_aborted_example_result_falls_back_to_typed_stage_when_current_stage_collides(monkeypatch):
+    """Item 8, defensive branch: production's real `run_example` always
+    calls `operation_runner("rkv_complete_pass1", ...)` as its first action,
+    so `current_stage` never actually collides with `last_completed_stage`
+    by the time an abort is checked -- but a stubbed `run_example` that
+    returns `aborted=True` without touching `operation_runner` at all (a
+    legitimate dependency-injection seam, same as every other CPU test in
+    this file) exercises exactly the collision this fallback exists for."""
+    from kvcot.discovery.orchestrator import ExampleResult
+
+    def fake_run_example(**kwargs):
+        return ExampleResult(
+            example_id="x", valid=True, invalid_stage="synthetic_stage", trace=None, pair_records=(),
+            aborted=True, abort_failure_type="RuntimeError", abort_failure_message="synthetic",
+        )
+
+    monkeypatch.setattr("kvcot.discovery.orchestrator.run_example", fake_run_example)
+    _install_controlled_environment(monkeypatch)
+    config = _build_controlled_discovery_config()
+    model = _ControlledModel(config.rkv)
+    with pytest.raises(WorkerBodyFailure) as info:
+        run_rkv_worker(
+            config, _FakeManifest(),
+            _load_model=lambda: model, _load_tokenizer=lambda: _ControlledTokenizer(),
+            _fresh_cache_factory=lambda: _FakeCache(CONTROLLED_NUM_LAYERS),
+            _cuda=_FakeCudaFacade(), _device="cpu",
+        )
+    evidence = info.value.evidence
+    assert evidence.failing_stage == "pair-evaluation loop abort:synthetic_stage"
+    assert evidence.failing_stage != evidence.last_completed_stage
+
+
+# ---------------------------------------------------------------------------
 # F2: exact partial-evidence preservation at each failure point
 # ---------------------------------------------------------------------------
 
@@ -284,6 +523,13 @@ def test_failure_before_first_pair_preserves_zero_pair_evidence(monkeypatch):
     assert evidence.abort_failure_type == "RuntimeError"
     assert len(evidence.minimized_target_evidence) == 3
     assert evidence.replay_evidence is not None
+    # Item 8: `run_example` returning `aborted=True` preserves the specific
+    # pair sub-phase `execution_state` was already tracking when the abort
+    # happened (never overwritten with a generic label) -- confirming the
+    # already-tracked stage survives the `aborted` -> raised-exception
+    # conversion in `run_rkv_worker` intact.
+    assert evidence.failing_stage.startswith("pre-branch admission:real:")
+    assert evidence.failing_stage != evidence.last_completed_stage
 
 
 def test_failure_after_two_completed_pairs_preserves_exact_identities(monkeypatch):

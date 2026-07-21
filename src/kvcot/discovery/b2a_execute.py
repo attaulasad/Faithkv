@@ -51,6 +51,17 @@ class B2AFinalWriteError(RuntimeError):
     and `completion.json` is never overwritten."""
 
 
+class B2AFinalVerificationError(RuntimeError):
+    """R4 (residual independent-audit repair): raised when `final.json` was
+    written successfully but `verify_final_reference_manifest` then finds it
+    does not genuinely, correctly reference every pre-final artifact --
+    e.g. a torn write, a filesystem-level corruption, or a race that
+    mutated a pre-final artifact after its content was already hashed into
+    the reference manifest. `final.json` and every pre-final artifact are
+    preserved as-is (never overwritten); the attempt is NOT reported as a
+    completed successful attempt."""
+
+
 @dataclass(frozen=True)
 class B2ACalibrationArtifact:
     config_hash: str
@@ -816,6 +827,29 @@ def run_b2a_calibration(
                 raise B2AFinalWriteError(
                     f"final.json write failed: {type(final_exc).__name__}: {final_exc}"
                 ) from final_exc
+
+            # R4: production must verify the COMPLETED final manifest, not
+            # merely trust that the write succeeded -- `verify_final_
+            # reference_manifest` independently recomputes every reference
+            # hash in the just-written `final.json` against what is
+            # actually on disk. `final.json` and every pre-final artifact
+            # are left exactly as written either way; only a terminal
+            # failure record is added on top.
+            from kvcot.discovery.attempt_verification import verify_final_reference_manifest
+
+            final_verified, final_reasons = verify_final_reference_manifest(attempt_directory)
+            if not final_verified:
+                try:
+                    atomic_write_json(attempt_directory / "final_verification_failure.json", {
+                        "attempt_id": attempt.attempt_id,
+                        "reasons": list(final_reasons),
+                        "intended_final_relative_path": "final.json",
+                    })
+                except Exception:  # noqa: BLE001 -- best-effort only, never masks the real failure
+                    pass
+                raise B2AFinalVerificationError(
+                    f"final.json failed post-write verification: {list(final_reasons)}"
+                )
         else:
             artifact_path = build_and_write_b2a_artifact(payload, config_hash, manifest_hash)
         return B2ACalibrationArtifact(

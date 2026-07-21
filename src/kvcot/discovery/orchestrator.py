@@ -266,7 +266,14 @@ def run_example(
         example_attrition.record_dropped(STAGE_CAP_HIT)
         return ExampleResult(example_id, False, STAGE_CAP_HIT, trace, ())
 
-    plan, plan_failure = build_pass1_plan(trace, num_hidden_layers, num_key_value_heads, identity)
+    # R1: routed through `operation_runner` -- in `run_rkv_worker` this is
+    # the same tracked `measured` callable Pass 1/Pass 2 use, so an
+    # unexpected exception here reports its own stage instead of leaving
+    # `current_stage` stale at "rkv_complete_pass1" (already completed).
+    plan, plan_failure = operation_runner(
+        "pass1_plan_construction",
+        lambda: build_pass1_plan(trace, num_hidden_layers, num_key_value_heads, identity),
+    )
     if plan is None:
         stage = (
             STAGE_FEWER_THAN_THREE_ELIGIBLE_EVENTS
@@ -341,11 +348,20 @@ def run_example(
     # for every target this function ever builds.
     from kvcot.discovery.capture_minimize import assert_minimized_bound, build_minimized_target_evidence
 
-    minimized_target_evidence = tuple(
-        build_minimized_target_evidence(tc.event_plan, tc.capture_record) for tc in pass2_result.target_captures
+    def _build_minimized_target_evidence() -> tuple[Any, ...]:
+        evidence_tuple = tuple(
+            build_minimized_target_evidence(tc.event_plan, tc.capture_record) for tc in pass2_result.target_captures
+        )
+        for evidence in evidence_tuple:
+            assert_minimized_bound(evidence)
+        return evidence_tuple
+
+    # R1: same rationale as `pass1_plan_construction` above -- otherwise an
+    # unexpected exception here reports `current_stage` as
+    # "rkv_complete_pass2" (already completed), not this derivation step.
+    minimized_target_evidence = operation_runner(
+        "minimized_target_evidence_construction", _build_minimized_target_evidence
     )
-    for evidence in minimized_target_evidence:
-        assert_minimized_bound(evidence)
 
     # Convert transient full captures before the first branch starts.  Once
     # Pass2Result is deleted, pair evaluation can reach only selected vectors

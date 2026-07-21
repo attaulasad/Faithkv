@@ -823,7 +823,22 @@ def run_fullkv_worker(
     # only after success. On failure, failing_stage = current_stage.
     execution_state = WorkerExecutionState(attempt_id=os.environ.get("KVCOT_B2A_ATTEMPT_ID"))
 
-    cuda_available = bool(cuda.is_available())
+    # R1: the CUDA-availability call itself is the earliest point this
+    # function can genuinely fail -- guarded on its own so an unexpected
+    # exception from it (never just a clean `False`) still produces
+    # partial evidence instead of a bare, unwrapped crash. The deliberate
+    # "no CUDA available" refusal immediately below is unchanged: it stays
+    # a plain `WorkerFailedError`, not wrapped, since nothing has actually
+    # started yet.
+    execution_state.enter("cuda availability check")
+    try:
+        cuda_available = bool(cuda.is_available())
+    except Exception as exc:
+        from kvcot.discovery.worker_partial_evidence import raise_worker_body_failure
+
+        raise_worker_body_failure(role="fullkv", execution_state=execution_state, exc=exc, scope=locals())
+    execution_state.complete("cuda availability check")
+
     if not cuda_available and _load_model is None:
         # Only the REAL (unfaked) production path requires CUDA -- a CPU
         # test that injects `_load_model`/`_cuda` is exercising this
@@ -909,20 +924,24 @@ def run_fullkv_worker(
             model = measured(
                 "model_load", lambda: load_fullkv_discovery_model(config, model_snapshot.local_path, _device)
             )
-        runtime_identity = derive_runtime_identity(
-            model=model, tokenizer=tokenizer, requested_model_revision=config.model.revision,
-            requested_tokenizer_revision=config.model.tokenizer_revision,
-            verified_model_revision=None if model_snapshot is None else model_snapshot.resolved_revision,
-            verified_tokenizer_revision=None if tokenizer_snapshot is None else tokenizer_snapshot.resolved_revision,
-        )
+        with execution_state.track("runtime identity derivation"):
+            runtime_identity = derive_runtime_identity(
+                model=model, tokenizer=tokenizer, requested_model_revision=config.model.revision,
+                requested_tokenizer_revision=config.model.tokenizer_revision,
+                verified_model_revision=None if model_snapshot is None else model_snapshot.resolved_revision,
+                verified_tokenizer_revision=(
+                    None if tokenizer_snapshot is None else tokenizer_snapshot.resolved_revision
+                ),
+            )
         def validate_post_load():
             assert_no_offloaded_parameters(model)
             return derive_parameter_placement(model, requested_device=_device)
 
         parameter_placement = measured("post_load_validation", validate_post_load)
 
-        num_layers = len(model.model.layers)
-        num_kv_heads = model.config.num_key_value_heads
+        with execution_state.track("model architecture extraction"):
+            num_layers = len(model.model.layers)
+            num_kv_heads = model.config.num_key_value_heads
 
         # B1B-R4 §14: reset peak memory stats AFTER load, BEFORE measured
         # inference -- current model allocation is therefore included in the
@@ -936,12 +955,13 @@ def run_fullkv_worker(
 
             cache_factory = lambda: DynamicCache()  # noqa: E731
 
-        cache = reset_patched_state(model, cache_factory)
-        provenance = ModelProvenance(layers={i: LayerProvenance.empty(num_kv_heads) for i in range(num_layers)})
-        state = RealModelState(
-            model=model, cache=cache, model_provenance=provenance, compaction=CompactionTracker(),
-            absolute_position=0, device=_device,
-        )
+        with execution_state.track("cache and state construction"):
+            cache = reset_patched_state(model, cache_factory)
+            provenance = ModelProvenance(layers={i: LayerProvenance.empty(num_kv_heads) for i in range(num_layers)})
+            state = RealModelState(
+                model=model, cache=cache, model_provenance=provenance, compaction=CompactionTracker(),
+                absolute_position=0, device=_device,
+            )
 
         prompt_token_ids = list(manifest.prompt_token_ids)
         actual_calls = ActualModelCallRecorder()
@@ -957,7 +977,8 @@ def run_fullkv_worker(
         recorder = CallTraceRecorder(
             timed_prefill, timed_decode
         )
-        raw_answer_fn = build_math500_answer_fn(tokenizer, manifest.gold_answer)
+        with execution_state.track("answer verifier construction"):
+            raw_answer_fn = build_math500_answer_fn(tokenizer, manifest.gold_answer)
 
         def answer_fn(ids):
             return timer.measure("answer_verification", lambda: raw_answer_fn(ids))
@@ -1055,14 +1076,9 @@ def run_fullkv_worker(
             software_versions={"torch": torch.__version__},
         ).model_dump(mode="json")
     except Exception as exc:
-        from kvcot.discovery.worker_partial_evidence import WorkerBodyFailure, capture_partial_evidence
+        from kvcot.discovery.worker_partial_evidence import raise_worker_body_failure
 
-        evidence = capture_partial_evidence(
-            role="fullkv", failing_stage=execution_state.current_stage, exc=exc,
-            scope=locals(), attempt_id=execution_state.attempt_id,
-            last_completed_stage=execution_state.last_completed_stage,
-        )
-        raise WorkerBodyFailure(evidence, exc) from exc
+        raise_worker_body_failure(role="fullkv", execution_state=execution_state, exc=exc, scope=locals())
 
 
 def run_rkv_worker(
@@ -1145,7 +1161,19 @@ def run_rkv_worker(
     _progress = _progress or _production_progress_callback("rkv")
     execution_state = WorkerExecutionState(attempt_id=os.environ.get("KVCOT_B2A_ATTEMPT_ID"))
 
-    cuda_available = bool(cuda.is_available())
+    # R1: see the identical guard in `run_fullkv_worker` -- the deliberate
+    # "no CUDA available" refusal below stays a plain, unwrapped
+    # `WorkerFailedError`; only a genuinely unexpected exception FROM the
+    # availability check itself is captured as partial evidence.
+    execution_state.enter("cuda availability check")
+    try:
+        cuda_available = bool(cuda.is_available())
+    except Exception as exc:
+        from kvcot.discovery.worker_partial_evidence import raise_worker_body_failure
+
+        raise_worker_body_failure(role="rkv", execution_state=execution_state, exc=exc, scope=locals())
+    execution_state.complete("cuda availability check")
+
     if not cuda_available and _load_model is None:
         raise WorkerFailedError("run_rkv_worker requires CUDA; none is available.")
 
@@ -1234,19 +1262,23 @@ def run_rkv_worker(
                 f"(frozen_hash={runtime_check.frozen_hash}, runtime_hash={runtime_check.runtime_hash})"
             )
         execution_state.complete("runtime R-KV config verification")
-        runtime_identity = derive_runtime_identity(
-            model=model, tokenizer=tokenizer, requested_model_revision=config.model.revision,
-            requested_tokenizer_revision=config.model.tokenizer_revision,
-            verified_model_revision=None if model_snapshot is None else model_snapshot.resolved_revision,
-            verified_tokenizer_revision=None if tokenizer_snapshot is None else tokenizer_snapshot.resolved_revision,
-        )
+        with execution_state.track("runtime identity derivation"):
+            runtime_identity = derive_runtime_identity(
+                model=model, tokenizer=tokenizer, requested_model_revision=config.model.revision,
+                requested_tokenizer_revision=config.model.tokenizer_revision,
+                verified_model_revision=None if model_snapshot is None else model_snapshot.resolved_revision,
+                verified_tokenizer_revision=(
+                    None if tokenizer_snapshot is None else tokenizer_snapshot.resolved_revision
+                ),
+            )
         def validate_post_load():
             assert_no_offloaded_parameters(model)
             return derive_parameter_placement(model, requested_device=_device)
 
         parameter_placement = measured("post_load_validation", validate_post_load)
-        num_layers = len(model.model.layers)
-        num_kv_heads = model.config.num_key_value_heads
+        with execution_state.track("model architecture extraction"):
+            num_layers = len(model.model.layers)
+            num_kv_heads = model.config.num_key_value_heads
 
         measured("post_load_baseline", lambda: None)
 
@@ -1258,12 +1290,20 @@ def run_rkv_worker(
             cache_factory = lambda: DynamicCache()  # noqa: E731
 
         def _fresh_state() -> RealModelState:
-            cache = reset_patched_state(model, cache_factory)
-            provenance = ModelProvenance(layers={i: LayerProvenance.empty(num_kv_heads) for i in range(num_layers)})
-            return RealModelState(
-                model=model, cache=cache, model_provenance=provenance, compaction=CompactionTracker(),
-                absolute_position=0, device=_device,
-            )
+            # R1: tracked on every call -- both the immediate Pass-1
+            # invocation below and the later Pass-2 factory invocation
+            # inside `run_example` (already nested inside its own
+            # "rkv_complete_pass2" tracked span, exactly like the
+            # prefill/decode/snapshot sub-phases already nest there).
+            with execution_state.track("cache and state construction"):
+                cache = reset_patched_state(model, cache_factory)
+                provenance = ModelProvenance(
+                    layers={i: LayerProvenance.empty(num_kv_heads) for i in range(num_layers)}
+                )
+                return RealModelState(
+                    model=model, cache=cache, model_provenance=provenance, compaction=CompactionTracker(),
+                    absolute_position=0, device=_device,
+                )
 
         actual_calls = ActualModelCallRecorder()
         instrumented = _RkvHarnessInstrumentation(
@@ -1278,7 +1318,8 @@ def run_rkv_worker(
             problem_index=manifest.example_index, model_revision=config.model.revision,
             rkv_revision=config.rkv.upstream_revision,
         )
-        answer_verifier = build_math500_answer_fn(tokenizer, manifest.gold_answer)
+        with execution_state.track("answer verifier construction"):
+            answer_verifier = build_math500_answer_fn(tokenizer, manifest.gold_answer)
 
         def timed_answer_verifier(ids):
             return timer.measure("answer_verification", lambda: answer_verifier(ids))
@@ -1365,6 +1406,18 @@ def run_rkv_worker(
             # aborted example accumulated is threaded into the worker's
             # failure envelope, never silently reported as if the worker
             # had merely produced a smaller-than-expected count.
+            #
+            # R1: `run_example`'s own `operation_runner`/`pair_phase_runner`
+            # wiring (both the SAME tracked `measured`/`timer.measure`
+            # callables this worker's `execution_state` uses) already leaves
+            # `current_stage` at the specific pass/pair sub-phase that was
+            # executing when the abort happened -- overwriting it here
+            # unconditionally would DISCARD that more specific evidence.
+            # Only fall back to a typed, `invalid_stage`-derived label in the
+            # defensive case where that tracking somehow left
+            # `current_stage` colliding with `last_completed_stage` anyway.
+            if execution_state.current_stage == execution_state.last_completed_stage:
+                execution_state.enter(f"pair-evaluation loop abort:{example_result.invalid_stage}")
             raise RuntimeError(
                 f"pair-evaluation loop aborted at stage={example_result.invalid_stage!r}: "
                 f"{example_result.abort_failure_type}: {example_result.abort_failure_message}"
@@ -1387,65 +1440,78 @@ def run_rkv_worker(
             "call_trace_comparison",
             lambda: compare_call_boundary_traces(instrumented.pass1_trace, instrumented.pass2_trace),
         )
-        if not actual_calls.batch_size_verified:
-            raise WorkerFailedError("no valid actual model-call batch evidence was recorded")
-        batch_size = actual_calls.events[0].batch_size
-        from kvcot.discovery.b2a_evidence import (
-            build_no_op_evidence,
-            build_replay_evidence,
-            derive_compaction_positions,
-            derive_failed_pair_identities,
-        )
+        # R1: every derivation below reads `example_result`/`instrumented`/
+        # `actual_calls` after `run_example` has already returned -- none of
+        # it was previously tracked, so an unexpected exception here (e.g. a
+        # malformed `example_result` from an injected test double) reported
+        # `failing_stage` as "call_trace_comparison" (already completed),
+        # not this derivation step. (Kept OUTSIDE this block, not nested
+        # inside it -- `WorkerExecutionState.enter` has no stack, so a
+        # nested tracked call would leave `current_stage` stuck at its own
+        # name for the rest of the block instead of reverting to this
+        # block's.)
+        with execution_state.track("post-run evidence derivation"):
+            if not actual_calls.batch_size_verified:
+                raise WorkerFailedError("no valid actual model-call batch evidence was recorded")
+            batch_size = actual_calls.events[0].batch_size
+            from kvcot.discovery.b2a_evidence import (
+                build_no_op_evidence,
+                build_replay_evidence,
+                derive_compaction_positions,
+                derive_failed_pair_identities,
+            )
 
-        pass1_compaction_positions, pass2_compaction_positions = derive_compaction_positions(example_result)
-        compaction_lists_match = pass1_compaction_positions == pass2_compaction_positions
-        trajectory = derive_trajectory_parity_evidence(
-            pass2_result_valid=example_result.valid,
-            pass2_invalid_reason=example_result.pass2_invalid_reason,
-            call_boundary_all_match=call_boundary_comparison.all_match,
-            target_capture_gather_parities=tuple(
-                ev.gather_parity_passed for ev in example_result.minimized_target_evidence
-            ),
-            target_capture_absolute_parities=tuple(
-                ev.absolute_position_parity_passed for ev in example_result.minimized_target_evidence
-            ),
-            compaction_lists_match=compaction_lists_match,
-        )
-        pair_completion = derive_pair_completion_evidence(trace=example_result.trace, example_result=example_result)
-        semantic_swap_checks = derive_semantic_swap_check_evidence(example_result)
-        pair_identity = derive_pair_identity_evidence(example_result)
-        observed_retention_ratio = derive_observed_retention_ratio(example_result)
-        no_op_parity = derive_no_op_numerical_parity(example_result)
+            pass1_compaction_positions, pass2_compaction_positions = derive_compaction_positions(example_result)
+            compaction_lists_match = pass1_compaction_positions == pass2_compaction_positions
+            trajectory = derive_trajectory_parity_evidence(
+                pass2_result_valid=example_result.valid,
+                pass2_invalid_reason=example_result.pass2_invalid_reason,
+                call_boundary_all_match=call_boundary_comparison.all_match,
+                target_capture_gather_parities=tuple(
+                    ev.gather_parity_passed for ev in example_result.minimized_target_evidence
+                ),
+                target_capture_absolute_parities=tuple(
+                    ev.absolute_position_parity_passed for ev in example_result.minimized_target_evidence
+                ),
+                compaction_lists_match=compaction_lists_match,
+            )
+            pair_completion = derive_pair_completion_evidence(
+                trace=example_result.trace, example_result=example_result
+            )
+            semantic_swap_checks = derive_semantic_swap_check_evidence(example_result)
+            pair_identity = derive_pair_identity_evidence(example_result)
+            observed_retention_ratio = derive_observed_retention_ratio(example_result)
+            no_op_parity = derive_no_op_numerical_parity(example_result)
 
-        attempted_identities = list(example_result.attempted_pair_identities)
-        completed_identities = list(example_result.completed_pair_identities)
-        # F2: the SAME shared helpers `capture_partial_evidence` uses on the
-        # failure path -- one implementation of each derivation, never two.
-        failed_identities = derive_failed_pair_identities(
-            attempted_identities, completed_identities, pair_completion.pair_failure_details
-        )
-        no_op_evidence = build_no_op_evidence(example_result)
-        actual_call_export = actual_calls.export()
-        replay_evidence = build_replay_evidence(
-            example_result,
-            pass1_events=instrumented.pass1_trace.events,
-            pass2_events=instrumented.pass2_trace.events,
-            actual_call_export=actual_call_export,
-        )
-        pass1_synchronized_seconds = next(
-            (record.duration_seconds for record in timer.records if record.phase == "rkv_complete_pass1"), 0.0
-        )
-        pass2_synchronized_seconds = next(
-            (record.duration_seconds for record in timer.records if record.phase == "rkv_complete_pass2"), 0.0
-        )
-        real_pair_synchronized_seconds = [
-            record.duration_seconds for record in timer.records
-            if record.phase.startswith("real_pair:") and record.phase.count(":") == 3
-        ]
-        no_op_synchronized_seconds = [
-            record.duration_seconds for record in timer.records
-            if record.phase.startswith("no_op_pair:") and record.phase.count(":") == 3
-        ]
+            attempted_identities = list(example_result.attempted_pair_identities)
+            completed_identities = list(example_result.completed_pair_identities)
+            # F2: the SAME shared helpers `capture_partial_evidence` uses on the
+            # failure path -- one implementation of each derivation, never two.
+            failed_identities = derive_failed_pair_identities(
+                attempted_identities, completed_identities, pair_completion.pair_failure_details
+            )
+            no_op_evidence = build_no_op_evidence(example_result)
+            actual_call_export = actual_calls.export()
+            replay_evidence = build_replay_evidence(
+                example_result,
+                pass1_events=instrumented.pass1_trace.events,
+                pass2_events=instrumented.pass2_trace.events,
+                actual_call_export=actual_call_export,
+            )
+            pass1_synchronized_seconds = next(
+                (record.duration_seconds for record in timer.records if record.phase == "rkv_complete_pass1"), 0.0
+            )
+            pass2_synchronized_seconds = next(
+                (record.duration_seconds for record in timer.records if record.phase == "rkv_complete_pass2"), 0.0
+            )
+            real_pair_synchronized_seconds = [
+                record.duration_seconds for record in timer.records
+                if record.phase.startswith("real_pair:") and record.phase.count(":") == 3
+            ]
+            no_op_synchronized_seconds = [
+                record.duration_seconds for record in timer.records
+                if record.phase.startswith("no_op_pair:") and record.phase.count(":") == 3
+            ]
 
         execution_state.enter("result construction")
         selected_event_count_exact = pair_completion.selected_compaction_events == B2A_SELECTED_EVENTS
@@ -1591,11 +1657,6 @@ def run_rkv_worker(
             software_versions={"torch": torch.__version__},
         ).model_dump(mode="json")
     except Exception as exc:
-        from kvcot.discovery.worker_partial_evidence import WorkerBodyFailure, capture_partial_evidence
+        from kvcot.discovery.worker_partial_evidence import raise_worker_body_failure
 
-        evidence = capture_partial_evidence(
-            role="rkv", failing_stage=execution_state.current_stage, exc=exc,
-            scope=locals(), attempt_id=execution_state.attempt_id,
-            last_completed_stage=execution_state.last_completed_stage,
-        )
-        raise WorkerBodyFailure(evidence, exc) from exc
+        raise_worker_body_failure(role="rkv", execution_state=execution_state, exc=exc, scope=locals())

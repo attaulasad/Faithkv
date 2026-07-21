@@ -9,11 +9,41 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from kvcot.discovery.attempt_verification import verify_attempt_artifacts, verify_worker_envelopes
+from kvcot.discovery.attempt_artifacts import B1_REPAIR_ROUND4_STARTING_COMMIT, B1_REQUIRED_ANCESTOR_SHAS
+from kvcot.discovery.attempt_verification import REQUIRED_BRANCH, verify_attempt_artifacts, verify_worker_envelopes
 from kvcot.discovery.constants import B2A_WORKER_TIMEOUT_SECONDS
+from kvcot.discovery.discovery_config import PINNED_RKV_UPSTREAM_REVISION
 from kvcot.utils.hashing import sha256_json
 
 ATTEMPT_ID = "attempt-1"
+
+
+def _valid_provenance_payload() -> dict:
+    return {
+        "git": {
+            "branch": REQUIRED_BRANCH,
+            "head": "a" * 40,
+            "origin_branch_sha": "a" * 40,
+            "dirty": False,
+            "staged_paths": [],
+            "unstaged_paths": [],
+            "untracked_paths": [],
+            "starting_commit": B1_REPAIR_ROUND4_STARTING_COMMIT,
+            "required_ancestry": {sha: True for sha in B1_REQUIRED_ANCESTOR_SHAS},
+            "all_required_ancestry_verified": True,
+            "rkv_submodule_sha": PINNED_RKV_UPSTREAM_REVISION,
+            "expected_rkv_sha": PINNED_RKV_UPSTREAM_REVISION,
+            "rkv_submodule_match": True,
+        },
+        "software": {"python": "3.11.15", "torch": "2.5.1"},
+        "system": {
+            "os": "Linux", "platform": "Linux-x86_64", "kernel_release": "6.8.0", "architecture": "x86_64",
+            "cpu": "x86_64", "logical_cpu_count": 8, "total_physical_ram_bytes": 34359738368,
+        },
+        "gpu_evidence_cross_references": [
+            "preflight.json:device", "fullkv/result.json:device_evidence", "rkv/result.json:device_evidence",
+        ],
+    }
 
 
 def _write(path: Path, payload) -> None:
@@ -127,9 +157,7 @@ def _build_valid_attempt(tmp_path: Path) -> tuple[Path, dict, dict]:
             "cudnn_version": "8902", "policy_satisfied": True, "verified": True,
         },
     })
-    _write(attempt_dir / "provenance.json", {
-        "git": {"dirty": False, "rkv_submodule_match": True, "head": "a" * 40},
-    })
+    _write(attempt_dir / "provenance.json", _valid_provenance_payload())
     _write(attempt_dir / "process_outcome.json", {
         "attempt_id": ATTEMPT_ID,
         "return_codes": {"fullkv": 0, "rkv": 0},
@@ -380,22 +408,291 @@ def test_verify_attempt_artifacts_fails_on_missing_started_at(tmp_path):
     assert any("started_at" in r for r in reasons)
 
 
-def test_verify_attempt_artifacts_validates_completion_agreement_when_present(tmp_path):
-    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
-    _write(attempt_dir / "completion.json", {
+def _valid_completion_payload() -> dict:
+    return {
         "attempt_id": ATTEMPT_ID, "finished_at": "2026-01-01T00:30:00+00:00",
         "outcome": "gate_passed", "exit_code": 0, "gate_passed": True,
-    })
+        "intended_final_relative_path": "final.json",
+        "config_hash": "c" * 64, "manifest_hash": "m" * 64,
+    }
+
+
+def test_verify_attempt_artifacts_validates_completion_agreement_when_present(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    _write(attempt_dir / "completion.json", _valid_completion_payload())
     verified, reasons = _verify(attempt_dir, fullkv_result, rkv_result)
+    assert reasons == ()
     assert verified is True
 
-    _write_over(attempt_dir / "completion.json", {
-        "attempt_id": ATTEMPT_ID, "finished_at": "2026-01-01T00:30:00+00:00",
-        "outcome": "gate_passed", "exit_code": 2, "gate_passed": False,
-    })
+    bad = _valid_completion_payload()
+    bad["exit_code"] = 2
+    bad["gate_passed"] = False
+    _write_over(attempt_dir / "completion.json", bad)
     verified, reasons = _verify(attempt_dir, fullkv_result, rkv_result)
     assert verified is False
     assert any("disagrees with exit_code" in r for r in reasons)
+
+
+# ---------------------------------------------------------------------------
+# R2 (residual independent-audit repair): completion.json must fail closed --
+# a missing/null/malformed/mismatched required field is always rejected,
+# never silently accepted, and a self-consistent but non-"gate_passed"
+# outcome (e.g. "gate_failed") is rejected by this successful-attempt
+# verifier too.
+# ---------------------------------------------------------------------------
+
+
+def test_verify_attempt_artifacts_fails_on_missing_completion_attempt_id(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    completion = _valid_completion_payload()
+    del completion["attempt_id"]
+    _write(attempt_dir / "completion.json", completion)
+    verified, reasons = _verify(attempt_dir, fullkv_result, rkv_result)
+    assert verified is False
+    assert any("completion.json has no attempt_id" in r for r in reasons)
+
+
+def test_verify_attempt_artifacts_fails_on_null_completion_attempt_id(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    completion = _valid_completion_payload()
+    completion["attempt_id"] = None
+    _write(attempt_dir / "completion.json", completion)
+    verified, reasons = _verify(attempt_dir, fullkv_result, rkv_result)
+    assert verified is False
+    assert any("completion.json has no attempt_id" in r for r in reasons)
+
+
+def test_verify_attempt_artifacts_fails_on_mismatched_completion_attempt_id(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    completion = _valid_completion_payload()
+    completion["attempt_id"] = "different-attempt-id"
+    _write(attempt_dir / "completion.json", completion)
+    verified, reasons = _verify(attempt_dir, fullkv_result, rkv_result)
+    assert verified is False
+    assert any("completion.json attempt_id does not match invocation.json" in r for r in reasons)
+
+
+def test_verify_attempt_artifacts_fails_on_missing_or_mismatched_completion_hashes(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+
+    missing_config = _valid_completion_payload()
+    del missing_config["config_hash"]
+    _write(attempt_dir / "completion.json", missing_config)
+    verified, reasons = _verify(attempt_dir, fullkv_result, rkv_result)
+    assert verified is False
+    assert any("completion.json has no config_hash" in r for r in reasons)
+
+    missing_manifest = _valid_completion_payload()
+    del missing_manifest["manifest_hash"]
+    _write_over(attempt_dir / "completion.json", missing_manifest)
+    verified, reasons = _verify(attempt_dir, fullkv_result, rkv_result)
+    assert verified is False
+    assert any("completion.json has no manifest_hash" in r for r in reasons)
+
+    _write_over(attempt_dir / "completion.json", _valid_completion_payload())
+    verified, reasons = _verify(
+        attempt_dir, fullkv_result, rkv_result,
+        expected_config_hash="f" * 64, expected_manifest_hash="m" * 64,
+    )
+    assert verified is False
+    assert any("completion.json config_hash does not match" in r for r in reasons)
+
+    verified, reasons = _verify(
+        attempt_dir, fullkv_result, rkv_result,
+        expected_config_hash="c" * 64, expected_manifest_hash="z" * 64,
+    )
+    assert verified is False
+    assert any("completion.json manifest_hash does not match" in r for r in reasons)
+
+
+def test_verify_attempt_artifacts_fails_on_missing_or_wrong_intended_final_relative_path(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+
+    missing = _valid_completion_payload()
+    del missing["intended_final_relative_path"]
+    _write(attempt_dir / "completion.json", missing)
+    verified, reasons = _verify(attempt_dir, fullkv_result, rkv_result)
+    assert verified is False
+    assert any("intended_final_relative_path" in r and "final.json" in r for r in reasons)
+
+    wrong = _valid_completion_payload()
+    wrong["intended_final_relative_path"] = "not_final.json"
+    _write_over(attempt_dir / "completion.json", wrong)
+    verified, reasons = _verify(attempt_dir, fullkv_result, rkv_result)
+    assert verified is False
+    assert any("intended_final_relative_path" in r and "final.json" in r for r in reasons)
+
+
+def test_verify_attempt_artifacts_rejects_self_consistent_non_gate_passed_outcome(tmp_path):
+    """A `gate_failed` (or `exception`) completion.json can be internally
+    self-consistent (exit_code/gate_passed genuinely agree with `outcome`)
+    and still must be rejected -- this is the successful-attempt verifier,
+    never a generic self-consistency checker."""
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    gate_failed = _valid_completion_payload()
+    gate_failed["outcome"] = "gate_failed"
+    gate_failed["exit_code"] = 2
+    gate_failed["gate_passed"] = False
+    _write(attempt_dir / "completion.json", gate_failed)
+    verified, reasons = _verify(attempt_dir, fullkv_result, rkv_result)
+    assert verified is False
+    assert any("is not 'gate_passed'" in r for r in reasons)
+    # Self-consistency itself is not violated -- only the stricter
+    # successful-attempt requirement is.
+    assert not any("disagrees with exit_code" in r for r in reasons)
+
+
+# ---------------------------------------------------------------------------
+# R3 (residual independent-audit repair): the collected provenance's
+# experiment-identity and repository-integrity fields must be enforced, not
+# only the narrow dirty/rkv_submodule_match/head checks that predated this
+# repair.
+# ---------------------------------------------------------------------------
+
+
+def _mutate_git(tmp_path, attempt_dir, fullkv_result, rkv_result, **overrides):
+    provenance = _valid_provenance_payload()
+    provenance["git"].update(overrides)
+    _write_over(attempt_dir / "provenance.json", provenance)
+    return _verify(attempt_dir, fullkv_result, rkv_result)
+
+
+def test_verify_attempt_artifacts_fails_on_wrong_branch(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    verified, reasons = _mutate_git(tmp_path, attempt_dir, fullkv_result, rkv_result, branch="main")
+    assert verified is False
+    assert any("branch !=" in r for r in reasons)
+
+
+def test_verify_attempt_artifacts_fails_on_origin_sha_mismatch(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    verified, reasons = _mutate_git(tmp_path, attempt_dir, fullkv_result, rkv_result, origin_branch_sha="b" * 40)
+    assert verified is False
+    assert any("origin_branch_sha does not match head" in r for r in reasons)
+
+
+def test_verify_attempt_artifacts_fails_on_non_hex_head(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    verified, reasons = _mutate_git(tmp_path, attempt_dir, fullkv_result, rkv_result, head="z" * 40)
+    assert verified is False
+    assert any("no 40-hex HEAD SHA" in r for r in reasons)
+
+
+def test_verify_attempt_artifacts_fails_on_missing_ancestry_entry(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    incomplete = {sha: True for sha in B1_REQUIRED_ANCESTOR_SHAS}
+    del incomplete[B1_REQUIRED_ANCESTOR_SHAS[0]]
+    verified, reasons = _mutate_git(tmp_path, attempt_dir, fullkv_result, rkv_result, required_ancestry=incomplete)
+    assert verified is False
+    assert any("required_ancestry does not attest" in r for r in reasons)
+
+
+def test_verify_attempt_artifacts_fails_on_false_ancestry_result(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    false_one = {sha: True for sha in B1_REQUIRED_ANCESTOR_SHAS}
+    false_one[B1_REQUIRED_ANCESTOR_SHAS[1]] = False
+    verified, reasons = _mutate_git(
+        tmp_path, attempt_dir, fullkv_result, rkv_result,
+        required_ancestry=false_one, all_required_ancestry_verified=False,
+    )
+    assert verified is False
+    assert any("required_ancestry does not attest" in r for r in reasons)
+    assert any("all_required_ancestry_verified is not true" in r for r in reasons)
+
+
+def test_verify_attempt_artifacts_fails_on_wrong_starting_commit(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    verified, reasons = _mutate_git(tmp_path, attempt_dir, fullkv_result, rkv_result, starting_commit="f" * 40)
+    assert verified is False
+    assert any("starting_commit !=" in r for r in reasons)
+
+
+def test_verify_attempt_artifacts_fails_on_wrong_expected_rkv_sha(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    verified, reasons = _mutate_git(tmp_path, attempt_dir, fullkv_result, rkv_result, expected_rkv_sha="d" * 40)
+    assert verified is False
+    assert any("expected_rkv_sha !=" in r for r in reasons)
+    # rkv_submodule_sha (still the real pinned value) now disagrees with the
+    # tampered expected_rkv_sha too -- both are independently reported.
+    assert any("rkv_submodule_sha does not match expected_rkv_sha" in r for r in reasons)
+
+
+def test_verify_attempt_artifacts_fails_on_nonempty_staged_unstaged_untracked_paths(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    verified, reasons = _mutate_git(tmp_path, attempt_dir, fullkv_result, rkv_result, staged_paths=["dirty_file.py"])
+    assert verified is False
+    assert any("staged_paths is not empty" in r for r in reasons)
+
+    verified, reasons = _mutate_git(tmp_path, attempt_dir, fullkv_result, rkv_result, unstaged_paths=["x.py"])
+    assert verified is False
+    assert any("unstaged_paths is not empty" in r for r in reasons)
+
+    verified, reasons = _mutate_git(tmp_path, attempt_dir, fullkv_result, rkv_result, untracked_paths=["y.py"])
+    assert verified is False
+    assert any("untracked_paths is not empty" in r for r in reasons)
+
+
+def test_verify_attempt_artifacts_fails_on_missing_system_block(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    provenance = _valid_provenance_payload()
+    del provenance["system"]
+    _write_over(attempt_dir / "provenance.json", provenance)
+    verified, reasons = _verify(attempt_dir, fullkv_result, rkv_result)
+    assert verified is False
+    assert any("has no system evidence" in r for r in reasons)
+
+
+def test_verify_attempt_artifacts_fails_on_malformed_total_ram(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    provenance = _valid_provenance_payload()
+    provenance["system"]["total_physical_ram_bytes"] = -1
+    _write_over(attempt_dir / "provenance.json", provenance)
+    verified, reasons = _verify(attempt_dir, fullkv_result, rkv_result)
+    assert verified is False
+    assert any("total_physical_ram_bytes is neither a positive int nor null" in r for r in reasons)
+
+    provenance["system"]["total_physical_ram_bytes"] = None
+    _write_over(attempt_dir / "provenance.json", provenance)
+    verified, reasons = _verify(attempt_dir, fullkv_result, rkv_result)
+    assert reasons == ()
+    assert verified is True  # honestly-null RAM is accepted, never rejected
+
+
+def test_verify_attempt_artifacts_fails_on_missing_gpu_evidence_cross_reference(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    provenance = _valid_provenance_payload()
+    provenance["gpu_evidence_cross_references"] = ["preflight.json:device"]
+    _write_over(attempt_dir / "provenance.json", provenance)
+    verified, reasons = _verify(attempt_dir, fullkv_result, rkv_result)
+    assert verified is False
+    assert any("gpu_evidence_cross_references does not exactly name" in r for r in reasons)
+
+
+def test_verify_attempt_artifacts_fails_on_missing_software_mapping(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    provenance = _valid_provenance_payload()
+    provenance["software"] = {}
+    _write_over(attempt_dir / "provenance.json", provenance)
+    verified, reasons = _verify(attempt_dir, fullkv_result, rkv_result)
+    assert verified is False
+    assert any("has no software version mapping" in r for r in reasons)
+
+
+def test_verify_attempt_artifacts_fails_on_wrong_exit_code_or_gate_passed_despite_matching_outcome(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    bad = _valid_completion_payload()
+    bad["exit_code"] = 1
+    _write(attempt_dir / "completion.json", bad)
+    verified, reasons = _verify(attempt_dir, fullkv_result, rkv_result)
+    assert verified is False
+    assert any("exit_code" in r and "!= 0" in r for r in reasons)
+
+    bad2 = _valid_completion_payload()
+    bad2["gate_passed"] = False
+    _write_over(attempt_dir / "completion.json", bad2)
+    verified, reasons = _verify(attempt_dir, fullkv_result, rkv_result)
+    assert verified is False
+    assert any("gate_passed" in r and "is not True" in r for r in reasons)
 
 
 def test_verify_attempt_artifacts_fails_on_completion_before_invocation_start(tmp_path):

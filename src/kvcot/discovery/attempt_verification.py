@@ -95,6 +95,98 @@ KNOWN_PROGRESS_STATUSES: frozenset[str] = frozenset({"started", "completed", "fa
 
 _ARGV_SECRET_MARKERS = ("token", "secret", "password", "authorization")
 
+# R3 (residual independent-audit repair): experiment-identity and repository-
+# integrity constants the collected `provenance.json` (`kvcot.discovery
+# .attempt_artifacts.collect_execution_provenance`) is cross-checked against.
+# `PINNED_RKV_UPSTREAM_REVISION` is imported (never duplicated) from
+# `kvcot.discovery.discovery_config` at the point of use below.
+REQUIRED_BRANCH = "research/b1b-r4-final-b2a-closure"
+_REQUIRED_SYSTEM_KEYS = ("os", "platform", "kernel_release", "architecture", "cpu")
+_REQUIRED_GPU_EVIDENCE_CROSS_REFERENCES = frozenset({
+    "preflight.json:device", "fullkv/result.json:device_evidence", "rkv/result.json:device_evidence",
+})
+
+
+def _is_hex_sha(value: Any, *, length: int = 40) -> bool:
+    return isinstance(value, str) and len(value) == length and all(c in "0123456789abcdef" for c in value.lower())
+
+
+def _verify_provenance(provenance: dict[str, Any], reasons: list[str]) -> None:
+    """R3: enforces the parts of the collected provenance that determine
+    experiment identity and repository integrity -- never unstable
+    cosmetic fields. `git_evidence`/`system`/`software` are each optional
+    at the dict-shape level (reported once if entirely absent) but every
+    field checked below is required once its parent dict is present."""
+    from kvcot.discovery.attempt_artifacts import B1_REPAIR_ROUND4_STARTING_COMMIT, B1_REQUIRED_ANCESTOR_SHAS
+    from kvcot.discovery.discovery_config import PINNED_RKV_UPSTREAM_REVISION
+
+    git_evidence = provenance.get("git")
+    if not isinstance(git_evidence, dict):
+        reasons.append("provenance.json has no git evidence")
+    else:
+        if git_evidence.get("branch") != REQUIRED_BRANCH:
+            reasons.append(f"provenance.json git evidence branch != {REQUIRED_BRANCH!r}")
+        head = git_evidence.get("head")
+        if not _is_hex_sha(head):
+            reasons.append("provenance.json git evidence has no 40-hex HEAD SHA")
+        origin_branch_sha = git_evidence.get("origin_branch_sha")
+        if origin_branch_sha != head:
+            reasons.append("provenance.json git evidence origin_branch_sha does not match head")
+        if git_evidence.get("starting_commit") != B1_REPAIR_ROUND4_STARTING_COMMIT:
+            reasons.append(f"provenance.json starting_commit != {B1_REPAIR_ROUND4_STARTING_COMMIT!r}")
+        required_ancestry = git_evidence.get("required_ancestry")
+        if not isinstance(required_ancestry, dict) or not all(
+            required_ancestry.get(sha) is True for sha in B1_REQUIRED_ANCESTOR_SHAS
+        ):
+            reasons.append(
+                f"provenance.json required_ancestry does not attest all of {list(B1_REQUIRED_ANCESTOR_SHAS)} as true"
+            )
+        if git_evidence.get("all_required_ancestry_verified") is not True:
+            reasons.append("provenance.json all_required_ancestry_verified is not true")
+        expected_rkv_sha = git_evidence.get("expected_rkv_sha")
+        if expected_rkv_sha != PINNED_RKV_UPSTREAM_REVISION:
+            reasons.append(f"provenance.json expected_rkv_sha != {PINNED_RKV_UPSTREAM_REVISION!r}")
+        observed_rkv_sha = git_evidence.get("rkv_submodule_sha")
+        if observed_rkv_sha != expected_rkv_sha:
+            reasons.append("provenance.json rkv_submodule_sha does not match expected_rkv_sha")
+        if git_evidence.get("rkv_submodule_match") is not True:
+            reasons.append("provenance.json git evidence does not attest the pinned R-KV submodule")
+        if git_evidence.get("dirty") is not False:
+            reasons.append("provenance.json git evidence does not attest a clean working tree")
+        for field in ("staged_paths", "unstaged_paths", "untracked_paths"):
+            value = git_evidence.get(field)
+            if not isinstance(value, list) or len(value) != 0:
+                reasons.append(f"provenance.json git evidence {field} is not empty")
+
+    system = provenance.get("system")
+    if not isinstance(system, dict):
+        reasons.append("provenance.json has no system evidence")
+    else:
+        missing_keys = [key for key in _REQUIRED_SYSTEM_KEYS if not system.get(key)]
+        if missing_keys:
+            reasons.append(f"provenance.json system evidence missing keys: {missing_keys}")
+        logical_cpu_count = system.get("logical_cpu_count")
+        if logical_cpu_count is not None and (
+            not isinstance(logical_cpu_count, int) or isinstance(logical_cpu_count, bool) or logical_cpu_count <= 0
+        ):
+            reasons.append("provenance.json system evidence logical_cpu_count is invalid")
+        total_ram = system.get("total_physical_ram_bytes")
+        if total_ram is not None and (
+            not isinstance(total_ram, int) or isinstance(total_ram, bool) or total_ram <= 0
+        ):
+            reasons.append("provenance.json system evidence total_physical_ram_bytes is neither a positive int nor null")
+
+    software = provenance.get("software")
+    if not isinstance(software, dict) or not software:
+        reasons.append("provenance.json has no software version mapping")
+
+    gpu_refs = provenance.get("gpu_evidence_cross_references")
+    if not isinstance(gpu_refs, list) or set(gpu_refs) != _REQUIRED_GPU_EVIDENCE_CROSS_REFERENCES:
+        reasons.append(
+            "provenance.json gpu_evidence_cross_references does not exactly name the required "
+            f"evidence locations: {sorted(_REQUIRED_GPU_EVIDENCE_CROSS_REFERENCES)}"
+        )
+
 
 def verify_progress_stage_completeness(
     events: list[dict[str, Any]], *, role: str
@@ -358,17 +450,7 @@ def verify_attempt_artifacts(
 
     provenance = load_json("provenance.json")
     if provenance is not None:
-        git_evidence = provenance.get("git")
-        if not isinstance(git_evidence, dict):
-            reasons.append("provenance.json has no git evidence")
-        else:
-            if git_evidence.get("dirty") is not False:
-                reasons.append("provenance.json git evidence does not attest a clean working tree")
-            if git_evidence.get("rkv_submodule_match") is not True:
-                reasons.append("provenance.json git evidence does not attest the pinned R-KV submodule")
-            head = git_evidence.get("head")
-            if not isinstance(head, str) or len(head) != 40:
-                reasons.append("provenance.json git evidence has no 40-hex HEAD SHA")
+        _verify_provenance(provenance, reasons)
 
     process_outcome = load_json("process_outcome.json")
     if process_outcome is not None:
@@ -397,8 +479,37 @@ def verify_attempt_artifacts(
         elif _parseable_timestamp(invocation_started_at):
             if datetime.fromisoformat(invocation_started_at) > datetime.fromisoformat(finished_at):
                 reasons.append("completion.json finished_at precedes invocation.json started_at")
-        if attempt_id is not None and completion.get("attempt_id") not in (None, attempt_id):
+
+        # R2 (residual independent-audit repair): exact, non-optional
+        # agreement -- a missing/null `attempt_id` must fail. The prior
+        # `completion.get("attempt_id") in (None, attempt_id)` treated a
+        # missing field as vacuously acceptable; a present-but-wrong ID was
+        # the only thing it ever caught.
+        completion_attempt_id = completion.get("attempt_id")
+        if not isinstance(completion_attempt_id, str) or not completion_attempt_id:
+            reasons.append("completion.json has no attempt_id")
+        elif attempt_id is not None and completion_attempt_id != attempt_id:
             reasons.append("completion.json attempt_id does not match invocation.json")
+
+        completion_config_hash = completion.get("config_hash")
+        if not isinstance(completion_config_hash, str) or not completion_config_hash:
+            reasons.append("completion.json has no config_hash")
+        elif expected_config_hash is not None and completion_config_hash != expected_config_hash:
+            reasons.append("completion.json config_hash does not match the coordinator's config hash")
+
+        completion_manifest_hash = completion.get("manifest_hash")
+        if not isinstance(completion_manifest_hash, str) or not completion_manifest_hash:
+            reasons.append("completion.json has no manifest_hash")
+        elif expected_manifest_hash is not None and completion_manifest_hash != expected_manifest_hash:
+            reasons.append("completion.json manifest_hash does not match the coordinator's manifest hash")
+
+        intended_final_relative_path = completion.get("intended_final_relative_path")
+        if intended_final_relative_path != "final.json":
+            reasons.append(
+                "completion.json intended_final_relative_path "
+                f"{intended_final_relative_path!r} != 'final.json'"
+            )
+
         outcome = completion.get("outcome")
         exit_code = completion.get("exit_code")
         gate_passed = completion.get("gate_passed")
@@ -413,6 +524,15 @@ def verify_attempt_artifacts(
             reasons.append(
                 f"completion.json outcome {outcome!r} disagrees with exit_code={exit_code!r}/gate_passed={gate_passed!r}"
             )
+        # This is the ONE authoritative SUCCESSFUL-attempt verifier -- a
+        # self-consistent "gate_failed"/"exception" completion is still
+        # rejected here, never treated as an equally-valid third outcome.
+        if outcome != "gate_passed":
+            reasons.append(f"completion.json outcome {outcome!r} is not 'gate_passed' (a successful attempt)")
+        if exit_code != 0:
+            reasons.append(f"completion.json exit_code {exit_code!r} != 0")
+        if gate_passed is not True:
+            reasons.append(f"completion.json gate_passed {gate_passed!r} is not True")
 
     # ---- per-worker artifacts ------------------------------------------
     results_by_role = {"fullkv": fullkv_result, "rkv": rkv_result}
