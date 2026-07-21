@@ -32,6 +32,37 @@ REQUIRED_ATTEMPT_FILES: frozenset[str] = frozenset({
     "rkv/pair_identities.json", "rkv/semantic_swaps.json", "rkv/replay_evidence.json",
 })
 
+# Independent-audit Gate H7.4: the exact durable progress-journal stage
+# names BOTH worker bodies (`kvcot.discovery.b2a_workers.run_fullkv_worker`/
+# `run_rkv_worker`, via `_progress_stage_for_phase`) and the worker entry
+# point (`kvcot.discovery.b2a_worker_entry.main`) actually emit in
+# production -- derived directly from that code, never from an aspirational
+# list broader than what this repository's worker journals can produce.
+# Stages the CLI/coordinator itself records (device preflight, coordinator
+# gate evaluation, final artifact construction) live in separate artifacts
+# (`preflight.json`, `final.json`) and are intentionally excluded here.
+_COMMON_REQUIRED_PROGRESS_STAGES: tuple[str, ...] = (
+    "startup", "config validation", "manifest validation", "snapshot resolution",
+    "tokenizer load", "model-load start", "model-load completion", "runtime verification",
+    "result construction", "envelope construction",
+)
+FULLKV_REQUIRED_PROGRESS_STAGES: tuple[str, ...] = _COMMON_REQUIRED_PROGRESS_STAGES
+RKV_REQUIRED_PROGRESS_STAGES: tuple[str, ...] = _COMMON_REQUIRED_PROGRESS_STAGES + (
+    "Pass 1", "Pass 2", "compact-target conversion", "each real pair", "no-op",
+)
+
+
+def verify_progress_stage_completeness(
+    events: list[dict[str, Any]], *, role: str
+) -> tuple[bool, tuple[str, ...]]:
+    """Checks a parsed progress journal (a list of `append_progress`-shaped
+    event dicts) for at least one `status="completed"` event per required
+    stage for `role`. Returns `(complete, missing_stages)`."""
+    required = RKV_REQUIRED_PROGRESS_STAGES if role == "rkv" else FULLKV_REQUIRED_PROGRESS_STAGES
+    completed_stages = {event.get("stage") for event in events if event.get("status") == "completed"}
+    missing = tuple(stage for stage in required if stage not in completed_stages)
+    return (len(missing) == 0), missing
+
 
 def verify_attempt_artifacts(
     attempt_directory: Path, *, fullkv_result: dict[str, Any], rkv_result: dict[str, Any]
@@ -125,6 +156,13 @@ def verify_attempt_artifacts(
                 reasons.append(f"{role}/progress.jsonl contains no events")
             elif any(event.get("worker_role") not in (role, None) for event in progress):
                 reasons.append(f"{role}/progress.jsonl contains an event for a different worker_role")
+            else:
+                # Independent-audit Gate H7.4: not just "non-empty" -- every
+                # required named stage for this role must have a real
+                # "completed" event.
+                stage_complete, missing_stages = verify_progress_stage_completeness(progress, role=role)
+                if not stage_complete:
+                    reasons.append(f"{role}/progress.jsonl is missing required stage(s): {list(missing_stages)}")
 
     if len(envelope_attempt_ids) > 1:
         reasons.append(f"fullkv/rkv envelopes disagree on attempt_id: {sorted(envelope_attempt_ids)}")

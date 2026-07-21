@@ -197,7 +197,9 @@ def build_plan(config: DiscoveryConfig, manifest_path: Path = DEFAULT_MANIFEST_P
     )
 
 
-def _render_and_tokenize(row: dict[str, Any], tokenizer_name: str, tokenizer_revision: str):
+def _render_and_tokenize(
+    row: dict[str, Any], tokenizer_name: str, tokenizer_revision: str, *, local_only_path: str | None = None
+):
     """The exact frozen chat-template call
     (`kvcot.cli.cmd_generate`'s own call shape, byte-for-byte identical --
     see module docstring of `kvcot.discovery.manifest`): one user message,
@@ -212,12 +214,30 @@ def _render_and_tokenize(row: dict[str, Any], tokenizer_name: str, tokenizer_rev
     that has already downloaded weights for a real, separately-authorized
     run must not fail generic prompt verification). The weight-cache safety
     guard lives ONLY around `resolve_prompt_identity`'s own call site,
-    scoped to manifest preparation specifically."""
+    scoped to manifest preparation specifically.
+
+    Independent-audit Gate H4.5 repair: `local_only_path`, when supplied
+    (`b2a_execute._verify_resolved_prompt_identity`'s call, after it has
+    already independently resolved and verified the exact local tokenizer
+    snapshot via `kvcot.discovery.snapshot_boundary.resolve_local_snapshot`),
+    loads the tokenizer from that EXACT verified local directory with
+    `local_files_only=True` -- the same strict local-asset boundary the
+    workers themselves use -- instead of `tokenizer_name`/`tokenizer_revision`
+    resolved through `huggingface_hub`'s normal (potentially network-
+    touching) cache lookup. `prepare-b2a-manifest`'s own call
+    (`resolve_prompt_identity` below) never passes this -- it is the one
+    place a live, network-capable tokenizer resolution remains explicitly
+    authorized (CLAUDE.md's tokenizer-only allowance), unchanged by this
+    repair. Defaults to `None`, preserving prior behavior exactly for that
+    caller."""
     from transformers import AutoTokenizer
 
     from kvcot.probes.templates import render_base_user_message
 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, revision=tokenizer_revision, use_fast=True)
+    if local_only_path is not None:
+        tokenizer = AutoTokenizer.from_pretrained(local_only_path, local_files_only=True, use_fast=True)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, revision=tokenizer_revision, use_fast=True)
 
     if tokenizer.chat_template is None:
         raise ManifestPreparationError(

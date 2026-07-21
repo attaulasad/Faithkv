@@ -121,6 +121,65 @@ def test_main_writes_only_failure_envelope_not_a_result_file_on_exception(monkey
     assert "simulated worker crash" in captured.err
 
 
+def test_main_does_not_duplicate_live_progress_events_on_success(monkeypatch, tmp_path):
+    """Independent-audit Gate H6.4: the worker body already appends a
+    ("<stage>", "completed") progress event LIVE, as each phase finishes
+    (via `_production_progress_callback`, exactly like the real
+    `run_fullkv_worker`/`run_rkv_worker` bodies do through `measured()`).
+    `main()`'s success path must NOT materialize a second, redundant
+    "completed" event for the same stage by replaying the final timing
+    list -- each named stage must appear in `progress.jsonl` exactly
+    once."""
+    from kvcot.discovery.b2a_workers import _production_progress_callback
+
+    _patch_loaders(monkeypatch)
+
+    def fake_run_fullkv_worker(config, manifest):
+        # Simulates the REAL body's live-progress behavior: obtains the
+        # same production progress callback the real worker uses, and
+        # emits "completed" events for each named phase as it "finishes"
+        # them -- exactly what `kvcot.discovery.b2a_workers.measured` does
+        # through `_progress_stage_for_phase`.
+        emit = _production_progress_callback("fullkv")
+        for stage in ("snapshot resolution", "tokenizer load", "model-load completion", "runtime verification"):
+            if emit is not None:
+                emit(stage, "completed", None)
+        return {
+            "role": "fullkv",
+            "determinism_policy": {"framework_seed": 13},
+            "runtime_identity": {"resolved_model_revision": "modelrev", "resolved_tokenizer_revision": "tokrev"},
+            "timing_evidence": [
+                {"phase": "snapshot_tokenizer_resolution", "duration_seconds": 0.1, "completed": True},
+                {"phase": "tokenizer_load", "duration_seconds": 0.1, "completed": True},
+                {"phase": "model_load", "duration_seconds": 1.0, "completed": True},
+                {"phase": "post_load_validation", "duration_seconds": 0.05, "completed": True},
+            ],
+        }
+
+    monkeypatch.setattr("kvcot.discovery.b2a_workers.run_fullkv_worker", fake_run_fullkv_worker)
+    output_path = tmp_path / "fullkv_result.json"
+
+    exit_code = b2a_worker_entry.main([
+        "--role", "fullkv", "--config", "cfg.yaml", "--manifest", "manifest.json",
+        "--output", str(output_path), "--attempt-id", "dup-test-attempt",
+    ])
+    assert exit_code == 0
+
+    progress_path = tmp_path / "progress.jsonl"
+    assert progress_path.is_file()
+    events = [json.loads(line) for line in progress_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    completed_stage_counts: dict[str, int] = {}
+    for event in events:
+        if event["status"] == "completed":
+            completed_stage_counts[event["stage"]] = completed_stage_counts.get(event["stage"], 0) + 1
+
+    for stage in ("snapshot resolution", "tokenizer load", "model-load completion", "runtime verification"):
+        assert completed_stage_counts.get(stage) == 1, (
+            f"stage {stage!r} was recorded {completed_stage_counts.get(stage)} time(s), expected exactly 1 "
+            f"(live-tracked and NOT re-materialized after success)"
+        )
+
+
 def test_main_threads_worker_body_failure_partial_evidence_into_envelope(monkeypatch, tmp_path, capsys):
     """Independent-audit Gate H1: when the worker body raises a
     `WorkerBodyFailure` (real production behavior after the Gate H1 repair

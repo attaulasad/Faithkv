@@ -42,7 +42,10 @@ def test_every_required_timing_phase_is_emitted_somewhere_in_production_code():
         RKV_REQUIRED_TIMING_PHASES,
     )
 
-    emitting_source = _read(SRC_DISCOVERY / "b2a_workers.py") + _read(SRC_DISCOVERY / "pipeline.py")
+    emitting_source = (
+        _read(SRC_DISCOVERY / "b2a_workers.py") + _read(SRC_DISCOVERY / "pipeline.py")
+        + _read(SRC_DISCOVERY / "capture.py")
+    )
     # `rkv_pass1_prefill`/`rkv_pass1_decode`/`rkv_pass2_prefill`/
     # `rkv_pass2_decode` are constructed dynamically
     # (`f"rkv_{pass_name}_prefill"`/`f"rkv_{pass_name}_decode"` in

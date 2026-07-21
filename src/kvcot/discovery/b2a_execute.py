@@ -94,8 +94,32 @@ def _verify_resolved_prompt_identity(config, manifest) -> dict[str, Any]:
     if fetched.row["answer"] != manifest.gold_answer:
         raise B2AExecutionRefused("re-fetched row answer does not match manifest.gold_answer.")
 
+    # Independent-audit Gate H4.5 repair: this verification used to call
+    # `_render_and_tokenize` with only `tokenizer_name`/`tokenizer_revision`
+    # -- resolved through `huggingface_hub`'s ordinary (potentially
+    # network-touching) cache lookup, never proven local-only, despite this
+    # whole function's purpose being to verify a STRICT local-snapshot
+    # boundary. The exact local tokenizer snapshot is now resolved first
+    # (the SAME function/boundary the workers use,
+    # `kvcot.discovery.snapshot_boundary.resolve_local_snapshot`) -- this
+    # raises `SnapshotBoundaryError` (never silently falls back to network)
+    # if the exact pinned revision is not already verified-local, and its
+    # resolved path is what the tokenizer is actually loaded from, with
+    # `local_files_only=True`.
+    from kvcot.discovery.snapshot_boundary import SnapshotBoundaryError, resolve_local_snapshot
+
+    try:
+        tokenizer_snapshot = resolve_local_snapshot(
+            config.model.tokenizer_name, config.model.tokenizer_revision, "tokenizer"
+        )
+    except SnapshotBoundaryError as exc:
+        raise B2AExecutionRefused(
+            f"exact local tokenizer snapshot unavailable for prompt verification: {exc}"
+        ) from exc
+
     tokenizer, user_message, messages, token_ids = _render_and_tokenize(
-        fetched.row, config.model.tokenizer_name, config.model.tokenizer_revision
+        fetched.row, config.model.tokenizer_name, config.model.tokenizer_revision,
+        local_only_path=tokenizer_snapshot.local_path,
     )
 
     checks = (

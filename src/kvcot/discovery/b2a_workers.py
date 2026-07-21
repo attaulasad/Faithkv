@@ -1319,6 +1319,12 @@ def run_rkv_worker(
             # execute mode overrides it. Authoritative B2A timing is the
             # synchronized `measured`/`timer.measure` evidence above.
             clock_fn=_clock or time.perf_counter,
+            # Independent-audit Gate H2.2 repair: times the REAL target
+            # capture gather/gather-parity/absolute-position-parity
+            # computation inside `capture.capture_update_kv`, under its own
+            # accurately-named `capture_gather_and_parity` phase -- never
+            # merely a later, unrelated trace comparison.
+            capture_timer_fn=timer.measure,
         )
         if example_result.aborted:
             # Independent-audit Gate H1: `run_example` returns (rather than

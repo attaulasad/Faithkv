@@ -71,3 +71,32 @@ stage-completeness, H8.6 formal document, `manifest_prepare.py`'s 3
 uninvestigated bare excepts) — see `docs/B1_INDEPENDENT_AUDIT_REPAIR.md`
 §5. No B2A result exists. No B2B result exists. No real CUDA timing
 exists. No RTX 3090 memory measurement exists. No FaithKV method exists.
+
+### Round 3 (forward-only, on top of round 2's commit)
+
+Prompted by a user request to VERIFY round 2's own "remaining gaps" list
+rather than accept it at face value. Each item was re-investigated against
+the actual code before being touched. Full detail:
+`docs/B1_INDEPENDENT_AUDIT_REPAIR.md` §4.
+
+| ID | Confirmed defect | Risk | Files changed | Focused tests | Full-suite result | Open questions | Status |
+|---|---|---|---|---|---|---|---|
+| `manifest_prepare.py` excepts | Flagged "not investigated" in round 1/2 | — | none (audit only) | none | 1102 passed, 14 deselected | — | Investigated: all 3 valid with exact proof, not blockers |
+| H2.2 | No sub-phase timing for the real target-capture-gather/parity computation | Medium | `capture.py`, `pass2.py`, `orchestrator.py`, `b2a_workers.py`, `final_contract.py` | 3 new in `test_capture.py`, 1 new in `test_orchestrator_pair_execution_policy.py` | 1102 passed, 14 deselected | None | Complete |
+| H4.5 | Prompt-identity tokenizer resolution not proven local-only | Medium | `manifest_prepare.py`, `b2a_execute.py` | 2 new in `test_b2a_execute_coordinator.py` | 1102 passed, 14 deselected | None | Complete |
+| H6.4 | Progress journal double-recorded every named stage (live + post-hoc replay) | Medium | `b2a_worker_entry.py` | 1 new in `test_b2a_worker_entry.py` | 1102 passed, 14 deselected | None | Complete |
+| H7.4 | No stage-completeness verifier | Low-Medium | `attempt_verification.py` | 2 new in `test_attempt_verification.py` | 1102 passed, 14 deselected | None | Complete |
+
+One unrelated, pre-existing flake was observed during validation
+(`test_math_verifier.py::test_accepted_equivalences`, a subprocess-timeout-
+sensitive test in a module last touched 2026-07-19, predating every round
+in this document) — confirmed non-reproducible in isolation across
+multiple re-runs, not modified, not counted as a regression.
+
+**Round 3 verdict: B1 FINAL CPU CLOSURE VERDICT: INCOMPLETE — B2A/GPU
+REMAIN BLOCKED.** Remaining gaps are now only H4.7 (a documentation
+distinction) and H8.6 (a formal call-graph document, vs. the equivalent
+evidence already cited inline throughout this ledger and the audit
+document) — see `docs/B1_INDEPENDENT_AUDIT_REPAIR.md` §6. No B2A result
+exists. No B2B result exists. No real CUDA timing exists. No RTX 3090
+memory measurement exists. No FaithKV method exists.

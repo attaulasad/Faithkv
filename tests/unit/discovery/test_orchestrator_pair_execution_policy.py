@@ -44,7 +44,7 @@ def _always_correct(generated_ids: list[int]) -> tuple[str, str]:
     return "42", "correct"
 
 
-def _run(monkeypatch, policy: PairExecutionPolicy | None, clock_fn=None):
+def _run(monkeypatch, policy: PairExecutionPolicy | None, clock_fn=None, capture_timer_fn=None):
     install_fake_rkv_compression_module(monkeypatch)
     prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
     example_attrition, pair_attrition = AttritionCounters(), AttritionCounters()
@@ -73,6 +73,8 @@ def _run(monkeypatch, policy: PairExecutionPolicy | None, clock_fn=None):
         kwargs["pair_execution_policy"] = policy
     if clock_fn is not None:
         kwargs["clock_fn"] = clock_fn
+    if capture_timer_fn is not None:
+        kwargs["capture_timer_fn"] = capture_timer_fn
     result = run_example(**kwargs)
     return result, example_attrition, pair_attrition
 
@@ -150,6 +152,24 @@ def test_disabled_mode_records_zero_no_op_timings(monkeypatch):
     result, _, _ = _run(monkeypatch, PairExecutionPolicy(no_op_mode=NoOpMode.DISABLED))
     assert result.no_op_pair_wall_seconds == ()
     assert len(result.real_pair_wall_seconds) == 12
+
+
+def test_capture_timer_fn_threads_through_to_the_real_pass2_capture_path(monkeypatch):
+    """Independent-audit Gate H2.2: `run_example`'s `capture_timer_fn`
+    parameter must reach `kvcot.discovery.capture.capture_update_kv`'s real
+    wrapped call (via `pass2.run_pass2_capture`) -- firing exactly once per
+    selected target (3, matching the frozen `EVENTS_SELECTED_PER_EXAMPLE`),
+    each timing the genuine gather/parity computation, never a no-op stub
+    that silently never gets invoked."""
+    calls = []
+
+    def fake_capture_timer(phase, operation):
+        calls.append(phase)
+        return operation()
+
+    result, _, _ = _run(monkeypatch, None, capture_timer_fn=fake_capture_timer)
+    assert result.valid is True
+    assert calls == ["capture_gather_and_parity"] * 3
 
 
 def test_unrecognized_no_op_mode_raises(monkeypatch):

@@ -4,15 +4,16 @@
 
 **B1 FINAL CPU CLOSURE VERDICT: INCOMPLETE — B2A/GPU REMAIN BLOCKED
 (2026-07-21).** An independent audit found the prior "READY FOR INDEPENDENT
-AUDIT" verdict (2026-07-20) incomplete. Two forward-only repair passes
-closed Gates H1 (durable partial worker evidence), H3 (replay/mismatch
-evidence), H4 (device/snapshot verification), H5 (pre-branch memory
-estimate), H6 (artifact content verification), and H8.2 (contract-
-consistency test); H2 (timing semantics) and H7 (provenance/progress
-lifecycle) are closed except for one named sub-item each. Remaining gaps
-are narrow and explicitly listed in `docs/B1_INDEPENDENT_AUDIT_REPAIR.md`
-§5 (authoritative for current status); `docs/B1_FINAL_CPU_CLOSURE.md` is
-superseded and preserved as history. Final non-GPU suite: 1093 passed, 14
+AUDIT" verdict (2026-07-20) incomplete. Three forward-only repair passes
+closed Gates H1 (durable partial worker evidence), H2 (timing semantics,
+including sub-phase granularity), H3 (replay/mismatch evidence), H4
+(device/snapshot verification), H5 (pre-branch memory estimate), H6
+(artifact content verification, including progress-journal integrity), H7
+(provenance/progress lifecycle, including stage completeness), and H8.2
+(contract-consistency test) in full. Only two audit-formality items
+remain (H4.7, H8.6) — see `docs/B1_INDEPENDENT_AUDIT_REPAIR.md`
+(authoritative for current status); `docs/B1_FINAL_CPU_CLOSURE.md` is
+superseded and preserved as history. Final non-GPU suite: 1102 passed, 14
 deselected.
 
 No B2A result exists. No B2B result exists. No RTX 3090 timing exists. No

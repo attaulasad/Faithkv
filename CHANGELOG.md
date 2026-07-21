@@ -1,5 +1,66 @@
 # Changelog
 
+## 2026-07-21 — Independent-audit repair pass on B1, round 3: verify and close remaining round-2 gaps (INCOMPLETE — GPU/B2A/B2B remain blocked; no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; prior commit `f077314...` not reset/rebased/amended)
+
+Third forward-only repair pass, prompted by a request to VERIFY round 2's
+own "remaining gaps" list against the actual code rather than accept it as
+final. Full detail: `docs/B1_INDEPENDENT_AUDIT_REPAIR.md` §4; ledger:
+`docs/B1_FINAL_REPAIR_LEDGER.md`'s "Round 3" section.
+
+**`manifest_prepare.py`'s 3 bare `except Exception:` instances** (flagged
+"not investigated" after rounds 1-2) were read in full context and
+confirmed valid with exact proof: a weight-cache-safety-net snapshot that
+conservatively defaults to an empty set on scan failure, and two
+old-manifest-parse fallbacks that treat a non-parsing file as "not yet
+resolved" -- none silently masks a real defect.
+
+**Gate H2.2 (sub-phase timing granularity) closes.** `capture
+.capture_update_kv` gained an optional `capture_timer_fn` parameter,
+threaded through `pass2.run_pass2_capture` and `orchestrator.run_example`
+(both backward-compatible, defaulting to `None`) down to the real workers'
+`timer.measure` -- it now times exactly the real target-capture-gather +
+gather-parity + absolute-position-parity computation
+(`_build_capture_record`) under a new, accurately-named
+`capture_gather_and_parity` phase, firing once per selected target.
+
+**Gate H4.5 closes.** `_verify_resolved_prompt_identity` used to resolve
+the tokenizer via `tokenizer_name`/`tokenizer_revision` through
+`huggingface_hub`'s ordinary (potentially network-touching) lookup, never
+proven local-only despite verifying a strict local-snapshot boundary. It
+now resolves the exact local tokenizer snapshot first
+(`snapshot_boundary.resolve_local_snapshot`, the same function the workers
+use), fails closed if unavailable, and loads the tokenizer from that exact
+path with `local_files_only=True`.
+
+**Gate H6.4 closes.** Confirmed a genuine duplicate: the worker body
+already appends a live "completed" progress event for every named phase as
+it finishes; `b2a_worker_entry.py`'s success path ALSO replayed the final
+timing list and re-appended a second "completed" event for each of those
+same phases. The redundant post-hoc replay is removed.
+
+**Gate H7.4 closes.** New `attempt_verification
+.verify_progress_stage_completeness` checks a progress journal against the
+exact stage names this repository's worker bodies/entry point actually
+emit, wired into the existing artifact-content verifier.
+
+`python -m compileall src tests`: exit 0. `python -m pytest --collect-only
+-q`: 1116 tests collected. `python -m pytest -m "not gpu" -q`: 1102
+passed, 14 deselected (up from 1093; 9 new tests, zero regressions). One
+unrelated, pre-existing flake (`test_math_verifier.py
+::test_accepted_equivalences`, a subprocess-timeout-sensitive test in a
+module untouched since 2026-07-19) was observed, confirmed non-
+reproducible in isolation, and not modified. Both CLI dry-runs and
+`python -m kvcot --help` exit 0. `git diff --check`: exit 0.
+
+**B1 FINAL CPU CLOSURE VERDICT: INCOMPLETE — B2A/GPU REMAIN BLOCKED.**
+Only H4.7 (a documentation distinction) and H8.6 (a formal call-graph
+document) remain, both audit-formality items rather than functional
+defects -- an unfinished item may still not be called optional, so the
+verdict stays INCOMPLETE. No B2A result exists. No B2B result exists. No
+real CUDA timing exists. No RTX 3090 memory measurement exists. No FaithKV
+method exists. Another independent audit is required before any GPU
+authorization.
+
 ## 2026-07-21 — Independent-audit repair pass on B1, round 2: close Gates H4-H8 (INCOMPLETE — GPU/B2A/B2B remain blocked; no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; prior commit `84d81a3c...` not reset/rebased/amended)
 
 Second forward-only repair pass on branch `research/b1b-r4-final-b2a-closure`,

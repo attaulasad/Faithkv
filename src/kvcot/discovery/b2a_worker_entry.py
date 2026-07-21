@@ -183,27 +183,18 @@ def main(argv: list[str] | None = None) -> int:
         "resolved_tokenizer_revision": result_dict.get("runtime_identity", {}).get("resolved_tokenizer_revision"),
     }
 
-    # Materialize the body's completed phase evidence into the durable
-    # journal before constructing the immutable result/envelope files.  A
-    # failed body writes a failure envelope instead and never invents these
-    # completion events.
-    phase_to_stage = {
-        "snapshot_tokenizer_resolution": "snapshot resolution",
-        "tokenizer_load": "tokenizer load",
-        "model_load": "model-load completion",
-        "post_load_validation": "runtime verification",
-        "rkv_complete_pass1": "Pass 1",
-        "rkv_complete_pass2": "Pass 2",
-        "compact_target_conversion": "compact-target conversion",
-    }
-    for record in result_dict.get("timing_evidence", []):
-        phase = record.get("phase", "")
-        if phase in phase_to_stage and record.get("completed") is True:
-            progress(phase_to_stage[phase], "completed")
-        elif phase.startswith("real_pair:") and phase.count(":") == 3 and record.get("completed") is True:
-            progress("each real pair", "completed", {"pair_phase": phase})
-        elif phase.startswith("no_op_pair:") and phase.count(":") == 3 and record.get("completed") is True:
-            progress("no-op", "completed", {"pair_phase": phase})
+    # Independent-audit Gate H6.4 repair: this used to re-materialize a
+    # "completed" progress event for every named phase/pair by replaying
+    # `result_dict["timing_evidence"]` after the body returned -- but the
+    # body ALREADY appends each of these exact same (stage, "completed")
+    # events LIVE, as work completes, via `_production_progress_callback`
+    # (`kvcot.discovery.b2a_workers.measured`, wired through
+    # `KVCOT_B2A_ATTEMPT_ID`/`KVCOT_B2A_PROGRESS_PATH`, using the identical
+    # `_progress_stage_for_phase` name mapping this block duplicated).
+    # Replaying the final timing list here produced a SECOND, redundant
+    # "completed" event for every one of those phases -- progress is now
+    # written live only, exactly once per stage, never materialized twice
+    # from two different sources.
 
     from kvcot.discovery.attempt_artifacts import atomic_write_json
 

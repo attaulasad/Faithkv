@@ -54,9 +54,15 @@ def _command_payload(role: str) -> dict:
 
 
 def _progress_lines(role: str) -> str:
+    from kvcot.discovery.attempt_verification import FULLKV_REQUIRED_PROGRESS_STAGES, RKV_REQUIRED_PROGRESS_STAGES
+
+    stages = RKV_REQUIRED_PROGRESS_STAGES if role == "rkv" else FULLKV_REQUIRED_PROGRESS_STAGES
     events = [
-        {"timestamp": "2026-01-01T00:00:00+00:00", "stage": "startup", "status": "completed", "attempt_id": "attempt-1", "worker_role": role, "counters": {}, "detail": None},
-        {"timestamp": "2026-01-01T00:00:30+00:00", "stage": "model_load", "status": "completed", "attempt_id": "attempt-1", "worker_role": role, "counters": {}, "detail": None},
+        {
+            "timestamp": "2026-01-01T00:00:00+00:00", "stage": stage, "status": "completed",
+            "attempt_id": "attempt-1", "worker_role": role, "counters": {}, "detail": None,
+        }
+        for stage in stages
     ]
     return "\n".join(json.dumps(event) for event in events) + "\n"
 
@@ -212,6 +218,32 @@ def test_verify_attempt_artifacts_fails_on_attempt_id_disagreement(tmp_path):
     verified, reasons = verify_attempt_artifacts(attempt_dir, fullkv_result=fullkv_result, rkv_result=rkv_result)
     assert verified is False
     assert any("disagree on attempt_id" in r for r in reasons)
+
+
+def test_verify_attempt_artifacts_fails_on_incomplete_progress_stage_coverage(tmp_path):
+    """Independent-audit Gate H7.4: a progress journal that is non-empty
+    but missing one of the required named stages must fail -- "some
+    events exist" is not the same as "every required stage is durably
+    recorded"."""
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    truncated = json.dumps({
+        "timestamp": "2026-01-01T00:00:00+00:00", "stage": "startup", "status": "completed",
+        "attempt_id": "attempt-1", "worker_role": "rkv", "counters": {}, "detail": None,
+    }) + "\n"
+    _write(attempt_dir / "rkv" / "progress.jsonl", truncated)
+    verified, reasons = verify_attempt_artifacts(attempt_dir, fullkv_result=fullkv_result, rkv_result=rkv_result)
+    assert verified is False
+    assert any("missing required stage" in r for r in reasons)
+
+
+def test_verify_progress_stage_completeness_reports_missing_stages_directly():
+    from kvcot.discovery.attempt_verification import verify_progress_stage_completeness
+
+    events = [{"stage": "startup", "status": "completed"}]
+    complete, missing = verify_progress_stage_completeness(events, role="fullkv")
+    assert complete is False
+    assert "tokenizer load" in missing
+    assert "model-load completion" in missing
 
 
 def test_verify_attempt_artifacts_fails_on_empty_progress_journal(tmp_path):

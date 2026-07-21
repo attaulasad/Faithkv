@@ -207,8 +207,16 @@ def run_example(
     pre_branch_guard: Callable[[Any, str], Any] | None = None,
     operation_runner: Callable[[str, Callable[[], Any]], Any] | None = None,
     pair_phase_runner: Callable[[str, Callable[[], Any]], Any] | None = None,
+    capture_timer_fn: Callable[[str, Callable[[], Any]], Any] | None = None,
 ) -> ExampleResult:
-    """`pair_execution_policy` defaults to `PairExecutionPolicy()`
+    """`capture_timer_fn` (independent-audit Gate H2.2 repair) is passed
+    straight through to `kvcot.discovery.pass2.run_pass2_capture`, which
+    passes it to `kvcot.discovery.capture.capture_update_kv` -- it times
+    the REAL target capture gather/gather-parity/absolute-position-parity
+    computation, never a later trace comparison. Defaults to `None`
+    (every pre-existing caller/test is unaffected).
+
+    `pair_execution_policy` defaults to `PairExecutionPolicy()`
     (`NoOpMode.CPU_REQUIRED`) -- every pre-existing caller that does not
     pass one explicitly gets the exact same pair-construction behavior this
     function always had (B1B-R4 §7). `clock_fn` (B1B-R4 §12) defaults to
@@ -272,7 +280,8 @@ def run_example(
         pass2_result = operation_runner(
             "rkv_complete_pass2",
             lambda: run_pass2_capture(
-                plan, trace.full_token_ids, pass2_initial_state_factory(), prefill_fn, decode_one_fn, snapshot_fn
+                plan, trace.full_token_ids, pass2_initial_state_factory(), prefill_fn, decode_one_fn, snapshot_fn,
+                capture_timer_fn=capture_timer_fn,
             ),
         )
     except Exception as exc:

@@ -205,6 +205,68 @@ def test_full_coordinator_flow_passes_and_writes_pass_artifact(config, manifest,
     assert payload["b2a_noop_pair_evaluations_total"] == 1
 
 
+def _fake_fetched_row(manifest):
+    from kvcot.discovery.manifest_prepare import FetchedDatasetRow
+
+    return FetchedDatasetRow(
+        row={"problem": "fake problem", "answer": manifest.gold_answer, "unique_id": manifest.unique_id},
+        raw_content_hash=manifest.raw_content_hash,
+    )
+
+
+def test_verify_resolved_prompt_identity_fails_closed_when_local_tokenizer_snapshot_is_unavailable(
+    config, manifest, monkeypatch
+):
+    """Independent-audit Gate H4.5: the B2A execute path must fail if the
+    exact local tokenizer snapshot is unavailable -- never silently fall
+    back to resolving the tokenizer through a network-capable path."""
+    from kvcot.discovery import manifest_prepare, snapshot_boundary
+
+    monkeypatch.setattr(manifest_prepare, "_fetch_pinned_dataset_row", lambda *a, **k: _fake_fetched_row(manifest))
+    monkeypatch.setattr(manifest_prepare, "_verify_row_schema", lambda row: None)
+
+    def boom(*args, **kwargs):
+        raise snapshot_boundary.SnapshotBoundaryError("exact local snapshot is unavailable")
+
+    monkeypatch.setattr(snapshot_boundary, "resolve_local_snapshot", boom)
+
+    with pytest.raises(b2a_execute.B2AExecutionRefused, match="exact local tokenizer snapshot unavailable"):
+        b2a_execute._verify_resolved_prompt_identity(config, manifest)
+
+
+def test_verify_resolved_prompt_identity_loads_tokenizer_from_the_exact_verified_local_snapshot(
+    config, manifest, monkeypatch
+):
+    """The tokenizer must be loaded from the EXACT verified local snapshot
+    path (`local_only_path`), not `tokenizer_name`/`tokenizer_revision`
+    resolved through an ordinary (potentially network-touching) lookup."""
+    from kvcot.discovery import manifest_prepare, snapshot_boundary
+
+    monkeypatch.setattr(manifest_prepare, "_fetch_pinned_dataset_row", lambda *a, **k: _fake_fetched_row(manifest))
+    monkeypatch.setattr(manifest_prepare, "_verify_row_schema", lambda row: None)
+
+    fake_snapshot = SimpleNamespace(local_path="/verified/local/tokenizer/snapshot")
+    monkeypatch.setattr(snapshot_boundary, "resolve_local_snapshot", lambda *a, **k: fake_snapshot)
+
+    captured = {}
+
+    class _StopEarly(Exception):
+        pass
+
+    def spying_render_and_tokenize(row, tokenizer_name, tokenizer_revision, *, local_only_path=None):
+        captured["local_only_path"] = local_only_path
+        captured["tokenizer_name"] = tokenizer_name
+        raise _StopEarly()
+
+    monkeypatch.setattr(manifest_prepare, "_render_and_tokenize", spying_render_and_tokenize)
+
+    with pytest.raises(_StopEarly):
+        b2a_execute._verify_resolved_prompt_identity(config, manifest)
+
+    assert captured["local_only_path"] == "/verified/local/tokenizer/snapshot"
+    assert captured["tokenizer_name"] == config.model.tokenizer_name
+
+
 def test_startup_and_load_projection_sums_all_five_one_time_phases(config, manifest, monkeypatch, tmp_path):
     """Independent-audit Gate H2.4: the startup/load projection component
     used to sum only `{role}_worker_startup` + `model_load` (2.1s here:

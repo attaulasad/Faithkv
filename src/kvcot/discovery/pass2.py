@@ -67,7 +67,7 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import torch
 
@@ -109,7 +109,16 @@ def run_pass2_capture(
     prefill_fn: PrefillFn,
     decode_one_fn: DecodeOneFn,
     snapshot_fn: SnapshotFn,
+    capture_timer_fn: Callable[[str, Callable[[], Any]], Any] | None = None,
 ) -> Pass2Result:
+    """`capture_timer_fn` (independent-audit Gate H2.2 repair), when
+    supplied, times the ACTUAL target capture gather + gather-parity +
+    absolute-position-parity computation (`capture.capture_update_kv`'s
+    wrapped call, the real operation this repository's timing evidence
+    previously never bounded under an accurately-named phase) -- never a
+    later, unrelated trace comparison. Defaults to `None`, which preserves
+    this function's exact prior behavior (every existing caller/test is
+    unaffected)."""
     trace = pass1_plan.trace
     expected_tokens = trace.full_token_ids
     replay_token_ids = tuple(replay_token_ids)
@@ -173,6 +182,7 @@ def run_pass2_capture(
                     layer_idx=layer_index,
                     current_position_fn=lambda: current_position["pos"],
                     should_capture=_should_capture,
+                    capture_timer_fn=capture_timer_fn,
                 )
             )
 
