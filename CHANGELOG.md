@@ -1,5 +1,50 @@
 # Changelog
 
+## 2026-07-22 — B2A-R2 forensic pair-record persistence repair, audit round 3 (CPU-ONLY; B2A-R3/B2B REMAIN BLOCKED)
+
+An independent audit found round 2 (below) correctly gated
+`completion.json` on pair-artifact verification but never propagated that
+result to `payload["passed"]` (`final.json`, computed earlier from only
+the legacy and final gates and never updated), `B2ACalibrationArtifact`
+(exposed no pair-artifact outcome), or `kvcot.cli.cmd_b2a_calibrate`
+(independently recomputed a two-gate `overall_passed`, ignoring
+pair-artifact verification -- could print `passed=True`/return exit `0`
+while `completion.json` said `gate_failed`/`2`). Fixed:
+
+- `run_b2a_calibration` computes `overall_passed`/
+  `scientific_pair_artifacts_verified` ONCE, before `payload` is built;
+  `payload["passed"]` is set from it directly, never recomputed
+  separately from `completion.json`.
+- `kvcot.discovery.attempt_verification.verify_pair_record_population`
+  (new): the in-memory-only population/identity checks, extracted so the
+  `attempt_directory is None` path (helper/test callers only -- production
+  `--execute` always supplies a directory) is never silently treated as
+  "successfully verified" -- it is still genuinely checked against the
+  worker's reported result.
+- `B2ACalibrationArtifact` gained `overall_passed`,
+  `scientific_pair_artifacts_verified`, `pair_record_verification_reasons`
+  -- populated once at the single return site, never reconstructed by a
+  caller.
+- `kvcot.cli.cmd_b2a_calibrate` now reads `overall_passed =
+  artifact.overall_passed` instead of recomputing a two-gate result; on
+  failure it also prints the pair-artifact verification reasons.
+- New/updated tests: `tests/unit/discovery/test_b2a_execute_coordinator.py`
+  (strengthened shared assertions across all six corruption scenarios plus
+  a new no-attempt-directory test) and
+  `tests/unit/test_cli_b2a_calibrate.py` (an isolated-pair-artifact-failure
+  case returning exit code 2, a full-pass case, and a parametrized
+  cross-surface invariant test; two pre-existing fakes updated for the new
+  required fields).
+- No GPU, no inference, no re-run, no change to `configs/lock.yaml`, the
+  R-KV revision, B2A-R2's frozen verdict, or
+  `FINAL_MANDATORY_GATE_CONDITIONS`. Full detail:
+  `docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md` §11.
+
+```text
+B2A-R2 FORENSIC CLOSURE VERDICT:
+PAIR-RECORD PERSISTENCE REPAIRED -- READY FOR INDEPENDENT REVIEW; B2A-R3/B2B REMAIN BLOCKED
+```
+
 ## 2026-07-22 — B2A-R2 forensic pair-record persistence repair, audit round 2 (CPU-ONLY; B2A-R3/B2B REMAIN BLOCKED)
 
 An independent audit found round 1 (below) left `verify_pair_record_artifacts`

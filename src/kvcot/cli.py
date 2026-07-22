@@ -2669,8 +2669,14 @@ def cmd_b2a_calibrate(args: argparse.Namespace) -> int:
             # observations (CLI, FullKV, R-KV) uniformly.
             cli_device_preflight={"verified": True, **device_preflight.__dict__},
         )
-        final_passed = bool(artifact.final_gate_result is not None and artifact.final_gate_result.passed)
-        overall_passed = bool(artifact.gate_result.passed and final_passed)
+        # B2A-R2 forensic repair (audit round 3,
+        # docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md §11):
+        # `artifact.overall_passed` is the ONE authoritative outcome the
+        # coordinator itself already computed (legacy gate AND final gate
+        # AND pair-artifact verification) -- this CLI must never recompute
+        # success from a subset of gates, or it can print/return a
+        # different verdict than the coordinator's own `completion.json`.
+        overall_passed = artifact.overall_passed
         completion["artifact_path"] = str(artifact.artifact_path)
         completion["gate_passed"] = overall_passed
         print(f"b2a-calibrate result: passed={overall_passed}")
@@ -2681,6 +2687,8 @@ def cmd_b2a_calibrate(args: argparse.Namespace) -> int:
                 print("  final_failed_conditions=['final_gate_result_missing']")
             elif not artifact.final_gate_result.passed:
                 print(f"  final_failed_conditions={artifact.final_gate_result.failed_conditions}")
+            if not artifact.scientific_pair_artifacts_verified:
+                print(f"  pair_artifact_verification_reasons={list(artifact.pair_record_verification_reasons)}")
             completion["outcome"] = "gate_failed"
             completion["exit_code"] = 2
             return 2

@@ -1,6 +1,30 @@
 # Plan and status
 
-## B2A-R2 FORENSIC PAIR-RECORD PERSISTENCE REPAIR, AUDIT ROUND 2 (2026-07-22)
+## B2A-R2 FORENSIC PAIR-RECORD PERSISTENCE REPAIR, AUDIT ROUND 3 (2026-07-22)
+
+An independent audit found round 2 (immediately below) correctly gated
+`completion.json` but never propagated the pair-artifact outcome to
+`final.json`'s `payload["passed"]` (computed earlier, never updated),
+`B2ACalibrationArtifact` (no pair-artifact fields at all), or the CLI
+(`kvcot.cli.cmd_b2a_calibrate` independently recomputed a two-gate result,
+ignoring pair-artifact verification -- could print `passed=True`/exit `0`
+while `completion.json` said `gate_failed`/`2`). Fixed, CPU-only: ONE
+`overall_passed` computed before `payload` is built and used consistently
+everywhere; `B2ACalibrationArtifact` now exposes `overall_passed`/
+`scientific_pair_artifacts_verified`/`pair_record_verification_reasons`;
+the CLI reads `artifact.overall_passed` directly instead of recomputing;
+a new `verify_pair_record_population` ensures the no-attempt-directory
+path is never silently treated as verified. New coordinator- and CLI-level
+tests confirm the CLI returns exit code 2 for an isolated pair-artifact
+failure. Full detail:
+`docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md` §11.
+
+```text
+B2A-R2 FORENSIC CLOSURE VERDICT:
+PAIR-RECORD PERSISTENCE REPAIRED -- READY FOR INDEPENDENT REVIEW; B2A-R3/B2B REMAIN BLOCKED
+```
+
+## Prior status: B2A-R2 forensic pair-record persistence repair, audit round 2 (2026-07-22)
 
 An independent audit found round 1 (immediately below) left
 `verify_pair_record_artifacts` never-fatal -- a future V2 attempt could

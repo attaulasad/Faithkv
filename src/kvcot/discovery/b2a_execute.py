@@ -69,6 +69,18 @@ class B2ACalibrationArtifact:
     gate_result: Any  # kvcot.discovery.b2a_contract.B2AGateResult
     artifact_path: Path
     final_gate_result: Any | None = None
+    # B2A-R2 forensic repair (audit round 3,
+    # docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md §11): the
+    # ONE authoritative overall outcome, ANDing in pair-artifact
+    # verification alongside the legacy and final gates -- callers (the CLI
+    # included) must read `overall_passed` directly, never recompute
+    # success from `gate_result`/`final_gate_result` alone. Defaulted only
+    # so this dataclass's field-ordering stays backward compatible with any
+    # positional construction; every real call site in this module supplies
+    # all three explicitly.
+    overall_passed: bool = False
+    scientific_pair_artifacts_verified: bool = False
+    pair_record_verification_reasons: tuple[str, ...] = ()
 
 
 def _verify_resolved_prompt_identity(config, manifest) -> dict[str, Any]:
@@ -748,8 +760,58 @@ def run_b2a_calibration(
             "attempt_artifacts_verified": attempt_files_verified,
         })
 
+        # B2A-R2 forensic repair
+        # (docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md, audit
+        # repair round 3): computed BEFORE `payload`/`overall_passed` so
+        # `payload["passed"]` (embedded in `final.json`), `completion.json`,
+        # and the returned `B2ACalibrationArtifact` can never disagree about
+        # whether pair-artifact verification passed -- ONE authoritative
+        # computation, never independently recomputed by any caller.
+        #
+        # Two paths, never a silent "no attempt directory means trivially
+        # verified": with a durable attempt directory (production
+        # `--execute` always supplies one), the on-disk
+        # `rkv/pair_records.json`/`rkv/scientific_summary.json` are checked
+        # for real. Without one (helper/test callers only), there is no
+        # file to check, so the SAME population/identity invariants are
+        # checked directly against the in-memory worker result -- "no
+        # attempt directory" never silently counts as successful
+        # persistence, it is still genuinely verified against whatever the
+        # worker actually reported. `rkv` is always an `RKVWorkerResultV2`
+        # on this live coordinator path (`RKVWorkerResult` IS
+        # `RKVWorkerResultV2`); the `isinstance` check is kept explicit
+        # anyway so this condition's meaning never silently depends on that
+        # alias.
+        from kvcot.discovery.attempt_verification import verify_pair_record_artifacts, verify_pair_record_population
+        from kvcot.discovery.b2a_workers import RKVWorkerResultV2
+
+        if attempt_directory is not None:
+            pair_record_verified, pair_record_reasons = verify_pair_record_artifacts(
+                attempt_directory, rkv_result=rkv.model_dump(mode="json"),
+            )
+        else:
+            pair_record_verified, pair_record_reasons = verify_pair_record_population(rkv.model_dump(mode="json"))
+        scientific_pair_artifacts_verified = isinstance(rkv, RKVWorkerResultV2) and pair_record_verified
+
+        # Three independent, ANDed gate layers -- the legacy 28-condition
+        # gate, the final 31-condition gate (only held against the result
+        # when an attempt directory exists to evaluate it from -- the
+        # original, unchanged behavior), and now pair-artifact
+        # completeness -- never folded into any one gate's own frozen
+        # condition set (`FINAL_MANDATORY_GATE_CONDITIONS` is unmodified by
+        # this repair).
+        overall_passed = bool(
+            gate_result.passed
+            and (final_gate_result.passed if attempt_directory is not None else True)
+            and scientific_pair_artifacts_verified
+        )
+
         payload = {
-            "passed": gate_result.passed and (final_gate_result.passed if attempt_directory is not None else True),
+            "passed": overall_passed,
+            "scientific_pair_artifacts_verified": scientific_pair_artifacts_verified,
+            "pair_record_verification": {
+                "verified": pair_record_verified, "reasons": list(pair_record_reasons),
+            },
             "legacy_gate_passed": gate_result.passed,
             "config_hash": config_hash,
             "manifest_hash": manifest_hash,
@@ -791,40 +853,6 @@ def run_b2a_calibration(
             from kvcot.discovery.attempt_verification import verify_attempt_artifacts as _verify_prefinal
 
             attempt = AttemptDirectory(attempt_id=attempt_directory.name.rsplit("_", 1)[-1], path=attempt_directory)
-
-            # B2A-R2 forensic repair
-            # (docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md,
-            # audit repair round 2): computed BEFORE `overall_passed` so a
-            # missing, incomplete, duplicated, mismatched, or corrupt
-            # `rkv/pair_records.json`/`rkv/scientific_summary.json` is a
-            # MANDATORY part of a successful V2 attempt's outcome -- never
-            # merely recorded evidence a reviewer might miss. `rkv` is
-            # always an `RKVWorkerResultV2` on this live coordinator path
-            # (`RKVWorkerResult` IS `RKVWorkerResultV2`); the `isinstance`
-            # check is kept explicit anyway so this condition's meaning
-            # never silently depends on that alias.
-            from kvcot.discovery.attempt_verification import verify_pair_record_artifacts
-            from kvcot.discovery.b2a_workers import RKVWorkerResultV2
-
-            pair_record_verified, pair_record_reasons = verify_pair_record_artifacts(
-                attempt_directory, rkv_result=rkv.model_dump(mode="json"),
-            )
-            scientific_pair_artifacts_verified = isinstance(rkv, RKVWorkerResultV2) and pair_record_verified
-            payload["pair_record_verification"] = {
-                "verified": pair_record_verified, "reasons": list(pair_record_reasons),
-            }
-            payload["scientific_pair_artifacts_verified"] = scientific_pair_artifacts_verified
-
-            # Three independent, ANDed gate layers -- the legacy 28-condition
-            # gate, the final 31-condition gate, and now pair-artifact
-            # completeness -- exactly the existing pattern of combining
-            # separate gate results at this outer layer, never folded into
-            # any one gate's own frozen condition set
-            # (`FINAL_MANDATORY_GATE_CONDITIONS` is unmodified by this
-            # repair).
-            overall_passed = bool(
-                gate_result.passed and final_gate_result.passed and scientific_pair_artifacts_verified
-            )
             atomic_write_json(attempt_directory / "completion.json", {
                 "attempt_id": attempt.attempt_id,
                 "finished_at": datetime.now(timezone.utc).isoformat(),
@@ -895,6 +923,12 @@ def run_b2a_calibration(
         return B2ACalibrationArtifact(
             config_hash=config_hash, manifest_hash=manifest_hash, gate_result=gate_result, artifact_path=artifact_path,
             final_gate_result=final_gate_result,
+            # B2A-R2 forensic repair (audit round 3): the ONE authoritative
+            # outcome -- never reconstructed by any caller (CLI or
+            # otherwise) from a subset of gates.
+            overall_passed=overall_passed,
+            scientific_pair_artifacts_verified=scientific_pair_artifacts_verified,
+            pair_record_verification_reasons=tuple(pair_record_reasons),
         )
     except WorkerFailedError as exc:
         # B1B-R4 §16: preserve partial FullKV evidence (if FullKV succeeded

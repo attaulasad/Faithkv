@@ -271,6 +271,39 @@ def test_full_coordinator_flow_passes_and_writes_pass_artifact(config, manifest,
     assert payload["measurement"]["per_real_pair_seconds"] == 1.0  # max() of 12 identical 1.0s pairs
     assert payload["b2a_real_pair_evaluations_total"] == 12
     assert payload["b2a_noop_pair_evaluations_total"] == 1
+    assert artifact.overall_passed is True
+    assert artifact.scientific_pair_artifacts_verified is True
+
+
+def test_no_attempt_directory_still_genuinely_verifies_pair_records_not_silently_true(
+    config, manifest, monkeypatch, tmp_path
+):
+    """B2A-R2 forensic repair (audit round 3, §11 item 5): the
+    `attempt_directory is None` path (helper/test callers only --
+    production `--execute` always supplies one) has no durable file to
+    check, but must NOT silently treat that as "successfully verified".
+    Corrupting the in-memory `pair_records` population (no attempt
+    directory involved at all) must still flip `overall_passed` to
+    `False` via `verify_pair_record_population`."""
+    monkeypatch.setattr(b2a_execute, "_verify_resolved_prompt_identity", lambda c, m: None)
+    fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
+    incomplete = rkv_payload["pair_records"][:-2] + rkv_payload["pair_records"][-1:]  # drop one real record
+    rkv_payload = dict(rkv_payload, pair_records=incomplete)
+    runner = _fake_runner_writing(fullkv_payload, rkv_payload)
+    monkeypatch.setattr("kvcot.discovery.b2a_artifact.build_and_write_b2a_artifact", _patched_writer(tmp_path))
+
+    artifact = b2a_execute.run_b2a_calibration(
+        config, manifest, config_path=CONFIG_PATH, manifest_path=MANIFEST_PATH,
+        python_executable="fake-python", subprocess_runner=runner,
+    )
+
+    assert artifact.gate_result.passed is True  # legacy gate never inspects pair_records, unaffected
+    assert artifact.overall_passed is False
+    assert artifact.scientific_pair_artifacts_verified is False
+    assert any("real records, expected 12" in r for r in artifact.pair_record_verification_reasons)
+    payload = json.loads(artifact.artifact_path.read_text(encoding="utf-8"))
+    assert payload["passed"] is False
+    assert payload["scientific_pair_artifacts_verified"] is False
 
 
 def _fake_fetched_row(manifest):
@@ -1113,15 +1146,26 @@ def _run_forced_isolated(config, manifest, monkeypatch, attempt_directory, fullk
 
 
 def _assert_gate_failed_on_pair_records(artifact, attempt_directory, *, reason_substring: str | None = None):
+    """Cross-surface invariant (audit round 3): `artifact.overall_passed`,
+    `final.json["passed"]`, and `completion.json["gate_passed"]` must never
+    disagree -- this is exactly the contradiction the round-3 audit found
+    (`payload["passed"]` was computed from only the legacy+final gates and
+    never updated, so it could read `True` while `completion.json` said
+    `gate_failed`)."""
     assert artifact.gate_result.passed is True  # legacy gate genuinely passed
+    assert artifact.overall_passed is False
+    assert artifact.scientific_pair_artifacts_verified is False
     payload = json.loads(artifact.artifact_path.read_text(encoding="utf-8"))
+    assert payload["passed"] is False
     assert payload["scientific_pair_artifacts_verified"] is False
     completion = json.loads((attempt_directory / "completion.json").read_text(encoding="utf-8"))
     assert completion["outcome"] == "gate_failed"
     assert completion["exit_code"] == 2
     assert completion["gate_passed"] is False
+    assert payload["passed"] == completion["gate_passed"] == artifact.overall_passed
     if reason_substring is not None:
         assert any(reason_substring in r for r in payload["pair_record_verification"]["reasons"])
+        assert any(reason_substring in r for r in artifact.pair_record_verification_reasons)
     return payload
 
 
@@ -1144,13 +1188,18 @@ def test_valid_pair_artifacts_do_not_spuriously_fail_the_new_gate(config, manife
     fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
     attempt_directory = _real_attempt_directory(tmp_path)
     artifact = _run_forced_isolated(config, manifest, monkeypatch, attempt_directory, fullkv_payload, rkv_payload)
+    assert artifact.overall_passed is True
+    assert artifact.scientific_pair_artifacts_verified is True
+    assert artifact.pair_record_verification_reasons == ()
     payload = json.loads(artifact.artifact_path.read_text(encoding="utf-8"))
+    assert payload["passed"] is True
     assert payload["scientific_pair_artifacts_verified"] is True
     assert payload["pair_record_verification"]["verified"] is True
     completion = json.loads((attempt_directory / "completion.json").read_text(encoding="utf-8"))
     assert completion["outcome"] == "gate_passed"
     assert completion["exit_code"] == 0
     assert completion["gate_passed"] is True
+    assert payload["passed"] == completion["gate_passed"] == artifact.overall_passed == True  # noqa: E712
 
 
 def test_missing_pair_records_file_forces_gate_failure(config, manifest, monkeypatch, tmp_path):

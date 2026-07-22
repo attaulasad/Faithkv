@@ -687,6 +687,90 @@ def _pair_record_identity_from_dict(item: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def verify_pair_record_population(
+    rkv_result: dict[str, Any], *, label: str = "pair_records"
+) -> tuple[bool, tuple[str, ...]]:
+    """The IN-MEMORY-ONLY half of pair-record verification: typed record
+    validity, population size/composition (12 real + 1 no-op), unique
+    identities, and identity agreement with `completed_pair_identities`/
+    `failed_pair_identities` -- everything checkable from `rkv_result`
+    alone, without touching disk. Reuses `SwapPairRecord` (the SAME
+    validators the producer already runs) and
+    `kvcot.discovery.b2a_evidence._pair_identity` (the SAME canonical
+    identity tuple `unique_completed_real_pair_count` etc. already use) --
+    never a second, independently-written validity or identity definition.
+
+    Used both by `verify_pair_record_artifacts` below (which ALSO checks
+    the durable on-disk files, passing `label="rkv/pair_records.json"` so
+    its reasons read as file-relative) and directly by a caller that never
+    persists an attempt directory at all
+    (`kvcot.discovery.b2a_execute.run_b2a_calibration`'s
+    `attempt_directory is None` path) -- so "no attempt directory" is
+    never silently treated as "successfully verified": the SAME population/
+    identity invariants are still genuinely checked against whatever the
+    worker actually reported, just without a durable artifact to
+    additionally cross-check.
+
+    Returns `(True, ())` for a legacy (V1) result (`"pair_records" not in
+    rkv_result`) -- never fabricates a requirement a pre-repair result never
+    had.
+    """
+    if "pair_records" not in rkv_result:
+        return True, ()
+
+    from kvcot.discovery.b2a_evidence import _pair_identity
+    from kvcot.discovery.constants import B2A_NOOP_PAIR_EVALUATIONS_TOTAL, B2A_REAL_PAIR_EVALUATIONS_TOTAL
+    from kvcot.discovery.schemas import SwapPairRecord
+
+    reasons: list[str] = []
+    pair_records = rkv_result["pair_records"]
+    if not isinstance(pair_records, list):
+        return False, (f"{label} is not a list",)
+
+    typed_records: list[SwapPairRecord] = []
+    for index, raw in enumerate(pair_records):
+        try:
+            typed_records.append(SwapPairRecord.model_validate(raw))
+        except Exception as exc:  # noqa: BLE001 -- report every malformed record, never stop at the first
+            reasons.append(f"{label}[{index}] does not validate as a typed SwapPairRecord: {exc}")
+    if len(typed_records) != len(pair_records):
+        # At least one record is malformed -- already reported above; every
+        # check below assumes a fully-typed population and would otherwise
+        # report a confusing cascade of secondary failures.
+        return False, tuple(reasons)
+
+    real_records = [record for record in typed_records if not record.is_noop_control]
+    no_op_records = [record for record in typed_records if record.is_noop_control]
+    expected_total = B2A_REAL_PAIR_EVALUATIONS_TOTAL + B2A_NOOP_PAIR_EVALUATIONS_TOTAL
+    if len(typed_records) != expected_total:
+        reasons.append(f"{label} has {len(typed_records)} records, expected {expected_total}")
+    if len(real_records) != B2A_REAL_PAIR_EVALUATIONS_TOTAL:
+        reasons.append(f"{label} has {len(real_records)} real records, expected {B2A_REAL_PAIR_EVALUATIONS_TOTAL}")
+    if len(no_op_records) != B2A_NOOP_PAIR_EVALUATIONS_TOTAL:
+        reasons.append(
+            f"{label} has {len(no_op_records)} no-op records, expected {B2A_NOOP_PAIR_EVALUATIONS_TOTAL}"
+        )
+
+    record_identities = [_pair_identity(record) for record in typed_records]
+    if len(record_identities) != len(set(record_identities)):
+        reasons.append(f"{label} contains duplicate pair identities")
+    record_identity_set = set(record_identities)
+
+    completed_pair_identities = rkv_result.get("completed_pair_identities")
+    if isinstance(completed_pair_identities, list):
+        completed_identity_set = {_pair_record_identity_from_dict(item) for item in completed_pair_identities}
+        if completed_identity_set != record_identity_set:
+            reasons.append(f"{label} identities do not exactly match completed_pair_identities")
+
+    failed_pair_identities = rkv_result.get("failed_pair_identities")
+    if isinstance(failed_pair_identities, list):
+        failed_identity_set = {_pair_record_identity_from_dict(item) for item in failed_pair_identities}
+        if failed_identity_set & record_identity_set:
+            reasons.append(f"{label} represents a failed pair identity as completed")
+
+    return (len(reasons) == 0), tuple(reasons)
+
+
 def verify_pair_record_artifacts(
     attempt_directory: Path, *, rkv_result: dict[str, Any]
 ) -> tuple[bool, tuple[str, ...]]:
@@ -698,10 +782,9 @@ def verify_pair_record_artifacts(
     against minimal, non-B2A-shaped fake pair identities unrelated to this
     repair -- folding a hard pair-record population/identity requirement
     into that shared, generic function would fail those tests for reasons
-    that have nothing to do with what they test. Reuses `SwapPairRecord`
-    (the SAME validators the producer already runs),
-    `kvcot.discovery.b2a_evidence._pair_identity` (the SAME canonical
-    identity tuple `unique_completed_real_pair_count` etc. already use), and
+    that have nothing to do with what they test. Reuses
+    `verify_pair_record_population` (the SAME population/identity checks
+    the no-attempt-directory path uses) and
     `kvcot.discovery.scientific_summary.build_scientific_summary` (the SAME
     statistics formula the producer already runs) -- never a second,
     independently-written identity, validity, or statistics definition.
@@ -713,8 +796,6 @@ def verify_pair_record_artifacts(
     if "pair_records" not in rkv_result:
         return True, ()
 
-    from kvcot.discovery.b2a_evidence import _pair_identity
-    from kvcot.discovery.constants import B2A_NOOP_PAIR_EVALUATIONS_TOTAL, B2A_REAL_PAIR_EVALUATIONS_TOTAL
     from kvcot.discovery.scientific_summary import build_scientific_summary
     from kvcot.discovery.schemas import SwapPairRecord
 
@@ -743,53 +824,22 @@ def verify_pair_record_artifacts(
         reasons.append("rkv/pair_records.json is not a list")
         return False, tuple(reasons)
 
-    typed_records: list[SwapPairRecord] = []
-    for index, raw in enumerate(pair_records_file):
-        try:
-            typed_records.append(SwapPairRecord.model_validate(raw))
-        except Exception as exc:  # noqa: BLE001 -- report every malformed record, never stop at the first
-            reasons.append(f"rkv/pair_records.json[{index}] does not validate as a typed SwapPairRecord: {exc}")
-    if len(typed_records) != len(pair_records_file):
-        # At least one record is malformed -- already reported above; every
-        # check below assumes a fully-typed population and would otherwise
-        # report a confusing cascade of secondary failures.
+    population_ok, population_reasons = verify_pair_record_population(
+        {
+            "pair_records": pair_records_file,
+            "completed_pair_identities": rkv_result.get("completed_pair_identities"),
+            "failed_pair_identities": rkv_result.get("failed_pair_identities"),
+        },
+        label="rkv/pair_records.json",
+    )
+    reasons.extend(population_reasons)
+    if not population_ok and any("does not validate as a typed SwapPairRecord" in r for r in population_reasons):
+        # A malformed record already reported above; the summary
+        # recomputation below assumes a fully-typed population and would
+        # otherwise report a confusing cascade of secondary failures.
         return False, tuple(reasons)
 
-    real_records = [record for record in typed_records if not record.is_noop_control]
-    no_op_records = [record for record in typed_records if record.is_noop_control]
-    expected_total = B2A_REAL_PAIR_EVALUATIONS_TOTAL + B2A_NOOP_PAIR_EVALUATIONS_TOTAL
-    if len(typed_records) != expected_total:
-        reasons.append(f"rkv/pair_records.json has {len(typed_records)} records, expected {expected_total}")
-    if len(real_records) != B2A_REAL_PAIR_EVALUATIONS_TOTAL:
-        reasons.append(
-            f"rkv/pair_records.json has {len(real_records)} real records, expected {B2A_REAL_PAIR_EVALUATIONS_TOTAL}"
-        )
-    if len(no_op_records) != B2A_NOOP_PAIR_EVALUATIONS_TOTAL:
-        reasons.append(
-            f"rkv/pair_records.json has {len(no_op_records)} no-op records, "
-            f"expected {B2A_NOOP_PAIR_EVALUATIONS_TOTAL}"
-        )
-
-    record_identities = [_pair_identity(record) for record in typed_records]
-    if len(record_identities) != len(set(record_identities)):
-        reasons.append("rkv/pair_records.json contains duplicate pair identities")
-    record_identity_set = set(record_identities)
-
-    completed_pair_identities = rkv_result.get("completed_pair_identities")
-    if isinstance(completed_pair_identities, list):
-        completed_identity_set = {_pair_record_identity_from_dict(item) for item in completed_pair_identities}
-        if completed_identity_set != record_identity_set:
-            reasons.append(
-                "rkv/pair_records.json identities do not exactly match "
-                "rkv/result.json's completed_pair_identities"
-            )
-
-    failed_pair_identities = rkv_result.get("failed_pair_identities")
-    if isinstance(failed_pair_identities, list):
-        failed_identity_set = {_pair_record_identity_from_dict(item) for item in failed_pair_identities}
-        if failed_identity_set & record_identity_set:
-            reasons.append("rkv/pair_records.json represents a failed pair identity as completed")
-
+    typed_records = [SwapPairRecord.model_validate(raw) for raw in pair_records_file]
     expected_summary = build_scientific_summary(typed_records)
     if scientific_summary_file != expected_summary:
         reasons.append("rkv/scientific_summary.json does not recompute exactly from rkv/pair_records.json")

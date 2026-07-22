@@ -208,6 +208,12 @@ def test_execute_writes_real_device_preflight_evidence_and_threads_it_to_coordin
             gate_result=SimpleNamespace(passed=True, failed_conditions=()),
             final_gate_result=SimpleNamespace(passed=True, failed_conditions=()),
             artifact_path=tmp_path / "final.json",
+            # B2A-R2 forensic repair (audit round 3): the CLI now reads
+            # `overall_passed` directly off the coordinator's returned
+            # artifact instead of recomputing it -- this fake result must
+            # supply it, matching a genuinely fully-passing attempt.
+            overall_passed=True, scientific_pair_artifacts_verified=True,
+            pair_record_verification_reasons=(),
         )
 
     monkeypatch.setattr("kvcot.discovery.b2a_execute.run_b2a_calibration", fake_run_b2a_calibration)
@@ -255,6 +261,8 @@ def test_execute_writes_completion_record_on_gate_failure(monkeypatch, tmp_path)
             gate_result=SimpleNamespace(passed=False, failed_conditions=("some_condition",)),
             final_gate_result=SimpleNamespace(passed=False, failed_conditions=("single_rtx3090_verified",)),
             artifact_path=tmp_path / "final.json",
+            overall_passed=False, scientific_pair_artifacts_verified=True,
+            pair_record_verification_reasons=(),
         )
 
     monkeypatch.setattr("kvcot.discovery.b2a_execute.run_b2a_calibration", fake_run_b2a_calibration)
@@ -271,6 +279,132 @@ def test_execute_writes_completion_record_on_gate_failure(monkeypatch, tmp_path)
     assert completion["exit_code"] == 2
     assert completion["gate_passed"] is False
     assert "finished_at" in completion
+
+
+def _preflight_passing(monkeypatch):
+    import torch
+
+    from kvcot.discovery import strict_device
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    fake_evidence = strict_device.StrictDeviceEvidence(
+        visible_gpu_count=1, gpu_name="NVIDIA GeForce RTX 3090", device_index=0,
+        requested_device="cuda:0", total_vram_bytes=24 * 1024**3, compute_capability=(8, 6),
+        driver_version="555.42", cuda_runtime="12.1", cudnn_version="8900", policy_satisfied=True,
+    )
+    monkeypatch.setattr(strict_device, "verify_single_rtx3090", lambda *a, **k: fake_evidence)
+
+
+def _execute_args():
+    return Namespace(config=DISCOVERY_CONFIG, dry_run=False, execute=True, problem_index=None, limit=None)
+
+
+def test_cli_returns_2_for_an_isolated_pair_artifact_failure(monkeypatch, tmp_path, capsys):
+    """B2A-R2 forensic repair (audit round 3,
+    docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md §11): the
+    legacy AND final gates both genuinely pass -- pair-artifact
+    verification is the ONLY failing factor. The CLI must still return 2
+    and report `passed=False`, never silently succeed by only checking the
+    two pre-existing gates."""
+    import json
+    from types import SimpleNamespace
+
+    _preflight_passing(monkeypatch)
+
+    def fake_run_b2a_calibration(*args, **kwargs):
+        return SimpleNamespace(
+            gate_result=SimpleNamespace(passed=True, failed_conditions=()),
+            final_gate_result=SimpleNamespace(passed=True, failed_conditions=()),
+            artifact_path=tmp_path / "final.json",
+            overall_passed=False, scientific_pair_artifacts_verified=False,
+            pair_record_verification_reasons=("rkv/pair_records.json is missing",),
+        )
+
+    monkeypatch.setattr("kvcot.discovery.b2a_execute.run_b2a_calibration", fake_run_b2a_calibration)
+
+    exit_code = cmd_b2a_calibrate(_execute_args())
+    assert exit_code == 2
+
+    out = capsys.readouterr().out
+    assert "passed=False" in out
+    assert "rkv/pair_records.json is missing" in out
+
+    completion_path = _find_attempt_dir(tmp_path) / "completion.json"
+    completion = json.loads(completion_path.read_text(encoding="utf-8"))
+    assert completion["outcome"] == "gate_failed"
+    assert completion["exit_code"] == 2
+    assert completion["gate_passed"] is False
+
+
+def test_cli_returns_0_when_all_three_factors_pass(monkeypatch, tmp_path, capsys):
+    import json
+    from types import SimpleNamespace
+
+    _preflight_passing(monkeypatch)
+
+    def fake_run_b2a_calibration(*args, **kwargs):
+        return SimpleNamespace(
+            gate_result=SimpleNamespace(passed=True, failed_conditions=()),
+            final_gate_result=SimpleNamespace(passed=True, failed_conditions=()),
+            artifact_path=tmp_path / "final.json",
+            overall_passed=True, scientific_pair_artifacts_verified=True,
+            pair_record_verification_reasons=(),
+        )
+
+    monkeypatch.setattr("kvcot.discovery.b2a_execute.run_b2a_calibration", fake_run_b2a_calibration)
+
+    exit_code = cmd_b2a_calibrate(_execute_args())
+    assert exit_code == 0
+    assert "passed=True" in capsys.readouterr().out
+
+    completion_path = _find_attempt_dir(tmp_path) / "completion.json"
+    completion = json.loads(completion_path.read_text(encoding="utf-8"))
+    assert completion["outcome"] == "gate_passed"
+    assert completion["exit_code"] == 0
+    assert completion["gate_passed"] is True
+
+
+@pytest.mark.parametrize(
+    "overall_passed,expected_exit_code",
+    [(True, 0), (False, 2)],
+    ids=["overall_passed=True", "overall_passed=False"],
+)
+def test_cli_return_code_and_printed_passed_value_never_disagree_with_coordinator(
+    monkeypatch, tmp_path, capsys, overall_passed, expected_exit_code
+):
+    """Cross-surface invariant: the CLI now does nothing but relay
+    `artifact.overall_passed` (`overall_passed = artifact.overall_passed`,
+    no recomputation) -- whatever the coordinator decided, the CLI's return
+    code and printed `passed=` value must match it exactly, regardless of
+    what the individual `gate_result`/`final_gate_result` booleans happen
+    to be (deliberately held constant at True here, isolating that the CLI
+    reads `overall_passed` and NOT some recomputed subset)."""
+    import json
+    from types import SimpleNamespace
+
+    _preflight_passing(monkeypatch)
+
+    def fake_run_b2a_calibration(*args, **kwargs):
+        return SimpleNamespace(
+            gate_result=SimpleNamespace(passed=True, failed_conditions=()),
+            final_gate_result=SimpleNamespace(passed=True, failed_conditions=()),
+            artifact_path=tmp_path / "final.json",
+            overall_passed=overall_passed, scientific_pair_artifacts_verified=overall_passed,
+            pair_record_verification_reasons=() if overall_passed else ("simulated pair-artifact failure",),
+        )
+
+    monkeypatch.setattr("kvcot.discovery.b2a_execute.run_b2a_calibration", fake_run_b2a_calibration)
+
+    exit_code = cmd_b2a_calibrate(_execute_args())
+    assert exit_code == expected_exit_code
+
+    out = capsys.readouterr().out
+    assert f"passed={overall_passed}" in out
+
+    completion = json.loads((_find_attempt_dir(tmp_path) / "completion.json").read_text(encoding="utf-8"))
+    assert completion["gate_passed"] is overall_passed
+    assert completion["exit_code"] == expected_exit_code
+    assert (completion["outcome"] == "gate_passed") is overall_passed
 
 
 def test_execute_writes_completion_record_even_on_uncaught_exception(monkeypatch, tmp_path):

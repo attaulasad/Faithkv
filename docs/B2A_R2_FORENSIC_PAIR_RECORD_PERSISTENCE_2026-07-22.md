@@ -343,3 +343,90 @@ PAIR-RECORD PERSISTENCE REPAIRED -- READY FOR INDEPENDENT REVIEW; B2A-R3/B2B REM
 B2A-R2 FORENSIC CLOSURE VERDICT:
 PAIR-RECORD PERSISTENCE REPAIRED -- READY FOR INDEPENDENT REVIEW; B2A-R3/B2B REMAIN BLOCKED
 ```
+
+## 11. Audit repair round 3 (dated 2026-07-22): one authoritative result across every public surface
+
+An independent audit of round 2 found that `overall_passed` (correctly
+computed for `completion.json`) never reached three other surfaces:
+`payload["passed"]` (embedded in `final.json`, built earlier in
+`run_b2a_calibration` from only the legacy and final gates and never
+updated), `B2ACalibrationArtifact` (which exposed no pair-artifact
+outcome at all), and `kvcot.cli.cmd_b2a_calibrate` (which independently
+recomputed a two-gate `overall_passed` of its own, ignoring pair-artifact
+verification entirely -- meaning the CLI could print `passed=True` and
+return exit code `0` while `completion.json` said `gate_failed`/`2`). This
+section documents the fix, CPU-only, no GPU/inference/re-run, no change to
+the frozen B2A-R2 verdict, `FINAL_MANDATORY_GATE_CONDITIONS`, or any prior
+section's underlying artifacts.
+
+**One computation, before `payload` is even built.**
+`run_b2a_calibration` now computes `pair_record_verified`/
+`scientific_pair_artifacts_verified`/`overall_passed` ONCE, immediately
+after `final_gate_result`, before `payload = {...}` is constructed.
+`payload["passed"]` is set directly from this `overall_passed` (never a
+separately recomputed expression), and `payload["scientific_pair_artifacts_verified"]`/
+`payload["pair_record_verification"]` are populated at the same point.
+`completion.json` (written later) uses the SAME already-computed
+`overall_passed` -- it was never wrong, but now shares its source value
+with `final.json` by construction rather than by coincidence.
+
+**`attempt_directory is None` is never silently "verified".**
+`kvcot.discovery.attempt_verification.verify_pair_record_artifacts` was
+split: the on-disk-file checks stay there, and the population/identity
+checks (typed validity, 12 real + 1 no-op, unique identities, agreement
+with `completed_pair_identities`, no failed identity double-counted) moved
+into a new, standalone `verify_pair_record_population(rkv_result)` that
+needs no attempt directory at all. Production `--execute` always supplies
+an attempt directory (`kvcot.cli.cmd_b2a_calibrate` calls
+`create_attempt_directory()` unconditionally under `--execute`); the
+`attempt_directory is None` path exists only for helper/test callers. That
+path now calls `verify_pair_record_population` directly -- corrupting the
+in-memory pair-record population (with no file involved at all) still
+correctly flips `overall_passed` to `False`, proven by
+`test_no_attempt_directory_still_genuinely_verifies_pair_records_not_silently_true`.
+
+**`B2ACalibrationArtifact` gained three required-in-practice fields:**
+`overall_passed`, `scientific_pair_artifacts_verified`,
+`pair_record_verification_reasons` -- populated once, at the single
+`return B2ACalibrationArtifact(...)` call site, from the same values
+`payload`/`completion.json` already used. No caller reconstructs them.
+
+**The CLI now relays, never recomputes.**
+`kvcot.cli.cmd_b2a_calibrate` replaced its own two-gate
+`artifact.gate_result.passed and final_passed` computation with
+`overall_passed = artifact.overall_passed` -- a straight read, not a
+second definition of success. On failure it now also prints
+`pair_artifact_verification_reasons` when pair-artifact verification is
+why the attempt failed. The pre-existing `completion.json` fallback
+(written only `if not (attempt.path / "completion.json").exists()`) is
+unchanged -- the CLI still never overwrites the coordinator-authored
+record.
+
+**Test evidence.** `tests/unit/discovery/test_b2a_execute_coordinator.py`:
+the shared failure-assertion helper now also asserts
+`artifact.overall_passed is False`, `payload["passed"] is False`, and that
+`payload["passed"] == completion["gate_passed"] == artifact.overall_passed`
+across all six existing corruption scenarios (missing
+`pair_records.json`, missing `scientific_summary.json`, incomplete
+population, duplicate identity, identity mismatch, corrupt summary); the
+control case gained the matching positive assertions; one new test proves
+the no-attempt-directory path. `tests/unit/test_cli_b2a_calibrate.py`:
+`test_cli_returns_2_for_an_isolated_pair_artifact_failure` (legacy gate
+and final gate both `True`, pair-artifact verification the sole failing
+factor -- asserts exit code `2`, `passed=False` printed, the specific
+reason printed, and `completion.json` agreement),
+`test_cli_returns_0_when_all_three_factors_pass`, and a
+parametrized `test_cli_return_code_and_printed_passed_value_never_disagree_with_coordinator`
+proving the CLI's return code and printed value track
+`artifact.overall_passed` exactly in both directions. The two pre-existing
+CLI tests that fake the coordinator's return value
+(`test_execute_writes_real_device_preflight_evidence_and_threads_it_to_coordinator`,
+`test_execute_writes_completion_record_on_gate_failure`) were updated to
+supply the three new fields their fakes now require. 260 tests across
+every directly and indirectly affected file pass locally (torch-independent
+subset); full-suite confirmation is GitHub Actions CPU CI.
+
+```text
+B2A-R2 FORENSIC CLOSURE VERDICT:
+PAIR-RECORD PERSISTENCE REPAIRED -- READY FOR INDEPENDENT REVIEW; B2A-R3/B2B REMAIN BLOCKED
+```
