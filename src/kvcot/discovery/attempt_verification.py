@@ -85,12 +85,30 @@ RKV_ORDERED_SINGLETON_STAGES: tuple[str, ...] = (
 _COMMON_KNOWN_EXTRA_STAGES: frozenset[str] = frozenset({
     "before_model_load", "post_load_baseline", "model-load start", "failed",
 })
+# B2A-R2 repair (2026-07-22): the real B2A-R2 execute attempt (the first
+# real run to ever reach this deep into a genuinely-eligible R-KV example,
+# results/decisions/b2a_attempt_20260722T101253300941Z_..., preserved in
+# docs/evidence/B2A_R2_RESULT_2026-07-22.md) failed `attempt_artifacts_
+# verified` on two stage names -- `pass1_plan_construction` and
+# `minimized_target_evidence_construction` -- that `kvcot.discovery
+# .orchestrator.run_example`'s own `operation_runner` calls genuinely,
+# durably emit (verified directly against that module's source, not
+# assumed) but this list had never been extended to recognize. Both are
+# ordinary derivation sub-steps of a successful Pass 1/Pass 2 run, not
+# failure-path or test-only stages -- this was a genuine completeness gap
+# in this list, never previously exercised because no real GPU run had
+# reached this far in the harness until this attempt.
+_RKV_KNOWN_EXTRA_STAGES: frozenset[str] = frozenset({
+    "pass1_plan_construction", "minimized_target_evidence_construction",
+})
 FULLKV_KNOWN_PROGRESS_STAGES: frozenset[str] = (
     frozenset(FULLKV_REQUIRED_PROGRESS_STAGES)
     | _COMMON_KNOWN_EXTRA_STAGES
     | {"fullkv_complete_natural_generation"}
 )
-RKV_KNOWN_PROGRESS_STAGES: frozenset[str] = frozenset(RKV_REQUIRED_PROGRESS_STAGES) | _COMMON_KNOWN_EXTRA_STAGES
+RKV_KNOWN_PROGRESS_STAGES: frozenset[str] = (
+    frozenset(RKV_REQUIRED_PROGRESS_STAGES) | _COMMON_KNOWN_EXTRA_STAGES | _RKV_KNOWN_EXTRA_STAGES
+)
 KNOWN_PROGRESS_STATUSES: frozenset[str] = frozenset({"started", "completed", "failed"})
 
 _ARGV_SECRET_MARKERS = ("token", "secret", "password", "authorization")

@@ -83,9 +83,28 @@ def verify_device_gate_from_raw_evidence(
         "gpu_name", "device_index", "requested_device", "total_vram_bytes", "compute_capability",
         "driver_version", "cuda_runtime", "cudnn_version",
     )
+
+    def _normalize(value: Any) -> Any:
+        # B2A-R2 repair (2026-07-22, confirmed against a real three-way
+        # comparison): `cli_device_preflight` is a native in-process dict
+        # whose `compute_capability` is the `(8, 6)` tuple
+        # `StrictDeviceEvidence` produces, while `fullkv.device_evidence`/
+        # `rkv.device_evidence` round-trip through each worker's JSON
+        # result file, where JSON has no tuple type and `[8, 6]` comes back
+        # as a list -- `(8, 6) == [8, 6]` is `False` in Python even though
+        # the hardware observation is identical, so this previously failed
+        # `single_rtx3090_verified` for a genuinely-agreeing single RTX
+        # 3090 host. Normalizing list/tuple values to tuples before
+        # comparison fixes the representation mismatch without weakening
+        # the check: a genuine VALUE mismatch (different compute
+        # capability, different length) still fails after normalization.
+        if isinstance(value, (list, tuple)):
+            return tuple(value)
+        return value
+
     reference = observations[0]
     return all(
-        observation.get(field) == reference.get(field)
+        _normalize(observation.get(field)) == _normalize(reference.get(field))
         for observation in observations[1:]
         for field in agreement_fields
     )

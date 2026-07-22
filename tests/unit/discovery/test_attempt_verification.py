@@ -894,3 +894,37 @@ def test_final_reference_manifest_rejects_progress_line_mutation(tmp_path):
     ok, reasons = verify_final_reference_manifest(attempt_dir)
     assert ok is False
     assert any("progress.jsonl" in r and "hash changed" in r for r in reasons)
+
+
+# ---------------------------------------------------------------------------
+# B2A-R2 repair (2026-07-22): the real B2A-R2 execute attempt
+# (results/decisions/b2a_attempt_20260722T101253300941Z_..., preserved in
+# docs/evidence/B2A_R2_RESULT_2026-07-22.md) failed `attempt_artifacts_
+# verified` on two genuine stage names --
+# `kvcot.discovery.orchestrator.run_example`'s own `operation_runner` calls
+# ("pass1_plan_construction", "minimized_target_evidence_construction")
+# that this module's known-stage list had never been extended to
+# recognize. Confirmed by direct source inspection (orchestrator.py), not
+# assumed.
+# ---------------------------------------------------------------------------
+
+
+def test_rkv_known_stages_recognize_the_real_orchestrator_derivation_stages():
+    from kvcot.discovery.attempt_verification import RKV_KNOWN_PROGRESS_STAGES
+
+    assert "pass1_plan_construction" in RKV_KNOWN_PROGRESS_STAGES
+    assert "minimized_target_evidence_construction" in RKV_KNOWN_PROGRESS_STAGES
+
+
+def test_progress_journal_accepts_the_two_previously_unknown_rkv_stages(tmp_path):
+    attempt_dir, fullkv_result, rkv_result = _build_valid_attempt(tmp_path)
+    path = attempt_dir / "rkv" / "progress.jsonl"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    extra = [
+        json.dumps(_event("pass1_plan_construction", "completed", 50, "rkv")),
+        json.dumps(_event("minimized_target_evidence_construction", "completed", 51, "rkv")),
+    ]
+    path.write_text("\n".join(lines + extra) + "\n", encoding="utf-8")
+
+    _, reasons = _verify(attempt_dir, fullkv_result, rkv_result)
+    assert not any("unknown stage" in r for r in reasons), reasons

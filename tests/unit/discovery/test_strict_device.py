@@ -175,3 +175,42 @@ def test_device_gate_fails_on_cpu_disk_meta_offload_placement_evidence_absent_fr
     must still fail closed if the raw evidence dict is simply empty (e.g. a
     worker that never ran real device verification at all)."""
     assert verify_device_gate_from_raw_evidence({}, {}) is False
+
+
+# --------------------------------------------------------------------------
+# B2A-R2 repair (2026-07-22): the real B2A-R2 execute attempt
+# (results/decisions/b2a_attempt_20260722T101253300941Z_..., preserved in
+# docs/evidence/B2A_R2_RESULT_2026-07-22.md) failed `single_rtx3090_verified`
+# despite FullKV, R-KV, and the CLI's own preflight all genuinely observing
+# the identical single RTX 3090 -- confirmed root cause: `cli_device_
+# preflight`'s `compute_capability` is the native `(8, 6)` tuple
+# `StrictDeviceEvidence` produces in-process, while `fullkv.device_evidence`
+# /`rkv.device_evidence` round-trip through each worker's JSON result file
+# and come back as the list `[8, 6]` -- `(8, 6) == [8, 6]` is `False` in
+# Python. This is a representation-format defect, not a real hardware
+# disagreement.
+# --------------------------------------------------------------------------
+
+
+def test_device_gate_passes_when_compute_capability_is_tuple_on_one_side_and_list_on_others():
+    """Exact reproduction of the real B2A-R2 failure: CLI preflight has a
+    tuple, both workers have lists, all three otherwise agree."""
+    fullkv = _valid_device_evidence(compute_capability=[8, 6])
+    rkv = _valid_device_evidence(compute_capability=[8, 6])
+    cli = _valid_device_evidence(compute_capability=(8, 6))
+    assert verify_device_gate_from_raw_evidence(fullkv, rkv, cli) is True
+
+
+def test_device_gate_still_fails_on_a_genuine_compute_capability_mismatch_after_normalization():
+    """The fix must not weaken real-mismatch detection -- only the
+    tuple/list REPRESENTATION is normalized, not the VALUE comparison."""
+    fullkv = _valid_device_evidence(compute_capability=[8, 6])
+    rkv = _valid_device_evidence(compute_capability=[8, 6])
+    cli = _valid_device_evidence(compute_capability=(7, 5))
+    assert verify_device_gate_from_raw_evidence(fullkv, rkv, cli) is False
+
+
+def test_device_gate_still_fails_on_genuinely_different_length_sequences():
+    fullkv = _valid_device_evidence(compute_capability=[8, 6])
+    rkv = _valid_device_evidence(compute_capability=[8, 6, 0])
+    assert verify_device_gate_from_raw_evidence(fullkv, rkv) is False
