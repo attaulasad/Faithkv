@@ -2,6 +2,50 @@
 
 ## Current status (read this first)
 
+**B2A-R2 FORENSIC CLOSURE: MERGED (2026-07-22).** The B2A-R2 forensic
+pair-record persistence repair (three audit rounds, CPU-only, no
+GPU/inference/re-run -- see "Historical status" below and
+`docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md`) was
+independently audited and merged into `main`:
+
+```text
+PR: #20
+Merged at: 2026-07-22 15:48:27 UTC
+Merge commit: 9e78bc5edda0f0086d9e9aaea98896ac24caa7b0
+Audited repair head: dc2681158ed4d68fd8fe08f313033015a54ec942
+```
+
+This closure fixes durable pair-record persistence and outcome-consistency
+defects only -- it changes no historical B2A-R2 measurement or conclusion.
+B2A-R2 (`fb6f5081d47f45f4b4f9258c25e6883d`, qualified row
+`test/number_theory/820.json`) still exceeded the 4.00 GPU-hour runtime
+limit, with total projected runtime of approximately 5.01 GPU-hours, and
+its frozen verdict `B2A-R2 FINAL VERDICT: FAIL -- B2B BLOCKED` is
+unchanged. B2A-R2 is a consumed experimental attempt and is prohibited
+from rerun. This closure does not authorize B2B and does not authorize any
+FaithKV method implementation.
+
+The only next authorized activity is B2A-R3 protocol design and CPU-only
+implementation on `research/b2a-r3-runtime-qualified-calibration`:
+
+Design and implement the B2A-R3 runtime-qualified protocol entirely on CPU,
+using deterministic outcome-blind candidate selection and a conservative
+3.60-GPU-hour qualification target, while retaining the hard 4.00-GPU-hour
+execution gate.
+
+GPU rental, FullKV qualification, R-KV execution, pair evaluation, and
+B2A-R3 execution all remain unauthorized pending a new, separate, dated
+authorization.
+
+```text
+B2A-R2 FORENSIC CLOSURE VERDICT:
+PAIR-RECORD PERSISTENCE REPAIRED AND MERGED
+```
+
+### Historical status
+
+#### Prior status: B2A-R2 forensic pair-record persistence repair, audit round 3 (2026-07-22)
+
 **B2A-R2 FORENSIC PAIR-RECORD PERSISTENCE REPAIR (2026-07-22, CPU-only,
 no GPU/inference/re-run).** B2A-R1 and B2A-R2 have both now executed (see
 below) -- this is not a stale "B2A has never run" state. B2A-R2
@@ -19,15 +63,14 @@ change to the runtime verdict. Repaired with a version-aware
 and a dedicated verifier. Full detail:
 `docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md`;
 `docs/B2A_R2_RESULT_2026-07-22.md` §8 (dated clarification, does not alter
-the original verdict/evidence). **B2A-R3 and B2B remain blocked -- this
-repair authorizes neither.**
+the original verdict/evidence). This repair was not, by itself, an
+authorization for B2A-R3 or B2B -- see "Current status" above for the
+subsequent merge closure.
 
 ```text
 B2A-R2 FORENSIC CLOSURE VERDICT:
 PAIR-RECORD PERSISTENCE REPAIRED -- READY FOR INDEPENDENT REVIEW; B2A-R3/B2B REMAIN BLOCKED
 ```
-
-### Historical status
 
 #### Prior status: B2A-R1 failure closure and B2A-R2 pre-registration (2026-07-22)
 

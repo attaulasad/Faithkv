@@ -430,3 +430,39 @@ subset); full-suite confirmation is GitHub Actions CPU CI.
 B2A-R2 FORENSIC CLOSURE VERDICT:
 PAIR-RECORD PERSISTENCE REPAIRED -- READY FOR INDEPENDENT REVIEW; B2A-R3/B2B REMAIN BLOCKED
 ```
+
+## 12. Merge closure (2026-07-22)
+
+The round-3 repair above was independently audited and merged into `main`:
+
+```text
+PR: #20
+Merged at: 2026-07-22 15:48:27 UTC
+Merge commit: 9e78bc5edda0f0086d9e9aaea98896ac24caa7b0
+Audited repair head: dc2681158ed4d68fd8fe08f313033015a54ec942
+```
+
+This merge closes the durable pair-record persistence and
+outcome-consistency defects documented in §§1-11 above. It changes no
+historical B2A-R2 measurement or conclusion: B2A-R2 remains a consumed
+experimental attempt, scientifically unsuccessful because projected
+runtime was approximately 5.01 GPU-hours, above the 4.00-hour limit
+(`B2A-R2 FINAL VERDICT: FAIL -- B2B BLOCKED`, unchanged), and B2A-R2 is
+prohibited from rerun. This closure is not an authorization for B2B and
+not an authorization for FaithKV method implementation.
+
+The only next authorized activity is B2A-R3 protocol design and CPU-only
+implementation on `research/b2a-r3-runtime-qualified-calibration`:
+
+Design and implement the B2A-R3 runtime-qualified protocol entirely on CPU,
+using deterministic outcome-blind candidate selection and a conservative
+3.60-GPU-hour qualification target, while retaining the hard 4.00-GPU-hour
+execution gate.
+
+GPU rental, FullKV qualification, R-KV execution, pair evaluation, and
+B2A-R3 execution remain unauthorized.
+
+```text
+B2A-R2 FORENSIC CLOSURE VERDICT:
+PAIR-RECORD PERSISTENCE REPAIRED AND MERGED
+```
