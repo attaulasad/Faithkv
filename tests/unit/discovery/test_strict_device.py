@@ -10,7 +10,12 @@ from kvcot.discovery.strict_device import (
 
 
 class FakeCuda:
-    cudnn = SimpleNamespace(version=lambda: 8900)
+    """Deliberately has no `cudnn` attribute -- real `torch.cuda` (torch
+    2.6.0) has none either; `verify_single_rtx3090` must read the cuDNN
+    version from `torch_module.backends.cudnn`, never from `cuda.cudnn`
+    (that AttributeError was a real B2A preflight crash on the RTX 3090
+    validation host, first B2A execution attempt, 2026-07-22 -- see
+    CHANGELOG.md)."""
 
     def __init__(self, *, count=1, name="NVIDIA GeForce RTX 3090"):
         self.count = count
@@ -29,15 +34,23 @@ class FakeCuda:
         return (8, 6)
 
 
+def _fake_torch_module(*, cuda_version="12.1", cudnn_version=8900):
+    return SimpleNamespace(
+        version=SimpleNamespace(cuda=cuda_version),
+        backends=SimpleNamespace(cudnn=SimpleNamespace(version=lambda: cudnn_version)),
+    )
+
+
 def test_strict_device_records_complete_single_3090_evidence():
     result = verify_single_rtx3090(
-        FakeCuda(), torch_module=SimpleNamespace(version=SimpleNamespace(cuda="12.1")),
+        FakeCuda(), torch_module=_fake_torch_module(),
         driver_version_fn=lambda: "555.42",
     )
     assert result.visible_gpu_count == 1
     assert result.device_index == 0
     assert result.total_vram_bytes == 24 * 1024**3
     assert result.compute_capability == (8, 6)
+    assert result.cudnn_version == "8900"
     assert result.policy_satisfied
 
 
@@ -46,7 +59,7 @@ def test_strict_device_fails_closed_for_wrong_visibility_or_model(count, name):
     with pytest.raises(StrictDeviceError):
         verify_single_rtx3090(
             FakeCuda(count=count, name=name),
-            torch_module=SimpleNamespace(version=SimpleNamespace(cuda="12.1")),
+            torch_module=_fake_torch_module(),
             driver_version_fn=lambda: "555.42",
         )
 

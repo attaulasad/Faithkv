@@ -187,7 +187,7 @@ def verify_single_rtx3090(
         raise StrictDeviceError(f"B2A requires an RTX 3090, observed {name!r}")
     capability = tuple(int(v) for v in cuda.get_device_capability(index))
     runtime = getattr(getattr(torch_module, "version", None), "cuda", None)
-    cudnn = cuda.cudnn.version()
+    cudnn = torch_module.backends.cudnn.version()
     if runtime is None or cudnn is None:
         raise StrictDeviceError("CUDA runtime and cuDNN versions must both be available")
     return StrictDeviceEvidence(

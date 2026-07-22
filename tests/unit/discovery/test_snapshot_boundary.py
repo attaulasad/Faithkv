@@ -55,9 +55,10 @@ def test_floating_revision_and_incomplete_files_fail_closed(monkeypatch, tmp_pat
 
 
 class FakeCuda:
-    class cudnn:
-        @staticmethod
-        def version(): return 90100
+    """No `cudnn` attribute -- real `torch.cuda` (torch 2.6.0) has none
+    either; `verify_single_rtx3090` reads the cuDNN version from
+    `torch_module.backends.cudnn`, never from `cuda.cudnn` (see
+    tests/unit/discovery/test_strict_device.py's `FakeCuda` docstring)."""
 
     def __init__(self, count=1, name="NVIDIA GeForce RTX 3090"):
         self.count = count
@@ -69,21 +70,29 @@ class FakeCuda:
     def get_device_capability(self, index): return (8, 6)
 
 
+def _fake_torch_module_with_cudnn(*, cuda_version="12.8", cudnn_version=90100):
+    return SimpleNamespace(
+        version=SimpleNamespace(cuda=cuda_version),
+        backends=SimpleNamespace(cudnn=SimpleNamespace(version=lambda: cudnn_version)),
+    )
+
+
 def test_strict_device_preflight_records_complete_single_3090_identity():
     evidence = verify_single_rtx3090(
-        FakeCuda(), torch_module=SimpleNamespace(version=SimpleNamespace(cuda="12.8")),
+        FakeCuda(), torch_module=_fake_torch_module_with_cudnn(),
         driver_version_fn=lambda: "570.00",
     )
     assert evidence.policy_satisfied is True
     assert evidence.visible_gpu_count == 1
     assert evidence.compute_capability == (8, 6)
+    assert evidence.cudnn_version == "90100"
 
 
 @pytest.mark.parametrize("cuda,match", [(FakeCuda(count=2), "exactly one"), (FakeCuda(name="A100"), "RTX 3090")])
 def test_strict_device_preflight_rejects_wrong_hardware(cuda, match):
     with pytest.raises(StrictDeviceError, match=match):
         verify_single_rtx3090(
-            cuda, torch_module=SimpleNamespace(version=SimpleNamespace(cuda="12.8")),
+            cuda, torch_module=_fake_torch_module_with_cudnn(),
             driver_version_fn=lambda: "570.00",
         )
 
