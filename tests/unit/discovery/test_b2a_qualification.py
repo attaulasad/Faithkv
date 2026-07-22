@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import builtins
 import copy
+from types import SimpleNamespace
 
 import pytest
 
 from kvcot.discovery.b2a_qualification import (
     MAX_CANDIDATES_ATTEMPTED,
     QUALIFICATION_CONDITIONS,
+    _default_fullkv_runner,
     build_candidate_outcome,
     evaluate_candidate_qualification,
     run_qualification_dry_run,
@@ -442,3 +444,64 @@ def test_execute_respects_max_twelve_even_if_more_are_somehow_present(config):
     with pytest.raises(ManifestPreparationError, match="qualification limit"):
         run_qualification_execute(config, manifest, "path.json", config_hash="h" * 64, fullkv_runner=runner)
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Regression (2026-07-22): the FIRST real GPU qualification run crashed with
+# `AttributeError: 'dict' object has no attribute 'model_dump'` -- production
+# `run_fullkv_worker` already returns a JSON-serializable dict (its own
+# internal `.model_dump(mode="json")` call), but `_default_fullkv_runner`'s
+# inner closure called `.model_dump()` on that dict AGAIN. No candidate was
+# ever evaluated before this crash (it happened at result serialization,
+# after generation but before any qualification condition was computed), so
+# rerunning qualification after this fix does not re-attempt anything that
+# had already produced a verdict.
+# ---------------------------------------------------------------------------
+
+
+def test_default_fullkv_runner_returns_the_dict_run_fullkv_worker_produces_unmodified(monkeypatch, config):
+    """`run_fullkv_worker` returns a plain dict (its own
+    `.model_dump(mode='json')` already applied) -- `_default_fullkv_runner`'s
+    closure must return that dict AS-IS, never call `.model_dump()` on it
+    again (that call raises `AttributeError` on a plain dict, exactly the
+    real crash this regression test reproduces)."""
+    import torch
+
+    from kvcot.discovery import b2a_qualification
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr("kvcot.discovery.strict_device.verify_single_rtx3090", lambda *a, **k: None)
+
+    fake_snapshot = SimpleNamespace(local_path="/fake/snapshot")
+    monkeypatch.setattr(
+        "kvcot.discovery.snapshot_boundary.resolve_local_snapshot", lambda *a, **k: fake_snapshot
+    )
+    monkeypatch.setattr(
+        "transformers.AutoTokenizer.from_pretrained", classmethod(lambda cls, *a, **k: SimpleNamespace())
+    )
+    monkeypatch.setattr(
+        "kvcot.discovery.strict_device.load_fullkv_discovery_model", lambda *a, **k: SimpleNamespace()
+    )
+
+    real_worker_dict_result = {
+        "role": "fullkv", "natural_generated_token_ids": [1, 2, 3], "natural_answer_status": "correct",
+        "prompt_token_count": 5, "cap_hit": False, "wall_seconds": 1.0,
+    }
+    monkeypatch.setattr(
+        "kvcot.discovery.b2a_workers.run_fullkv_worker", lambda *a, **k: real_worker_dict_result
+    )
+    monkeypatch.setattr(
+        "kvcot.discovery.manifest_prepare._render_and_tokenize",
+        lambda *a, **k: (SimpleNamespace(chat_template="t"), "msg", [{"role": "user", "content": "x"}], [1, 2, 3]),
+    )
+
+    runner = _default_fullkv_runner(config)
+    candidate = {
+        "row": {"problem": "p", "answer": "4", "unique_id": "u", "subject": "Algebra", "level": "5"},
+        "dataset_revision": config.dataset.revision,
+        "source_example_index": 0,
+        "unique_id": "u",
+        "raw_row_sha256": "a" * 64,
+    }
+    result = runner(candidate)
+    assert result == real_worker_dict_result, "the runner must return run_fullkv_worker's dict unmodified"

@@ -294,8 +294,11 @@ def _default_fullkv_runner(config: Any):
             prompt_token_count=len(token_ids),
             prompt_token_ids=tuple(token_ids),
         )
-        result = run_fullkv_worker(config, manifest, _load_model=lambda: model, _load_tokenizer=lambda: tokenizer)
-        return result.model_dump(mode="json")
+        # `run_fullkv_worker` already returns a JSON-serializable dict (its
+        # own final `.model_dump(mode="json")` call, not a pydantic object)
+        # -- calling `.model_dump()` again here was the actual bug this
+        # comment now guards against regressing.
+        return run_fullkv_worker(config, manifest, _load_model=lambda: model, _load_tokenizer=lambda: tokenizer)
 
     return run
 
