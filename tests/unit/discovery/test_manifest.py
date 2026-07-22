@@ -37,10 +37,17 @@ VALID_KWARGS = dict(
 
 
 def test_frozen_manifest_file_loads_and_validates():
+    """example_index=365 (unique_id="test/number_theory/820.json") since
+    the B2A-R2 row freeze (2026-07-22,
+    docs/B2A_R1_FAILURE_AND_B2A_R2_PROTOCOL_2026-07-22.md) -- B2A-R1's
+    example_index=0 produced zero R-KV compaction events and was replaced
+    by FullKV-only qualification's first satisfying candidate, never a
+    hand-picked index."""
     manifest = load_b2a_one_example_manifest()
     assert manifest.dataset_repo == MATH500_DATASET_REPO
     assert manifest.dataset_revision == MATH500_DATASET_REVISION
-    assert manifest.example_index == 0
+    assert manifest.example_index == 365
+    assert manifest.unique_id == "test/number_theory/820.json"
     assert len(manifest.raw_content_hash) == 64
 
 
