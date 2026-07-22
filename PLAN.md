@@ -1,8 +1,34 @@
 # Plan and status
 
-## B1 FINAL CPU CLOSURE VERDICT: INCOMPLETE — B2A/GPU REMAIN BLOCKED
+## B2A ONE-EXAMPLE GPU AUTHORIZATION (2026-07-22)
 
-**Round 4 (2026-07-21, current).** The round-3 paragraph below claimed
+B1 CPU closure is complete; CPU CI is green at run
+[29892965613](https://github.com/asad073-ui/Faithkv/actions/runs/29892965613)
+(commit `a4f6e4298eba10d037ca7e6570fe6d69aad2472f`). Bounded GPU mechanical
+validation is complete on the Vast RTX 3090 host: 12 of 14 collected
+GPU-marked tests pass (replay identity, stock-vs-patched no-op parity,
+cross-example state isolation, snapshot restoration, R-KV schedule
+prediction, and more). The remaining two
+(`test_probe_stability_gpu.py`'s f=1 stability checks — FullKV 17/20, R-KV
+b256 15/20, against the 0.90 threshold) are a preserved, unmodified
+historical Stage 0 result for the archived Qwen-1.5B/GSM8K early-answering
+protocol; they are non-blocking for B2A, which exercises a disjoint
+mechanism (greedy decoding throughout, no early-answering control suffix,
+`DeepSeek-R1-Distill-Llama-8B`/MATH-500). See
+`docs/B2A_ONE_EXAMPLE_GPU_AUTHORIZATION_2026-07-22.md` and CLAUDE.md
+§1c/§4c for the full authorization and its exact scope: exactly one B2A
+(`b2a-calibrate --execute`) engineering-calibration attempt, one frozen
+example, hard 22 GiB / 4.00 GPU-hour limits.
+
+No B2A result exists yet. No B2B result exists. No FaithKV method exists.
+B2B and any FaithKV method implementation remain blocked pending a
+separate, future, independent authorization.
+
+## Historical status
+
+## Prior status: Phase B1 final CPU closure, round 4 — B1 FINAL CPU CLOSURE VERDICT: INCOMPLETE — B2A/GPU REMAIN BLOCKED (2026-07-21)
+
+**Round 4 (2026-07-21).** The round-3 paragraph below claimed
 only two documentation formalities remained — that was an overclaim. A
 final independent audit confirmed nine further functional
 execution-boundary defects (F1–F9: wrong failing-stage attribution,
@@ -27,8 +53,6 @@ Non-GPU suite at round 3: 1102 passed, 14 deselected.
 No B2A result exists. No B2B result exists. No RTX 3090 timing exists. No
 FaithKV method exists. Independent audit is required before any GPU
 authorization.
-
-## Historical status
 
 ## Current status: Phase B1 execution-boundary closure — focused completion pass on B1B-R4.1 — INCOMPLETE; GPU/B2A/B2B STILL BLOCKED
 

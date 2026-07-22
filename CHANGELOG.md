@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-07-22 — B2A one-example GPU authorization (AUTHORIZATION ONLY — no execution recorded by this entry; B2B/method remain blocked)
+
+Separate, explicit, dated authorization for exactly one B2A
+(`b2a-calibrate --execute`) engineering-calibration attempt against the
+committed one-example manifest, per CLAUDE.md §1a/§1b's requirement that
+B2A needs its own future authorization. Full rationale and evidence:
+`docs/B2A_ONE_EXAMPLE_GPU_AUTHORIZATION_2026-07-22.md`; CLAUDE.md gained
+§1c and §4c (no existing section edited or weakened).
+
+- CPU CI green at `a4f6e4298eba10d037ca7e6570fe6d69aad2472f` (run
+  [29892965613](https://github.com/asad073-ui/Faithkv/actions/runs/29892965613)),
+  bounded GPU mechanical validation complete (12/14 collected GPU tests
+  passing; the two `test_probe_stability_gpu.py` failures are preserved,
+  unmodified historical Stage 0 results for the archived Qwen-1.5B/GSM8K
+  protocol and do not gate this disjoint Llama-8B/MATH-500 mechanism).
+- Authorizes exactly one execution attempt, one frozen example, hard limits
+  of 22 GiB peak tracked memory and 4.00 projected GPU-hours, one RTX 3090,
+  no offload. Does not authorize B2B, a 12-example pilot, a second attempt,
+  a threshold change, or any method implementation.
+- No source, test, config, manifest, or submodule change in this entry —
+  documentation only.
+
 ## 2026-07-21 — Final bounded B1 independent-audit repair, round 4: F1–F10 (INCOMPLETE — B2A/GPU remain blocked; no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; forward-only from `419bbc0020b374d6c4a2085a7a04ff293d7ec680`)
 
 Fourth forward-only repair pass. Round 3's claim that only documentation

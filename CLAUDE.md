@@ -113,6 +113,46 @@ listed below:
   (vLLM, SGLang, multi-GPU, an LLM judge, a benchmark suite, KIVI, mistake
   insertion, or any method implementation remain fully prohibited).
 
+### Section 1c — B2A one-example GPU authorization (dated 2026-07-22)
+
+Added by
+`docs/B2A_ONE_EXAMPLE_GPU_AUTHORIZATION_2026-07-22.md`, superseding nothing
+above — this is the separate, explicit, dated authorization §1a and §1b
+both said was still required before B2A. It authorizes exactly one
+`b2a-calibrate --execute` attempt against the committed one-example
+manifest (`configs/discovery/b2a_one_example_manifest.json`) under
+`configs/discovery/llama8b_math500_b1024.yaml`, unmodified — nothing
+broader:
+
+- Authorizes exactly one execution attempt of the existing B1B harness
+  architecture against real weights: one frozen MATH-500 example, FullKV
+  and R-KV (budget 1024) workers, the existing 12-real-pair-plus-one-no-op
+  design, on one RTX 3090, batch size 1, no CPU/disk/meta offload, peak
+  tracked CUDA memory <= 22 GiB, projected complete-pilot runtime <= 4.00
+  GPU-hours.
+- Does **not** authorize B2B (the bounded discovery pilot), a 12-example
+  run of any kind, a second B2A attempt, any method implementation, any new
+  eviction criterion, or any change to a scientific threshold, event
+  selection, pair selection, candidate/donor definition, model, dataset
+  row, revision, seed, budget, or generation config.
+- The two failed historical results in
+  `tests/integration/test_probe_stability_gpu.py` (FullKV 17/20, R-KV b256
+  15/20 against the 0.90 f=1 stability threshold) are **not** blockers for
+  this authorization and are **not** altered, rerun, tuned, or redescribed
+  as passing — see `docs/B2A_ONE_EXAMPLE_GPU_AUTHORIZATION_2026-07-22.md`
+  §3 for why that archived Qwen-1.5B/GSM8K early-answering measurement
+  (sampled base continuation, greedy probe continuation conditioned on an
+  inserted control suffix) does not bear on the disjoint Llama-8B/MATH-500
+  B2A mechanism (greedy throughout, no control suffix, causal
+  candidate/donor swaps).
+- This repository still contains **no final faithfulness-aware compression
+  method** and this authorization implements **no learned eviction
+  policy** — it is one bounded engineering-calibration execution, never a
+  method, and never a scientific pilot result.
+- Once FullKV or R-KV inference begins under this authorization, the
+  attempt is scientifically consumed — no automatic or unauthorized second
+  attempt.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.
@@ -183,6 +223,27 @@ into `configs/lock.yaml`.
 | GPU/inference authorization | **None.** Not granted by this table or this document. |
 | Method authorization | **None.** No compression policy or learned eviction policy is implemented under this exception. |
 | B2A/B2B execution | **Not authorized.** Requires its own separate, future, dated authorization. |
+
+### Section 4c — B2A one-example execution settings (dated 2026-07-22)
+
+**No row in the §4/§4a/§4b tables above is changed.** `configs/lock.yaml` is
+**not** changed by this table. These are the execution-time settings for
+the single attempt authorized by §1c, resolved entirely from
+`configs/discovery/llama8b_math500_b1024.yaml` and
+`configs/discovery/b2a_one_example_manifest.json` — this table records them
+for audit purposes, it does not itself set them.
+
+| Item | B2A one-example value |
+|---|---|
+| Example scope | Exactly one frozen MATH-500 row, identified by the committed manifest |
+| Model | `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`, pinned revision, resolved from the discovery config only |
+| Generation mode | Greedy (`do_sample=False`), batch size 1, no early-answering control suffix |
+| Workers | FullKV and R-KV (budget 1024), existing 12-real-pair-plus-one-no-op design, unmodified |
+| Hardware | One visible RTX 3090, no CPU/disk/meta offload |
+| Memory limit | Peak tracked CUDA memory <= 22 GiB — hard gate, not weakened on failure |
+| Runtime limit | Projected complete-pilot runtime <= 4.00 GPU-hours — hard gate, not weakened on failure |
+| Attempt count | Exactly one `b2a-calibrate --execute` attempt; consumed once FullKV or R-KV inference begins |
+| B2B authorization | **None.** Not granted by this table or §1c. |
 
 ## Section 8 — Metrics and statistics
 
