@@ -811,6 +811,22 @@ def run_b2a_calibration(
                 python_executable=python_executable or sys_module.executable, typed_results=True,
             )
             payload["pre_final_verification"] = {"verified": prefinal_ok, "reasons": list(prefinal_reasons)}
+
+            # B2A-R2 forensic repair
+            # (docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md):
+            # additional, NEVER-FATAL evidence -- deliberately does not gate
+            # `overall_passed`/`B2AExecutionRefused` (the frozen scientific
+            # gate is unchanged by this repair). Recorded so a reviewer can
+            # see whether the complete SwapPairRecord population durably
+            # survived to disk for this specific attempt.
+            from kvcot.discovery.attempt_verification import verify_pair_record_artifacts
+
+            pair_record_verified, pair_record_reasons = verify_pair_record_artifacts(
+                attempt_directory, rkv_result=rkv.model_dump(mode="json"),
+            )
+            payload["pair_record_verification"] = {
+                "verified": pair_record_verified, "reasons": list(pair_record_reasons),
+            }
             if overall_passed and not prefinal_ok:
                 raise B2AExecutionRefused(
                     f"pre-final artifact verification failed after completion was recorded: {list(prefinal_reasons)}"

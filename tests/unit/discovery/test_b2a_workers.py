@@ -97,6 +97,10 @@ def _rkv_payload(**overrides) -> dict:
         runtime_identity=_RUNTIME_IDENTITY, memory=_MEMORY, minimized_target_evidence=[],
         peak_cuda_allocated_bytes=1000, peak_cuda_reserved_bytes=2000, every_parameter_on_cuda=True,
         batch_size=1, software_versions={"torch": "2.0"},
+        # B2A-R2 forensic repair: RKVWorkerResult is RKVWorkerResultV2 and
+        # requires this field explicitly -- these coordination-only tests
+        # don't exercise pair-level science, so an honest empty population.
+        pair_records=[],
     )
     payload.update(overrides)
     return payload

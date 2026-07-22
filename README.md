@@ -2,7 +2,35 @@
 
 ## Current status (read this first)
 
-**B2A-R1 FAILURE CLOSURE AND B2A-R2 PRE-REGISTRATION (2026-07-22).**
+**B2A-R2 FORENSIC PAIR-RECORD PERSISTENCE REPAIR (2026-07-22, CPU-only,
+no GPU/inference/re-run).** B2A-R1 and B2A-R2 have both now executed (see
+below) -- this is not a stale "B2A has never run" state. B2A-R2
+(`fb6f5081d47f45f4b4f9258c25e6883d`, against the qualified row
+`test/number_theory/820.json`) ran to completion with 27/28 legacy-gate
+conditions passing; its frozen verdict remains
+`B2A-R2 FINAL VERDICT: FAIL -- B2B BLOCKED` (5.01 GPU-hours projected vs.
+the 4.00-hour limit). A post-run audit then found that the twelve real
+pairs' scientific outcomes (`swap_gain`, per-token NLL arrays) were never
+exported by the worker-result schema and are unrecoverable from the
+preserved archive -- a durable-persistence defect, not a re-run and not a
+change to the runtime verdict. Repaired with a version-aware
+`RKVWorkerResultV1`/`RKVWorkerResultV2` schema split, new
+`rkv/pair_records.json`/`rkv/scientific_summary.json` attempt artifacts,
+and a dedicated verifier. Full detail:
+`docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md`;
+`docs/B2A_R2_RESULT_2026-07-22.md` §8 (dated clarification, does not alter
+the original verdict/evidence). **B2A-R3 and B2B remain blocked -- this
+repair authorizes neither.**
+
+```text
+B2A-R2 FORENSIC CLOSURE VERDICT:
+PAIR-RECORD PERSISTENCE REPAIRED -- READY FOR INDEPENDENT REVIEW; B2A-R3/B2B REMAIN BLOCKED
+```
+
+### Historical status
+
+#### Prior status: B2A-R1 failure closure and B2A-R2 pre-registration (2026-07-22)
+
 B2A-R1 (the single attempt CLAUDE.md §1c authorized) executed against
 `example_index=0`: both FullKV and R-KV workers ran (return code 0 each),
 so the attempt is scientifically consumed, but it produced ZERO R-KV
@@ -20,17 +48,15 @@ convention into `math-verify` was corrected (confirmed root cause: bare,
 non-`\boxed{}` compound LaTeX is unreliably parsed by that library's
 fallback path).
 
-B2A-R2 is pre-registered, not yet executed: a committed, deterministically
--ordered 12-row MATH-500 candidate manifest, FullKV-only qualification
-(`kvcot qualify-b2a-row`, R-KV never imported) against 10 frozen
-conditions stopping at the first qualified row (no qualified row means
-immediate stop), and a fail-closed freeze step before any further
-`b2a-calibrate --execute` attempt. See CLAUDE.md §1d for the complete,
-exact scope.
+B2A-R2 was pre-registered, then executed (see "Current status" above): a
+committed, deterministically-ordered 12-row MATH-500 candidate manifest,
+FullKV-only qualification (`kvcot qualify-b2a-row`, R-KV never imported)
+against 10 frozen conditions stopping at the first qualified row (no
+qualified row means immediate stop), and a fail-closed freeze step before
+the single further `b2a-calibrate --execute` attempt. See CLAUDE.md §1d
+for the complete, exact scope.
 
-No B2A-R2 result exists yet. No B2B result exists. No FaithKV method exists.
-
-### Historical status
+No B2B result exists. No FaithKV method exists.
 
 #### Prior status: B2A one-example GPU authorization (2026-07-22)
 

@@ -1,6 +1,51 @@
 # Plan and status
 
-## B2A-R1 FAILURE CLOSURE AND B2A-R2 PRE-REGISTRATION (2026-07-22)
+## B2A-R2 FORENSIC PAIR-RECORD PERSISTENCE REPAIR (2026-07-22)
+
+CPU-only durable-artifact repair -- no GPU, no inference, no re-run. B2A-R1
+and B2A-R2 have both already executed (see the B2A-R1/R2 section
+immediately below, now historical) -- any wording elsewhere in this
+repository implying B2A has never run refers to a status prior to
+2026-07-22 and is superseded here.
+
+B2A-R2 (`fb6f5081d47f45f4b4f9258c25e6883d`, qualified row
+`test/number_theory/820.json`) ran to completion: 27/28 legacy-gate
+conditions passed; the sole failure, `runtime_within_limit` (5.01 projected
+GPU-hours vs. the 4.00-hour limit), remains the frozen verdict, unchanged
+by this repair: `B2A-R2 FINAL VERDICT: FAIL -- B2B BLOCKED`.
+
+A post-run audit of the preserved archive found that "full per-pair
+evidence" was too broad: execution accounting, identities, and mutation/
+parity evidence survived, but the twelve real interventions' scientific
+outcomes (`swap_gain`, 48-value `baseline_per_token_nll`/
+`swapped_per_token_nll`) were never exported by `RKVWorkerResult` and are
+unrecoverable from the archive (the GPU instance is gone; no value was
+estimated, inferred, or backfilled). Repaired: `RKVWorkerResult` split
+into structurally-versioned `RKVWorkerResultV1` (legacy, unmodified,
+still parseable) / `RKVWorkerResultV2` (adds a REQUIRED `pair_records`
+field); `run_rkv_worker` now populates it directly from
+`ExampleResult.pair_records`; every future successful attempt durably
+writes `rkv/pair_records.json` and `rkv/scientific_summary.json` (a pure
+CPU summary including a dependency-free tie-aware Spearman correlation);
+a new, deliberately-standalone
+`kvcot.discovery.attempt_verification.verify_pair_record_artifacts`
+checks population completeness, identity agreement, and exact
+recomputation -- wired into the live coordinator as additional,
+never-fatal evidence, never a new mandatory gate condition. Full detail:
+`docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md`;
+`docs/B2A_R2_RESULT_2026-07-22.md` §8 (dated clarification; also corrects
+a decimal-GB-labeled-as-GiB documentation arithmetic error in that
+document's memory table -- does not change any verdict).
+
+**No B2A-R3 attempt is authorized by this document. B2B remains blocked.
+No FaithKV method exists.**
+
+```text
+B2A-R2 FORENSIC CLOSURE VERDICT:
+PAIR-RECORD PERSISTENCE REPAIRED -- READY FOR INDEPENDENT REVIEW; B2A-R3/B2B REMAIN BLOCKED
+```
+
+## Prior status: B2A-R1 failure closure and B2A-R2 pre-registration (2026-07-22)
 
 B2A-R1 (the single attempt CLAUDE.md §1c authorized) executed against
 `example_index=0`: both FullKV and R-KV workers ran (return code 0 each),

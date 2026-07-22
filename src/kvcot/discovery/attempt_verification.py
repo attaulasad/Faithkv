@@ -53,6 +53,19 @@ REQUIRED_ATTEMPT_FILES: frozenset[str] = frozenset({
     "rkv/envelope.json", "rkv/result.json", "rkv/timing.json", "rkv/memory.json",
     "rkv/pair_identities.json", "rkv/semantic_swaps.json", "rkv/replay_evidence.json",
 })
+# B2A-R2 forensic repair
+# (docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md): kept OUT of
+# `REQUIRED_ATTEMPT_FILES`/`verify_attempt_artifacts` deliberately --
+# `verify_attempt_artifacts` is exercised by many pre-existing tests
+# (`tests/unit/discovery/test_attempt_verification.py`) against minimal,
+# non-B2A-shaped fake pair identities unrelated to this repair; folding a
+# hard pair-record requirement into that shared, generic function would
+# fail those tests for reasons that have nothing to do with what they
+# test. `verify_pair_record_artifacts` below is the dedicated, SEPARATELY
+# callable/testable V2 completeness verifier
+# (`kvcot.discovery.b2a_execute.run_b2a_calibration` calls it as
+# additional, non-fatal evidence -- see `payload["pair_record_verification"]`).
+REQUIRED_PAIR_RECORD_FILES: frozenset[str] = frozenset({"rkv/pair_records.json", "rkv/scientific_summary.json"})
 
 # Independent-audit Gate H7.4: the exact durable progress-journal stage
 # names BOTH worker bodies and the worker entry point actually emit in
@@ -657,6 +670,129 @@ def verify_attempt_artifacts(
         and replay_evidence != rkv_result_json.get("replay_evidence")
     ):
         reasons.append("rkv/replay_evidence.json does not match rkv/result.json's replay_evidence")
+
+    return (len(reasons) == 0), tuple(reasons)
+
+
+def _pair_record_identity_from_dict(item: dict[str, Any]) -> tuple[Any, ...]:
+    """The SAME shape `kvcot.discovery.b2a_evidence._pair_identity` derives
+    from a typed `SwapPairRecord` -- built from an identity dict
+    (`attempted_pair_identities`/`completed_pair_identities`/
+    `failed_pair_identities`'s own element shape) so the two can be compared
+    as sets."""
+    return (
+        item.get("compaction_event_id"), item.get("layer_index"), item.get("kv_head_index"),
+        item.get("candidate_absolute_position"), item.get("donor_absolute_position"),
+        item.get("pair_kind"),
+    )
+
+
+def verify_pair_record_artifacts(
+    attempt_directory: Path, *, rkv_result: dict[str, Any]
+) -> tuple[bool, tuple[str, ...]]:
+    """B2A-R2 forensic pair-record persistence verifier
+    (`docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md` §9) --
+    dedicated and SEPARATE from `verify_attempt_artifacts`/
+    `REQUIRED_ATTEMPT_FILES` on purpose: that function is exercised by many
+    pre-existing tests (`tests/unit/discovery/test_attempt_verification.py`)
+    against minimal, non-B2A-shaped fake pair identities unrelated to this
+    repair -- folding a hard pair-record population/identity requirement
+    into that shared, generic function would fail those tests for reasons
+    that have nothing to do with what they test. Reuses `SwapPairRecord`
+    (the SAME validators the producer already runs),
+    `kvcot.discovery.b2a_evidence._pair_identity` (the SAME canonical
+    identity tuple `unique_completed_real_pair_count` etc. already use), and
+    `kvcot.discovery.scientific_summary.build_scientific_summary` (the SAME
+    statistics formula the producer already runs) -- never a second,
+    independently-written identity, validity, or statistics definition.
+
+    Returns `(True, ())` for a legacy (V1) result (`"pair_records" not in
+    rkv_result`) -- never fabricates a requirement a pre-repair result never
+    had.
+    """
+    if "pair_records" not in rkv_result:
+        return True, ()
+
+    from kvcot.discovery.b2a_evidence import _pair_identity
+    from kvcot.discovery.constants import B2A_NOOP_PAIR_EVALUATIONS_TOTAL, B2A_REAL_PAIR_EVALUATIONS_TOTAL
+    from kvcot.discovery.scientific_summary import build_scientific_summary
+    from kvcot.discovery.schemas import SwapPairRecord
+
+    reasons: list[str] = []
+    pair_records_path = attempt_directory / "rkv" / "pair_records.json"
+    summary_path = attempt_directory / "rkv" / "scientific_summary.json"
+    if not pair_records_path.is_file():
+        reasons.append("rkv/pair_records.json is missing")
+    if not summary_path.is_file():
+        reasons.append("rkv/scientific_summary.json is missing")
+    if reasons:
+        return False, tuple(reasons)
+
+    try:
+        pair_records_file = json.loads(pair_records_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return False, (f"rkv/pair_records.json does not parse as valid JSON: {type(exc).__name__}: {exc}",)
+    try:
+        scientific_summary_file = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return False, (f"rkv/scientific_summary.json does not parse as valid JSON: {type(exc).__name__}: {exc}",)
+
+    if pair_records_file != rkv_result.get("pair_records"):
+        reasons.append("rkv/pair_records.json does not match rkv/result.json's pair_records")
+    if not isinstance(pair_records_file, list):
+        reasons.append("rkv/pair_records.json is not a list")
+        return False, tuple(reasons)
+
+    typed_records: list[SwapPairRecord] = []
+    for index, raw in enumerate(pair_records_file):
+        try:
+            typed_records.append(SwapPairRecord.model_validate(raw))
+        except Exception as exc:  # noqa: BLE001 -- report every malformed record, never stop at the first
+            reasons.append(f"rkv/pair_records.json[{index}] does not validate as a typed SwapPairRecord: {exc}")
+    if len(typed_records) != len(pair_records_file):
+        # At least one record is malformed -- already reported above; every
+        # check below assumes a fully-typed population and would otherwise
+        # report a confusing cascade of secondary failures.
+        return False, tuple(reasons)
+
+    real_records = [record for record in typed_records if not record.is_noop_control]
+    no_op_records = [record for record in typed_records if record.is_noop_control]
+    expected_total = B2A_REAL_PAIR_EVALUATIONS_TOTAL + B2A_NOOP_PAIR_EVALUATIONS_TOTAL
+    if len(typed_records) != expected_total:
+        reasons.append(f"rkv/pair_records.json has {len(typed_records)} records, expected {expected_total}")
+    if len(real_records) != B2A_REAL_PAIR_EVALUATIONS_TOTAL:
+        reasons.append(
+            f"rkv/pair_records.json has {len(real_records)} real records, expected {B2A_REAL_PAIR_EVALUATIONS_TOTAL}"
+        )
+    if len(no_op_records) != B2A_NOOP_PAIR_EVALUATIONS_TOTAL:
+        reasons.append(
+            f"rkv/pair_records.json has {len(no_op_records)} no-op records, "
+            f"expected {B2A_NOOP_PAIR_EVALUATIONS_TOTAL}"
+        )
+
+    record_identities = [_pair_identity(record) for record in typed_records]
+    if len(record_identities) != len(set(record_identities)):
+        reasons.append("rkv/pair_records.json contains duplicate pair identities")
+    record_identity_set = set(record_identities)
+
+    completed_pair_identities = rkv_result.get("completed_pair_identities")
+    if isinstance(completed_pair_identities, list):
+        completed_identity_set = {_pair_record_identity_from_dict(item) for item in completed_pair_identities}
+        if completed_identity_set != record_identity_set:
+            reasons.append(
+                "rkv/pair_records.json identities do not exactly match "
+                "rkv/result.json's completed_pair_identities"
+            )
+
+    failed_pair_identities = rkv_result.get("failed_pair_identities")
+    if isinstance(failed_pair_identities, list):
+        failed_identity_set = {_pair_record_identity_from_dict(item) for item in failed_pair_identities}
+        if failed_identity_set & record_identity_set:
+            reasons.append("rkv/pair_records.json represents a failed pair identity as completed")
+
+    expected_summary = build_scientific_summary(typed_records)
+    if scientific_summary_file != expected_summary:
+        reasons.append("rkv/scientific_summary.json does not recompute exactly from rkv/pair_records.json")
 
     return (len(reasons) == 0), tuple(reasons)
 

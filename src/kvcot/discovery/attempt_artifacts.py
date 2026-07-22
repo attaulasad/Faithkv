@@ -138,6 +138,10 @@ _SEMANTIC_ROLE_BY_WORKER_FILE: dict[str, str] = {
     "pair_identities.json": "pair_identities",
     "semantic_swaps.json": "semantic_swaps",
     "replay_evidence.json": "replay_evidence",
+    # B2A-R2 forensic repair
+    # (docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md).
+    "pair_records.json": "pair_records",
+    "scientific_summary.json": "scientific_summary",
 }
 
 

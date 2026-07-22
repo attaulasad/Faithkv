@@ -48,7 +48,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Literal, Sequence
 
 from pydantic import BaseModel, Field
 
@@ -60,6 +60,7 @@ from kvcot.discovery.call_trace import (
     compare_call_boundary_traces,
 )
 from kvcot.discovery.constants import B2A_REAL_PAIR_EVALUATIONS_TOTAL, B2A_SELECTED_EVENTS
+from kvcot.discovery.schemas import SwapPairRecord
 from kvcot.discovery.worker_partial_evidence import WorkerExecutionState
 
 SubprocessRunner = Callable[..., "subprocess.CompletedProcess"]
@@ -177,7 +178,19 @@ class FullKVWorkerResult(BaseModel):
     software_versions: dict[str, str]
 
 
-class RKVWorkerResult(BaseModel):
+class RKVWorkerResultV1(BaseModel):
+    """The original (pre-forensic-repair) R-KV worker result shape --
+    `docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md`. Every
+    field below survived to disk historically; the twelve real pair
+    evaluations' `SwapPairRecord` science (`swap_gain`, per-token NLL
+    arrays, recomputed scores) never did -- `ExampleResult.pair_records`
+    held them in memory but no field on this model ever carried them out of
+    the worker process. Kept, unmodified, as the LEGACY shape so an
+    already-archived V1 result JSON blob remains parseable for historical
+    integrity verification (`parse_rkv_worker_result` below) -- never
+    retroactively edited, never fabricated a `pair_records` field it never
+    had."""
+
     role: str = Field(pattern="^rkv$")
     model_revision: str
     tokenizer_revision: str
@@ -286,6 +299,74 @@ class RKVWorkerResult(BaseModel):
     timing_evidence: list[dict[str, Any]] = Field(default_factory=list)
     memory_phase_evidence: list[dict[str, Any]] = Field(default_factory=list)
     software_versions: dict[str, str]
+
+
+class RKVWorkerResultV2(RKVWorkerResultV1):
+    """The repaired R-KV worker result shape
+    (`docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md`) -- every
+    field V1 already had, PLUS the complete scientific `SwapPairRecord`
+    population. `pair_records` is REQUIRED (no default): a payload that
+    omits the key fails validation outright, so a future successful worker
+    can never silently regress to discarding this evidence the way the
+    original (V1) shape did. Structural versioning, not attempt-ID/SHA
+    special-casing: any payload carrying a `pair_records` key parses as V2;
+    any payload without one parses as V1 (`parse_rkv_worker_result`)."""
+
+    schema_version: Literal["rkv_worker_result.v2"] = "rkv_worker_result.v2"
+    pair_records: list[SwapPairRecord]
+
+
+# Every NEW production code path (worker construction, coordinator
+# parsing/validation) targets V2 -- `RKVWorkerResult` is kept as the public
+# name so every existing `from kvcot.discovery.b2a_workers import
+# RKVWorkerResult` import site continues to resolve, now to the version that
+# REQUIRES `pair_records`. A successful new run can therefore never emit the
+# legacy (V1) shape: `RKVWorkerResult(...)` raises unless the caller supplies
+# `pair_records` explicitly.
+RKVWorkerResult = RKVWorkerResultV2
+
+
+def parse_rkv_worker_result(raw: dict[str, Any]) -> "RKVWorkerResultV1 | RKVWorkerResultV2":
+    """Structural (never attempt-ID/SHA-based) version dispatch: a raw dict
+    carrying a `pair_records` key parses as V2, otherwise as V1. Used to
+    parse an already-archived historical result blob (e.g. a frozen
+    B2A-R2-era `rkv/result.json` copy) without guessing its origin."""
+    if "pair_records" in raw:
+        return RKVWorkerResultV2.model_validate(raw)
+    return RKVWorkerResultV1.model_validate(raw)
+
+
+@dataclass(frozen=True)
+class PairRecordAvailability:
+    """What can honestly be claimed about a parsed R-KV worker result's
+    pair-level scientific evidence -- computed structurally from which
+    typed model it parsed as, never from an attempt ID, SHA, or archive
+    name."""
+
+    scientific_pair_records_available: bool
+    scientific_pair_artifacts_verified: bool
+    legacy_pair_record_schema: bool
+
+
+def classify_pair_record_availability(
+    result: "RKVWorkerResultV1 | RKVWorkerResultV2", *, artifacts_verified: bool = False
+) -> PairRecordAvailability:
+    """`artifacts_verified` lets a caller that has independently confirmed
+    `rkv/pair_records.json`/`rkv/scientific_summary.json` on disk (never
+    assumed) report `scientific_pair_artifacts_verified=True` for a V2
+    result; a V1 (legacy) result can never claim either -- it structurally
+    has no pair-record field to verify."""
+    if isinstance(result, RKVWorkerResultV2):
+        return PairRecordAvailability(
+            scientific_pair_records_available=True,
+            scientific_pair_artifacts_verified=artifacts_verified,
+            legacy_pair_record_schema=False,
+        )
+    return PairRecordAvailability(
+        scientific_pair_records_available=False,
+        scientific_pair_artifacts_verified=False,
+        legacy_pair_record_schema=True,
+    )
 
 
 SHARED_IDENTITY_FIELDS: tuple[str, ...] = (
@@ -617,6 +698,23 @@ def run_both_workers_via_subprocess(
             })
             atomic_write_json(tmp_dir / "rkv" / "semantic_swaps.json", rkv_result.semantic_mutation_reports)
             atomic_write_json(tmp_dir / "rkv" / "replay_evidence.json", rkv_result.replay_evidence)
+            # B2A-R2 forensic repair
+            # (docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md):
+            # `rkv_result` is always an `RKVWorkerResultV2` on this live
+            # code path (a freshly-launched worker from this same updated
+            # code always emits V2), so `.pair_records` always exists here --
+            # this artifact is written unconditionally, exactly like
+            # pair_identities.json/semantic_swaps.json above, never gated on
+            # gate-passed/gate-failed (a run with zero completed pairs
+            # honestly writes an empty list, never padded).
+            from kvcot.discovery.scientific_summary import build_scientific_summary
+
+            pair_records_payload = [record.model_dump(mode="json") for record in rkv_result.pair_records]
+            atomic_write_json(tmp_dir / "rkv" / "pair_records.json", pair_records_payload)
+            atomic_write_json(
+                tmp_dir / "rkv" / "scientific_summary.json",
+                build_scientific_summary(rkv_result.pair_records),
+            )
             # F4.4: the coordinator's OWN durable record of the two worker
             # processes' outcomes -- never inferable from worker-authored
             # artifacts alone.
@@ -1655,6 +1753,13 @@ def run_rkv_worker(
             timing_evidence=timer.export(),
             memory_phase_evidence=memory_meter.export(),
             software_versions={"torch": torch.__version__},
+            # B2A-R2 forensic repair
+            # (docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md):
+            # the complete scientific SwapPairRecord population, straight
+            # from ExampleResult.pair_records -- never reconstructed from
+            # identities or summaries (that data exists nowhere else once
+            # this function returns).
+            pair_records=list(example_result.pair_records),
         ).model_dump(mode="json")
     except Exception as exc:
         from kvcot.discovery.worker_partial_evidence import raise_worker_body_failure

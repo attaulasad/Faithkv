@@ -19,6 +19,7 @@ import pytest
 from kvcot.discovery import b2a_execute
 from kvcot.discovery.discovery_config import load_discovery_config
 from kvcot.discovery.manifest import load_b2a_one_example_manifest
+from kvcot.discovery.schemas import SwapPairRecord
 
 CONFIG_PATH = "configs/discovery/llama8b_math500_b1024.yaml"
 MANIFEST_PATH = "configs/discovery/b2a_one_example_manifest.json"
@@ -56,6 +57,70 @@ def config():
 @pytest.fixture
 def manifest():
     return load_b2a_one_example_manifest(MANIFEST_PATH)
+
+
+def _swap_pair_record(*, event: int, layer: int, candidate: int, donor: int, is_noop: bool = False) -> SwapPairRecord:
+    """B2A-R2 forensic repair: a valid, self-consistent SwapPairRecord for
+    the coordinator fixture's real/no-op pairs -- reuses SwapPairRecord's
+    own validators (never a second, hand-rolled consistency check)."""
+    t = 100 + event
+    baseline = [1.0] * 48
+    swapped = list(baseline) if is_noop else [0.9] * 48
+    swap_gain = 0.0 if is_noop else (sum(baseline) / len(baseline)) - (sum(swapped) / len(swapped))
+    return SwapPairRecord(
+        example_id="b2a-coordinator-fixture",
+        model_revision="modelrev",
+        rkv_revision="r" * 40,
+        compaction_event_id=event,
+        chronological_event_ordinal=event,
+        depth_stratum=event,
+        layer_index=layer,
+        kv_head_index=0,
+        event_token_absolute_position=t,
+        bridge_token_absolute_position=t + 1,
+        first_affected_forward_input_absolute_position=t + 1,
+        first_affected_logit_target_absolute_position=t + 2,
+        first_scored_absolute_position=t + 2,
+        evicted_absolute_token_position=candidate,
+        evicted_pre_storage_position=5,
+        retained_absolute_token_position=donor,
+        retained_pre_storage_position=8,
+        retained_post_storage_position=8,
+        score_e=0.4,
+        score_r=0.6,
+        score_margin_e_minus_r=-0.2,
+        attention_component_diff=0.01,
+        similarity_component_diff=-0.02,
+        recency_diff=candidate - donor,
+        key_norm_diff=0.1,
+        value_norm_diff=-0.1,
+        entropy_e=1.2, entropy_e_missing_reason=None,
+        entropy_r=0.4, entropy_r_missing_reason=None,
+        entropy_diff=0.8,
+        logit_margin_e=3.0, logit_margin_e_missing_reason=None,
+        logit_margin_r=5.5, logit_margin_r_missing_reason=None,
+        logit_margin_diff=-2.5,
+        parity_check_passed=True,
+        parity_failure_reason=None,
+        is_noop_control=is_noop,
+        net_physical_bytes_changed=0,
+        cap_hit_flag=False,
+        valid_flag=True,
+        invalid_reason=None,
+        reference_horizon_sha256="a" * 64,
+        swap_gain=swap_gain,
+        baseline_per_token_nll=baseline,
+        swapped_per_token_nll=swapped,
+    )
+
+
+def _passing_pair_records() -> list[dict]:
+    real = [
+        _swap_pair_record(event=event, layer=event, candidate=candidate, donor=donor)
+        for event in range(3) for candidate in (10, 11) for donor in (20, 21)
+    ]
+    no_op = _swap_pair_record(event=0, layer=0, candidate=20, donor=20, is_noop=True)
+    return [record.model_dump(mode="json") for record in real + [no_op]]
 
 
 def _passing_payloads(manifest, config):
@@ -155,6 +220,9 @@ def _passing_payloads(manifest, config):
             {"phase": "post_load_validation", "duration_seconds": 0.05, "completed": True},
         ],
         software_versions={"torch": "2.0"},
+        # B2A-R2 forensic repair: RKVWorkerResultV2 requires this field --
+        # 12 real + 1 no-op, matching real_identities/noop_identity above.
+        pair_records=_passing_pair_records(),
     )
     return fullkv, rkv
 
@@ -843,6 +911,10 @@ def _zero_compaction_event_payloads(manifest, config):
         no_op_identity=None,
         semantic_mutation_reports=[],
         no_op_evidence={},
+        # B2A-R2 forensic repair: zero events selected means zero pairs were
+        # ever attempted -- an honestly empty population, never the passing
+        # fixture's 13 fake records left dangling against zeroed identities.
+        pair_records=[],
     )
     return fullkv_payload, rkv_payload
 

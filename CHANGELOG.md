@@ -1,5 +1,98 @@
 # Changelog
 
+## 2026-07-22 — B2A-R2 forensic pair-record persistence repair (CPU-ONLY, NO GPU/RE-RUN; B2A-R3/B2B REMAIN BLOCKED)
+
+A post-run audit of the preserved B2A-R2 archive (recorded below, "Record
+B2A-R2 calibration result") found that the archive's "full per-pair
+evidence" claim was too broad: execution accounting, pair identities, and
+semantic-mutation/parity evidence survived, but the twelve real
+interventions' scientific outcomes -- `swap_gain` and the 48-value
+`baseline_per_token_nll`/`swapped_per_token_nll` arrays -- were never
+exported by `kvcot.discovery.b2a_workers.RKVWorkerResult` and cannot be
+recovered from the archive (the GPU instance that produced them is gone;
+no value is estimated, inferred from identities, or backfilled anywhere in
+this repair). B2A-R2's frozen mechanical/runtime verdict is unchanged:
+`B2A-R2 FINAL VERDICT: FAIL -- B2B BLOCKED` (5.01 projected GPU-hours vs.
+the 4.00-hour limit) -- no causal-mismatch conclusion can be drawn from
+B2A-R2's per-pair science, because that science was never durably
+recorded in the first place.
+
+- **Version-aware schema repair.** `RKVWorkerResult` split into
+  structurally-versioned `RKVWorkerResultV1` (the original, unmodified
+  shape -- kept so an already-archived legacy result blob remains
+  parseable for historical integrity checking, never fabricating a field
+  it never had) and `RKVWorkerResultV2` (adds a **required**
+  `pair_records: list[SwapPairRecord]` field -- a payload omitting it now
+  fails validation outright). `RKVWorkerResult` is now an alias for V2;
+  every current/future production construction requires `pair_records`
+  explicitly. `run_rkv_worker`'s single return statement now passes
+  `pair_records=list(example_result.pair_records)`, read from the same
+  in-memory population every other field on that return already reads
+  from -- never reconstructed from identities or summaries. Dispatch
+  (`parse_rkv_worker_result`) and classification
+  (`classify_pair_record_availability`) are structural (presence/absence
+  of the `pair_records` key), never attempt-ID- or SHA-based.
+- **New durable artifacts.** Every future successful V2 R-KV worker run
+  that preserves an attempt directory now atomically writes
+  `rkv/pair_records.json` (the canonical, complete serialized
+  `SwapPairRecord` population) and `rkv/scientific_summary.json` (a new
+  pure-Python `kvcot.discovery.scientific_summary.build_scientific_summary`
+  -- real/no-op counts, positive-gain counts, median/mean/min/max swap
+  gain, and a dependency-free tie-aware Spearman correlation between
+  `score_margin_e_minus_r` and `swap_gain`; every statistic is `null`,
+  never a fabricated `0.0`, when zero valid real records exist). Both
+  files are included in the coordinator's final reference manifest and
+  hash-verified exactly like every other attempt artifact
+  (`kvcot.discovery.attempt_artifacts`'s semantic-role map extended, never
+  special-cased by filename elsewhere).
+- **Partial-failure path.** `kvcot.discovery.worker_partial_evidence
+  .PartialWorkerEvidence` gained a `pair_records` field -- exactly the
+  records that genuinely completed before a failure, never padded toward
+  12 or 13, honestly empty for a failure before any pair evaluation began.
+- **Dedicated verification.** New, deliberately standalone
+  `kvcot.discovery.attempt_verification.verify_pair_record_artifacts` --
+  kept separate from the pre-existing, shared `verify_attempt_artifacts`
+  (whose own tests use minimal, non-B2A-shaped fake pair identities
+  unrelated to this repair) -- checks population completeness (12 real +
+  1 no-op), per-record typed validity, identity agreement with
+  `completed_pair_identities`, no failed identity double-counted as
+  completed, and exact `scientific_summary.json` recomputation. Wired into
+  `kvcot.discovery.b2a_execute.run_b2a_calibration` as additional,
+  **never-fatal** evidence (`payload["pair_record_verification"]`) -- adds
+  no new `FINAL_MANDATORY_GATE_CONDITIONS` entry and does not change
+  B2A-R2's already-recorded outcome.
+- **Documentation.** New
+  `docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md`.
+  `docs/B2A_R2_RESULT_2026-07-22.md` gained a dated §8 clarification (the
+  quoted finding above) and a documentation-arithmetic correction: its
+  peak-memory table had labeled decimal GB (bytes / 1000^3) as GiB;
+  corrected to true GiB (bytes / 1024^3) with raw byte counts preserved,
+  plus an explicit one-time-setup + per-example + per-pair projected-
+  runtime breakdown -- neither correction changes `runtime_within_limit`'s
+  outcome or the frozen verdict. `README.md`/`PLAN.md` status sections
+  updated to stop reading as if B2A has never executed (it has, twice:
+  B2A-R1 and B2A-R2) while distinguishing that history from the
+  still-unauthorized B2A-R3/B2B.
+- Tests: new `tests/unit/discovery/test_pair_record_persistence.py`
+  (serialization/round-trip, structural version dispatch, tie-aware
+  Spearman edge cases, scientific-summary recomputation, coordinator
+  persistence via a faked subprocess runner, every listed
+  `verify_pair_record_artifacts` failure mode, partial-failure/pre-pair-
+  failure paths). Pre-existing fixtures that construct a full
+  `RKVWorkerResult` payload
+  (`tests/unit/discovery/test_b2a_workers.py`,
+  `tests/unit/discovery/test_b2a_execute_coordinator.py`) updated in place
+  to supply the new required field.
+- No change to `configs/lock.yaml`, `third_party/R-KV`, the pinned R-KV
+  revision, budget, divide length, bridge token count, scored horizon, or
+  any frozen model/dataset/generation setting. No GPU used. No model
+  inference. No B2A-R3 execution. No B2B execution. No FaithKV method.
+
+```text
+B2A-R2 FORENSIC CLOSURE VERDICT:
+PAIR-RECORD PERSISTENCE REPAIRED -- READY FOR INDEPENDENT REVIEW; B2A-R3/B2B REMAIN BLOCKED
+```
+
 ## 2026-07-22 — B2A-R1 failure closure and B2A-R2 pre-registration (B2A-R1 CONSUMED, ZERO EVENTS; B2A-R2 PRE-REGISTERED, NOT YET EXECUTED)
 
 B2A-R1 (the single attempt CLAUDE.md §1c authorized) executed against

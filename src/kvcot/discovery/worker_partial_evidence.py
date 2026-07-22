@@ -122,6 +122,13 @@ class PartialWorkerEvidence(BaseModel):
     attempted_pair_identities: list[dict[str, Any]] = Field(default_factory=list)
     completed_pair_identities: list[dict[str, Any]] = Field(default_factory=list)
     failed_pair_identities: list[dict[str, Any]] = Field(default_factory=list)
+    # B2A-R2 forensic repair
+    # (docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md): exactly
+    # the SwapPairRecord objects `example_result.pair_records` already held
+    # at the moment of failure -- never padded to a target count, never
+    # fabricated for a pair that never completed. Empty for a failure before
+    # any pair evaluation, by construction.
+    pair_records: list[dict[str, Any]] = Field(default_factory=list)
     pair_failure_details: list[dict[str, Any]] = Field(default_factory=list)
     semantic_mutation_reports: list[dict[str, Any]] = Field(default_factory=list)
     pre_branch_memory_evidence: list[dict[str, Any]] = Field(default_factory=list)
@@ -223,6 +230,7 @@ def capture_partial_evidence(
     no_op_identity: dict[str, Any] | None = None
     no_op_evidence: dict[str, Any] | None = None
     replay_evidence: dict[str, Any] | None = None
+    pair_records: list[dict[str, Any]] = []
     pass1_token_ids: list[int] | None = None
     pass2_fed_token_ids: list[int] | None = None
     pass1_compaction_positions: list[int] | None = None
@@ -236,6 +244,9 @@ def capture_partial_evidence(
         attempted_pair_identities = list(example_result.attempted_pair_identities)
         completed_pair_identities = list(example_result.completed_pair_identities)
         semantic_mutation_reports = list(example_result.semantic_mutation_reports)
+        # B2A-R2 forensic repair: exactly the records that genuinely
+        # completed before the failure -- never padded, never fabricated.
+        pair_records = [record.model_dump(mode="json") for record in example_result.pair_records]
         minimized_target_evidence = [
             _dataclass_dict(item) for item in getattr(example_result, "minimized_target_evidence", ())
         ]
@@ -311,6 +322,7 @@ def capture_partial_evidence(
         no_op_identity=no_op_identity,
         no_op_evidence=no_op_evidence,
         replay_evidence=replay_evidence,
+        pair_records=pair_records,
         example_attrition=_attrition_snapshot(scope, "example_attrition"),
         pair_attrition=_attrition_snapshot(scope, "pair_attrition"),
         example_aborted=example_aborted,
