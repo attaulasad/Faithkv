@@ -92,15 +92,20 @@ class B2AOneExampleMeasurement(BaseModel):
     # The conservative per-pair statistic actually used by the projection:
     # `max(real_pair_wall_seconds)`, never their sum and never a separately
     # invented number -- `kvcot.discovery.b2a_evidence
-    # .per_real_pair_projection_seconds`'s output.
-    per_real_pair_seconds: float = Field(ge=0.0)
+    # .per_real_pair_projection_seconds`'s output. `None` iff the attempt
+    # did not produce exactly 12 real-pair durations (B2A-R1 zero-event
+    # repair, 2026-07-22) -- an ineligible calibration, never a fabricated
+    # `0.0`.
+    per_real_pair_seconds: float | None = Field(default=None, ge=0.0)
 
     peak_cuda_allocated_bytes: int = Field(ge=0)
     peak_cuda_reserved_bytes: int = Field(ge=0)
     every_parameter_on_cuda: bool
     observed_retention_ratio: float = Field(ge=0.0, le=1.0)
     event_count: int = Field(ge=0)
-    projected_complete_pilot_gpu_hours: float = Field(ge=0.0)
+    # `None` iff the runtime projection is unavailable (B2A-R1 repair) --
+    # never `0.0`, never the `4.00`-hour limit itself, never a guess.
+    projected_complete_pilot_gpu_hours: float | None = Field(default=None, ge=0.0)
 
     @property
     def peak_vram_gib(self) -> float:
@@ -213,7 +218,10 @@ class B2AGateEvidence(BaseModel):
     events_with_four_unique_pairs_exact: bool
     no_duplicate_pair_identity: bool
 
-    runtime_gpu_hours: float = Field(ge=0.0)
+    # `None` iff the runtime projection is unavailable (B2A-R1 repair,
+    # 2026-07-22) -- `evaluate_b2a_gate` derives `runtime_within_limit=False`
+    # from that `None`, never from a fabricated stand-in number.
+    runtime_gpu_hours: float | None = Field(default=None, ge=0.0)
     peak_vram_gib: float = Field(ge=0.0)
 
 
@@ -356,7 +364,14 @@ def evaluate_b2a_gate(evidence: B2AGateEvidence) -> B2AGateResult:
     condition or any measurement over threshold is an independent hard
     stop, and every hard stop is reported (never short-circuited on the
     first failure), so a real run gets the complete failure list at once."""
-    runtime_within_limit = evidence.runtime_gpu_hours <= MAX_PROJECTED_PILOT_GPU_HOURS
+    # B2A-R1 zero-event repair (2026-07-22): an unavailable projection
+    # (`runtime_gpu_hours is None`, i.e. fewer than 12 real-pair durations
+    # were ever produced) fails this condition closed -- it is never treated
+    # as "within limit" merely because there is no over-threshold number to
+    # compare, and it is never compared against a fabricated stand-in value.
+    runtime_within_limit = (
+        evidence.runtime_gpu_hours is not None and evidence.runtime_gpu_hours <= MAX_PROJECTED_PILOT_GPU_HOURS
+    )
     peak_vram_within_limit = evidence.peak_vram_gib <= MAX_PEAK_ALLOCATED_MEMORY_GIB
 
     values: dict[str, bool] = {

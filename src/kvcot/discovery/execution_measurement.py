@@ -333,6 +333,16 @@ def check_pre_branch_memory(
 
 @dataclass(frozen=True)
 class RuntimeProjection:
+    """`available=False` is a first-class, non-exceptional outcome (B2A-R1
+    zero-event coordinator repair, 2026-07-22): a frozen one-example row that
+    produced fewer than the required 12 real-pair durations (e.g. zero
+    compaction events because the generated trace never reached the R-KV
+    budget) is an ineligible/gate-failed calibration, not a coordinator
+    crash. When unavailable, every real-pair-derived field is `None` --
+    never `0`, `inf`, the `4.00`-GPU-hour limit, or any other guessed
+    placeholder -- so a missing projection can never be silently mistaken
+    for a measured one that happens to be small or exactly at the limit."""
+
     fullkv_startup_and_model_load_seconds: float
     rkv_startup_and_model_load_seconds: float
     fullkv_natural_generation_seconds: float
@@ -340,9 +350,14 @@ class RuntimeProjection:
     rkv_pass2_seconds: float
     per_example_inference_seconds: float
     example_count: int
-    conservative_real_pair_seconds: float
+    available: bool
+    unavailable_reason: str | None
+    observed_real_pair_duration_count: int
+    required_real_pair_duration_count: int
+    conservative_real_pair_seconds: float | None
     real_pair_count: int
-    projected_total_seconds: float
+    projected_total_seconds: float | None
+    projected_complete_pilot_gpu_hours: float | None
 
 
 def build_runtime_projection(
@@ -356,21 +371,48 @@ def build_runtime_projection(
     example_count: int = 12,
     real_pair_count: int = 144,
 ) -> RuntimeProjection:
-    if len(b2a_real_pair_seconds) != B2A_REAL_PAIR_EVALUATIONS_TOTAL:
-        raise ValueError(
-            f"runtime projection requires exactly {B2A_REAL_PAIR_EVALUATIONS_TOTAL} B2A real-pair durations"
-        )
-    values = [
+    """Never raises for an insufficient/empty `b2a_real_pair_seconds` --
+    that is a legitimate ineligible-calibration outcome, reported via
+    `available=False`, not an exception (B2A-R1 repair). Still raises
+    `ValueError` for a genuinely malformed measurement: a non-finite or
+    negative one-time/per-example component, or a real-pair duration that
+    is present but not a finite positive number -- those remain hard
+    defects, never silently downgraded to "unavailable"."""
+    one_time_and_per_example = [
         fullkv_startup_and_model_load_seconds,
         rkv_startup_and_model_load_seconds,
         fullkv_natural_generation_seconds,
         rkv_pass1_seconds,
         rkv_pass2_seconds,
-        *b2a_real_pair_seconds,
     ]
-    if any(not math.isfinite(value) or value < 0 for value in values):
+    if any(not math.isfinite(value) or value < 0 for value in one_time_and_per_example):
         raise ValueError("runtime projection components must be finite and non-negative")
+    if any(not math.isfinite(value) or value <= 0 for value in b2a_real_pair_seconds):
+        raise ValueError("every reported real-pair duration must be finite and positive")
+
     per_example = fullkv_natural_generation_seconds + rkv_pass1_seconds + rkv_pass2_seconds
+    observed_count = len(b2a_real_pair_seconds)
+    required_count = B2A_REAL_PAIR_EVALUATIONS_TOTAL
+
+    if observed_count != required_count:
+        return RuntimeProjection(
+            fullkv_startup_and_model_load_seconds=fullkv_startup_and_model_load_seconds,
+            rkv_startup_and_model_load_seconds=rkv_startup_and_model_load_seconds,
+            fullkv_natural_generation_seconds=fullkv_natural_generation_seconds,
+            rkv_pass1_seconds=rkv_pass1_seconds,
+            rkv_pass2_seconds=rkv_pass2_seconds,
+            per_example_inference_seconds=per_example,
+            example_count=example_count,
+            available=False,
+            unavailable_reason="insufficient_real_pair_durations",
+            observed_real_pair_duration_count=observed_count,
+            required_real_pair_duration_count=required_count,
+            conservative_real_pair_seconds=None,
+            real_pair_count=real_pair_count,
+            projected_total_seconds=None,
+            projected_complete_pilot_gpu_hours=None,
+        )
+
     conservative_pair = max(b2a_real_pair_seconds)
     total = (
         fullkv_startup_and_model_load_seconds
@@ -386,9 +428,14 @@ def build_runtime_projection(
         rkv_pass2_seconds=rkv_pass2_seconds,
         per_example_inference_seconds=per_example,
         example_count=example_count,
+        available=True,
+        unavailable_reason=None,
+        observed_real_pair_duration_count=observed_count,
+        required_real_pair_duration_count=required_count,
         conservative_real_pair_seconds=conservative_pair,
         real_pair_count=real_pair_count,
         projected_total_seconds=total,
+        projected_complete_pilot_gpu_hours=total / 3600.0,
     )
 
 

@@ -318,8 +318,15 @@ def run_b2a_calibration(
             b2a_real_pair_seconds=list(rkv.real_pair_wall_seconds),
         )
         per_example_total = runtime_projection.per_example_inference_seconds
+        # Both `None` iff the projection is unavailable (B2A-R1 zero-event
+        # repair, 2026-07-22): fewer than 12 real-pair durations were ever
+        # produced (e.g. zero compaction events). This is threaded through
+        # as an explicit absence -- never a fabricated `0.0`/`inf`/guessed
+        # number -- and `evaluate_b2a_gate` derives `runtime_within_limit=
+        # False` from the `None`, failing the calibration closed rather
+        # than raising an uncaught exception.
         per_real_pair_seconds = runtime_projection.conservative_real_pair_seconds
-        projected_gpu_hours = runtime_projection.projected_total_seconds / 3600.0
+        projected_gpu_hours = runtime_projection.projected_complete_pilot_gpu_hours
 
         # Independent-audit Gate H2.5: the Python worker subprocess's own
         # launch/import overhead occurs OUTSIDE its internal

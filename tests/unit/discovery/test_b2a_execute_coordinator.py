@@ -337,11 +337,17 @@ def test_process_overhead_diagnostic_is_exported_without_double_counting(config,
         )
     # `runtime_projection` itself must be untouched by this diagnostic --
     # still exactly the frozen §12 formula's fields, nothing summed twice.
+    # (B2A-R1 zero-event repair, 2026-07-22, adds the explicit
+    # available/unavailable_reason/observed-vs-required-count fields and
+    # promotes `projected_complete_pilot_gpu_hours` into the projection
+    # itself -- it does not touch or duplicate any of the original ten.)
     assert set(payload["runtime_projection"]) == {
         "fullkv_startup_and_model_load_seconds", "rkv_startup_and_model_load_seconds",
         "fullkv_natural_generation_seconds", "rkv_pass1_seconds", "rkv_pass2_seconds",
         "per_example_inference_seconds", "example_count", "conservative_real_pair_seconds",
         "real_pair_count", "projected_total_seconds",
+        "available", "unavailable_reason", "observed_real_pair_duration_count",
+        "required_real_pair_duration_count", "projected_complete_pilot_gpu_hours",
     }
 
 
@@ -775,3 +781,162 @@ def test_prompt_identity_refusal_before_any_worker_launch_still_writes_fail_arti
 
     written = list(tmp_path.glob("b2a_*.json"))
     assert len(written) == 1
+
+
+# ---------------------------------------------------------------------------
+# B2A-R1 zero-event coordinator repair (2026-07-22): the actual consumed
+# B2A-R1 attempt (results/decisions/b2a_attempt_20260722T072823470986Z_...,
+# preserved in docs/evidence/B2A_R1_ATTEMPT_INDEX_2026-07-22.json) produced
+# zero compaction events (prompt=105 tokens, generated=449 tokens, processed
+# length ~554, well under R-KV budget=1024) and crashed the coordinator with
+# an uncaught `ValueError: runtime projection requires exactly 12 B2A
+# real-pair durations` -- writing only `failure.json`, never `completion
+# .json`/`final.json`. This must now be a clean, internally consistent
+# gate-failed attempt: `completion.json` with outcome="gate_failed",
+# exit_code=2, gate_passed=False; `final.json` written and independently
+# verified; the runtime projection explicitly unavailable, never fabricated.
+# ---------------------------------------------------------------------------
+
+
+def _zero_compaction_event_payloads(manifest, config):
+    """Same base fixture as `_passing_payloads`, with every compaction/
+    event/pair-count field zeroed out exactly as a real zero-event attempt
+    reports them -- Pass 1/Pass 2 replay integrity, device/snapshot
+    identity, and generation identity are all UNCHANGED (those genuinely
+    still succeeded; only the swap/pair/event counts are zero because no
+    eviction ever fired)."""
+    fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
+    rkv_payload.update(
+        observed_total_compaction_events=0,
+        eligible_compaction_events=0,
+        selected_compaction_events=0,
+        events_with_at_least_one_completed_real_pair=0,
+        events_with_all_four_real_pairs_completed=0,
+        attempted_real_pair_count=0,
+        completed_real_pair_count=0,
+        failed_real_pair_count=0,
+        attempted_no_op_pair_count=0,
+        completed_no_op_pair_count=0,
+        pair_failure_details=[],
+        semantic_swap_checks_required=0,
+        semantic_swap_checks_attempted=0,
+        semantic_swap_checks_passed=0,
+        semantic_swap_checks_failed=0,
+        unique_completed_real_pair_count=0,
+        events_with_exactly_four_unique_real_pairs=0,
+        has_duplicate_real_pair_identity=False,
+        has_duplicate_no_op_pair_identity=False,
+        selected_event_count_exact=False,
+        real_pair_count_exact=False,
+        no_op_count_exact=False,
+        all_required_pair_evaluations_completed=False,
+        # No compression occurred at all -- the realistic retention ratio
+        # for zero evictions is 1.0 (nothing evicted), not the passing
+        # fixture's 0.4.
+        observed_retention_ratio=1.0,
+        real_pair_wall_seconds=[],
+        no_op_pair_wall_seconds=[],
+        selected_event_evidence=[],
+        attempted_pair_identities=[],
+        completed_pair_identities=[],
+        failed_pair_identities=[],
+        no_op_identity=None,
+        semantic_mutation_reports=[],
+        no_op_evidence={},
+    )
+    return fullkv_payload, rkv_payload
+
+
+def test_zero_compaction_events_produce_clean_gate_failed_completion_not_exception(
+    config, manifest, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(b2a_execute, "_verify_resolved_prompt_identity", lambda c, m: None)
+    fullkv_payload, rkv_payload = _zero_compaction_event_payloads(manifest, config)
+    attempt_directory = _real_attempt_directory(tmp_path)
+    _install_fake_coordination(monkeypatch, fullkv_payload, rkv_payload)
+
+    # The defect this repairs: this call used to raise an uncaught
+    # `ValueError` here. It must now return normally.
+    artifact = b2a_execute.run_b2a_calibration(
+        config, manifest, config_path=CONFIG_PATH, manifest_path=MANIFEST_PATH,
+        python_executable="fake-python", subprocess_runner=None, attempt_directory=attempt_directory,
+    )
+
+    assert artifact.gate_result.passed is False
+    assert "semantic_swap_parity" in artifact.gate_result.failed_conditions
+    assert "real_pair_count_exact" in artifact.gate_result.failed_conditions
+    assert "no_op_count_exact" in artifact.gate_result.failed_conditions
+    assert "selected_event_count_exact" in artifact.gate_result.failed_conditions
+    assert "sufficient_eligible_events" in artifact.gate_result.failed_conditions
+    assert "meaningful_compression_observed" in artifact.gate_result.failed_conditions
+    assert "all_required_pair_evaluations_completed" in artifact.gate_result.failed_conditions
+    assert "runtime_within_limit" in artifact.gate_result.failed_conditions
+
+    completion_path = attempt_directory / "completion.json"
+    assert completion_path.is_file()
+    completion = json.loads(completion_path.read_text(encoding="utf-8"))
+    assert completion["outcome"] == "gate_failed"
+    assert completion["exit_code"] == 2
+    assert completion["gate_passed"] is False
+
+    final_path = attempt_directory / "final.json"
+    assert final_path.is_file()
+    assert artifact.artifact_path == final_path
+
+    from kvcot.discovery.attempt_verification import verify_final_reference_manifest
+
+    final_verified, final_reasons = verify_final_reference_manifest(attempt_directory)
+    assert final_verified is True, final_reasons
+    assert not (attempt_directory / "final_verification_failure.json").exists()
+    assert not (attempt_directory / "failure.json").exists()
+
+
+def test_zero_compaction_events_runtime_projection_is_unavailable_never_fabricated(
+    config, manifest, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(b2a_execute, "_verify_resolved_prompt_identity", lambda c, m: None)
+    fullkv_payload, rkv_payload = _zero_compaction_event_payloads(manifest, config)
+    attempt_directory = _real_attempt_directory(tmp_path)
+    _install_fake_coordination(monkeypatch, fullkv_payload, rkv_payload)
+
+    artifact = b2a_execute.run_b2a_calibration(
+        config, manifest, config_path=CONFIG_PATH, manifest_path=MANIFEST_PATH,
+        python_executable="fake-python", subprocess_runner=None, attempt_directory=attempt_directory,
+    )
+
+    payload = json.loads(artifact.artifact_path.read_text(encoding="utf-8"))
+    projection = payload["runtime_projection"]
+    assert projection["available"] is False
+    assert projection["unavailable_reason"] == "insufficient_real_pair_durations"
+    assert projection["observed_real_pair_duration_count"] == 0
+    assert projection["required_real_pair_duration_count"] == 12
+    # Never fabricated as 0.0, inf, or the 4.00-hour limit itself.
+    assert projection["conservative_real_pair_seconds"] is None
+    assert projection["projected_total_seconds"] is None
+    assert projection["projected_complete_pilot_gpu_hours"] is None
+    assert payload["measurement"]["per_real_pair_seconds"] is None
+    assert payload["measurement"]["projected_complete_pilot_gpu_hours"] is None
+
+
+def test_malformed_real_pair_durations_still_raise_and_write_failure_not_gate_failed(
+    config, manifest, monkeypatch, tmp_path
+):
+    """Contrast case: a genuinely malformed measurement (a present but
+    negative real-pair duration -- never actually producible by a correct
+    worker) remains a hard coordinator exception, never silently
+    downgraded to a clean gate-failed completion."""
+    monkeypatch.setattr(b2a_execute, "_verify_resolved_prompt_identity", lambda c, m: None)
+    fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
+    rkv_payload["real_pair_wall_seconds"] = [1.0] * 11 + [-5.0]
+    attempt_directory = _real_attempt_directory(tmp_path)
+    _install_fake_coordination(monkeypatch, fullkv_payload, rkv_payload)
+
+    with pytest.raises(ValueError, match="finite and positive"):
+        b2a_execute.run_b2a_calibration(
+            config, manifest, config_path=CONFIG_PATH, manifest_path=MANIFEST_PATH,
+            python_executable="fake-python", subprocess_runner=None, attempt_directory=attempt_directory,
+        )
+
+    assert (attempt_directory / "failure.json").is_file()
+    assert not (attempt_directory / "completion.json").exists()
+    assert not (attempt_directory / "final.json").exists()

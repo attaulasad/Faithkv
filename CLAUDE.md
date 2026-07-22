@@ -153,6 +153,52 @@ broader:
   attempt is scientifically consumed — no automatic or unauthorized second
   attempt.
 
+### Section 1d — B2A-R1 failure closure and B2A-R2 pre-registration (dated 2026-07-22)
+
+Added by
+`docs/B2A_R1_FAILURE_AND_B2A_R2_PROTOCOL_2026-07-22.md`, superseding
+nothing above. The single attempt §1c authorized (B2A-R1, against
+`example_index=0`) ran: FullKV/R-KV inference began (return code 0 for
+both workers), so the attempt is consumed, but it produced **zero R-KV
+compaction events** (prompt=105 tokens, generated=449 tokens, far under
+budget=1024) — an ineligible calibration that tested no eviction at all,
+not a scientific result of any kind. This subsection is the separate,
+explicit, dated authorization for exactly one further attempt, B2A-R2,
+against a row selected by a pre-registered, deterministic, outcome-blind
+procedure:
+
+- A committed candidate manifest
+  (`configs/discovery/b2a_r2_candidate_manifest.json`, 12 level-5 MATH-500
+  rows from the SAME pinned dataset revision, ordered by a fixed
+  content-derived hash — never by observed generation length or outcome).
+- FullKV-only qualification (`kvcot qualify-b2a-row`, R-KV never imported)
+  attempting those 12 candidates in committed order, stopping at the first
+  one satisfying all 10 frozen conditions (§4 of the protocol doc) — no
+  qualified row means immediate stop, B2A-R2/B2B remain blocked.
+- The qualified row frozen into a replacement
+  `configs/discovery/b2a_one_example_manifest.json` only by
+  `kvcot.discovery.b2a_r2_freeze.freeze_qualified_row`, which fails closed
+  on any hash/identity mismatch or arbitrary-row substitution attempt.
+- Exactly one `b2a-calibrate --execute` attempt against that frozen row,
+  under the EXACT SAME settings §1c/§4c already fixed — no threshold,
+  budget, model, dataset, or gate change of any kind.
+- Two repairs made before B2A-R2, neither touching scientific
+  configuration: (1) the coordinator no longer raises on an insufficient
+  real-pair count, it resolves to a clean `gate_failed` outcome with an
+  explicitly unavailable (never fabricated) runtime projection; (2) the
+  MATH-500 answer verifier's calling convention into `math_verify` was
+  corrected (bare compound LaTeX is now re-wrapped in `\boxed{}` before
+  verification — a general parsing-boundary fix, confirmed against the
+  installed `math-verify==0.9.0` package directly, not tuple-specific and
+  not tuned to the observed answer).
+- Does **not** authorize B2B, a 12-example run, a third B2A attempt, any
+  method implementation, or any change to `configs/lock.yaml`,
+  `third_party/R-KV`, the pinned R-KV revision, or any parity/provenance/
+  memory/timing/device-placement gate.
+- Once FullKV or R-KV inference begins under THIS authorization, B2A-R2 is
+  likewise scientifically consumed — no automatic or unauthorized further
+  attempt.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

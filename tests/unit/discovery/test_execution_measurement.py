@@ -220,3 +220,105 @@ def test_load_inclusive_projection_uses_max_of_twelve_real_pairs_and_excludes_no
     assert projection.per_example_inference_seconds == 9
     assert projection.conservative_real_pair_seconds == 12
     assert projection.projected_total_seconds == 10 + 20 + 12 * 9 + 144 * 12
+    # B2A-R1 zero-event repair (2026-07-22): the exactly-12 "available" path
+    # must remain exactly as strict as before this repair.
+    assert projection.available is True
+    assert projection.unavailable_reason is None
+    assert projection.observed_real_pair_duration_count == 12
+    assert projection.required_real_pair_duration_count == 12
+    assert projection.projected_complete_pilot_gpu_hours == projection.projected_total_seconds / 3600.0
+
+
+# ---------------------------------------------------------------------------
+# B2A-R1 zero-event coordinator repair (2026-07-22): a frozen one-example row
+# that produces fewer than 12 real-pair durations (e.g. zero compaction
+# events, as B2A-R1 actually observed: prompt=105 tokens, generated=449
+# tokens, processed length ~554, well under R-KV budget=1024) is a genuine,
+# non-exceptional, ineligible-calibration outcome. `build_runtime_projection`
+# must report it as `available=False` with every real-pair-derived field
+# `None` -- never raise, and never fabricate `0.0`/`inf`/the 4.00-hour limit
+# itself as a stand-in projection.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("observed_count", [0, 1, 11])
+def test_runtime_projection_is_unavailable_not_an_exception_for_insufficient_real_pair_durations(observed_count):
+    projection = build_runtime_projection(
+        fullkv_startup_and_model_load_seconds=10,
+        rkv_startup_and_model_load_seconds=20,
+        fullkv_natural_generation_seconds=2,
+        rkv_pass1_seconds=3,
+        rkv_pass2_seconds=4,
+        b2a_real_pair_seconds=[1.0 + i for i in range(observed_count)],
+    )
+    assert projection.available is False
+    assert projection.unavailable_reason == "insufficient_real_pair_durations"
+    assert projection.observed_real_pair_duration_count == observed_count
+    assert projection.required_real_pair_duration_count == 12
+    # Never fabricated: no 0.0, no inf, no guessed placeholder -- an
+    # explicit, unmistakable absence.
+    assert projection.conservative_real_pair_seconds is None
+    assert projection.projected_total_seconds is None
+    assert projection.projected_complete_pilot_gpu_hours is None
+    # The one-time and per-example components never depended on the
+    # real-pair list, and must still be reported (the coordinator's
+    # `per_example_total_wall_seconds` measurement stays meaningful even
+    # when the pilot-runtime projection is unavailable).
+    assert projection.per_example_inference_seconds == 9
+    assert projection.fullkv_startup_and_model_load_seconds == 10
+    assert projection.rkv_startup_and_model_load_seconds == 20
+
+
+def test_runtime_projection_zero_real_pairs_matches_the_actual_observed_b2a_r1_failure():
+    """The exact shape of the actual B2A-R1 consumed-attempt failure
+    (results/decisions/b2a_attempt_20260722T072823470986Z_..., preserved in
+    docs/evidence/B2A_R1_ATTEMPT_INDEX_2026-07-22.json): zero compaction
+    events, hence zero real-pair durations -- this must no longer raise
+    `ValueError: runtime projection requires exactly 12 B2A real-pair
+    durations`."""
+    projection = build_runtime_projection(
+        fullkv_startup_and_model_load_seconds=5.0,
+        rkv_startup_and_model_load_seconds=6.0,
+        fullkv_natural_generation_seconds=1.0,
+        rkv_pass1_seconds=1.0,
+        rkv_pass2_seconds=1.0,
+        b2a_real_pair_seconds=[],
+    )
+    assert projection.available is False
+    assert projection.observed_real_pair_duration_count == 0
+
+
+def test_runtime_projection_still_rejects_non_finite_or_non_positive_real_pair_durations():
+    """A genuinely malformed measurement -- a present but non-finite or
+    non-positive real-pair duration -- remains a hard defect, never
+    silently downgraded to "unavailable"."""
+    with pytest.raises(ValueError, match="finite and positive"):
+        build_runtime_projection(
+            fullkv_startup_and_model_load_seconds=10,
+            rkv_startup_and_model_load_seconds=20,
+            fullkv_natural_generation_seconds=2,
+            rkv_pass1_seconds=3,
+            rkv_pass2_seconds=4,
+            b2a_real_pair_seconds=[1.0] * 11 + [-5.0],
+        )
+    with pytest.raises(ValueError, match="finite and positive"):
+        build_runtime_projection(
+            fullkv_startup_and_model_load_seconds=10,
+            rkv_startup_and_model_load_seconds=20,
+            fullkv_natural_generation_seconds=2,
+            rkv_pass1_seconds=3,
+            rkv_pass2_seconds=4,
+            b2a_real_pair_seconds=[1.0] * 11 + [float("nan")],
+        )
+
+
+def test_runtime_projection_still_rejects_non_finite_or_negative_one_time_components():
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        build_runtime_projection(
+            fullkv_startup_and_model_load_seconds=-1,
+            rkv_startup_and_model_load_seconds=20,
+            fullkv_natural_generation_seconds=2,
+            rkv_pass1_seconds=3,
+            rkv_pass2_seconds=4,
+            b2a_real_pair_seconds=[],
+        )

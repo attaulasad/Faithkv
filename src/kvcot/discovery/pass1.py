@@ -221,6 +221,38 @@ def run_natural_pass1(
     )
 
 
+def eligible_event_positions(
+    event_positions: Sequence[int], *, prompt_length: int, total_len: int
+) -> list[int]:
+    """The position-based eligibility RULE alone, independent of the
+    CPU-harness's `CompactionEventObservation`/`NaturalRunTrace` types:
+    NEVER the first or last event in `event_positions` (chronological
+    order), NEVER a prefill-phase event (B1B-R2 §6: a one-shot prefill call
+    has no valid mid-prefill snapshot boundary to branch from — see this
+    module's docstring), and at least `MINIMUM_FUTURE_TOKENS_AFTER_EVENT`
+    (49) real future tokens must exist after the event's absolute position,
+    evaluated against the COMPLETE trace length. `eligible_event_ids` below
+    and FullKV-only B2A-R2 row qualification
+    (`kvcot.discovery.b2a_qualification`, which has only predicted event
+    POSITIONS from `kvcot.analysis.rkv_schedule
+    .predicted_compaction_event_positions` -- no per-layer
+    `CompactionEventObservation` objects, since R-KV is never imported
+    during qualification) both call this one rule, never two independently
+    maintained copies of it."""
+    if len(event_positions) < 3:
+        return []
+    eligible = []
+    for i, position in enumerate(event_positions):
+        if i == 0 or i == len(event_positions) - 1:
+            continue
+        if position < prompt_length:
+            continue
+        future_tokens = (total_len - 1) - position
+        if future_tokens >= MINIMUM_FUTURE_TOKENS_AFTER_EVENT:
+            eligible.append(i)
+    return eligible
+
+
 def eligible_event_ids(trace: NaturalRunTrace) -> list[int]:
     """Compaction events eligible for selection: NEVER the first or last
     compaction event of the run, NEVER a prefill-phase event (B1B-R2 §6:
@@ -229,21 +261,16 @@ def eligible_event_ids(trace: NaturalRunTrace) -> list[int]:
     `MINIMUM_FUTURE_TOKENS_AFTER_EVENT` (49) real future tokens must exist
     after the event's absolute position. Evaluated only against the
     COMPLETE frozen trace (`len(trace.full_token_ids)`), never a
-    provisional/in-progress length."""
+    provisional/in-progress length. Delegates the position-based rule
+    itself to `eligible_event_positions` (shared with FullKV-only B2A-R2
+    row qualification) -- this function's only remaining job is translating
+    between `CompactionEventObservation`s and `compaction_event_id`s."""
     events = trace.compaction_events
-    if len(events) < 3:
-        return []
-    total_len = len(trace.full_token_ids)
-    eligible = []
-    for i, ev in enumerate(events):
-        if i == 0 or i == len(events) - 1:
-            continue
-        if ev.absolute_event_position < trace.prompt_length:
-            continue
-        future_tokens = (total_len - 1) - ev.absolute_event_position
-        if future_tokens >= MINIMUM_FUTURE_TOKENS_AFTER_EVENT:
-            eligible.append(ev.compaction_event_id)
-    return eligible
+    positions = [ev.absolute_event_position for ev in events]
+    eligible_indices = eligible_event_positions(
+        positions, prompt_length=trace.prompt_length, total_len=len(trace.full_token_ids)
+    )
+    return [events[i].compaction_event_id for i in eligible_indices]
 
 
 def _pools_for_layer_head(

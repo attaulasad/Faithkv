@@ -14,6 +14,7 @@ import pytest
 from kvcot.analysis.rkv_schedule import (
     meaningfully_compressed_fractions,
     predict_retention_by_fraction,
+    predicted_compaction_event_positions,
     retention_ratio,
     simulate_rkv_cache_lengths,
 )
@@ -131,6 +132,63 @@ def test_physical_cache_never_shrinks_by_more_than_one_step_between_targets():
         assert b == a + 1  # consecutive here since we asked for every position
         delta = lengths[b] - lengths[a]
         assert delta == 1 or lengths[b] == 10
+
+
+# --- predicted_compaction_event_positions (B2A-R2 FullKV-only qualification,
+# 2026-07-22): reuses the SAME `_walk_schedule` internal walk as
+# `simulate_rkv_cache_lengths` above -- every scenario here is cross-checked
+# against that function's already-verified cache-length predictions, never
+# independently hand-traced again. ---
+
+def test_no_events_predicted_when_never_reaching_budget():
+    # Mirrors test_sawtooth_growth_then_snap_back_to_budget: cache never
+    # reaches budget=128 in this window, so no eviction ever fires.
+    events = predicted_compaction_event_positions(prompt_length=100, max_position=109, budget=128, divide_length=8)
+    assert events == []
+
+
+def test_events_predicted_exactly_where_cache_snaps_back_to_budget():
+    # Mirrors test_sawtooth_pattern_once_budget_is_exceeded: every position
+    # whose predicted cache length is exactly budget, reached by DROPPING
+    # from an above-budget candidate (never a position that merely grew
+    # into budget for the first time), is a predicted event.
+    lengths = simulate_rkv_cache_lengths(
+        prompt_length=6, target_absolute_positions=list(range(6, 20)), budget=10, divide_length=4,
+    )
+    events = predicted_compaction_event_positions(prompt_length=6, max_position=19, budget=10, divide_length=4)
+    assert events, "the known sawtooth-over-budget scenario must predict at least one event"
+    for pos in events:
+        assert lengths[pos] == 10
+    # And at least one event position's PRECEDING position was above budget
+    # (an actual eviction, not merely "grew up to budget for the first
+    # time").
+    positions = sorted(lengths)
+    grew_into_budget_for_first_time = {
+        b for a, b in zip(positions, positions[1:])
+        if lengths[b] == 10 and lengths[a] == 9  # grew by exactly 1 into budget, no eviction
+    }
+    assert set(events) - grew_into_budget_for_first_time, (
+        "at least one predicted event must be a genuine post-overshoot eviction, not merely first-touch of budget"
+    )
+
+
+def test_prefill_above_budget_is_itself_a_predicted_event():
+    events = predicted_compaction_event_positions(prompt_length=300, max_position=300, budget=128, divide_length=128)
+    assert events == [300]
+
+
+def test_prefill_below_budget_is_not_a_predicted_event():
+    events = predicted_compaction_event_positions(prompt_length=50, max_position=50, budget=128, divide_length=128)
+    assert events == []
+
+
+def test_predicted_events_are_a_subset_of_decode_positions_at_or_above_prompt_length():
+    events = predicted_compaction_event_positions(prompt_length=6, max_position=40, budget=10, divide_length=4)
+    assert all(pos >= 6 for pos in events)
+
+
+def test_max_position_before_prompt_length_returns_no_events():
+    assert predicted_compaction_event_positions(prompt_length=100, max_position=50, budget=128, divide_length=128) == []
 
 
 # --- error handling ---

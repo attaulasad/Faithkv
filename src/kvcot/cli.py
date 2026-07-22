@@ -2350,6 +2350,80 @@ def cmd_prepare_b2a_manifest(args: argparse.Namespace) -> int:
     return 0
 
 
+# ------------------------------------------------------------- qualify-b2a-row
+#
+# B2A-R2 FullKV-only row qualification (2026-07-22). `--dry-run` performs no
+# CUDA access, model load, or inference -- structural/identity validation of
+# the committed candidate manifest against the config only. `--execute`
+# loads FullKV ONLY (never R-KV) and attempts candidates, in their committed
+# deterministic order, stopping at the first one satisfying every frozen
+# qualification condition. Writes an immutable qualification artifact.
+
+
+def cmd_qualify_b2a_row(args: argparse.Namespace) -> int:
+    import json
+
+    from kvcot.discovery.b2a_qualification import (
+        run_qualification_dry_run,
+        run_qualification_execute,
+    )
+    from kvcot.discovery.discovery_config import canonical_config_hash, load_discovery_config
+    from kvcot.discovery.manifest_prepare import ManifestPreparationError
+
+    config = load_discovery_config(args.config)
+    with open(args.candidates, "r", encoding="utf-8") as f:
+        candidate_manifest = json.load(f)
+
+    if args.dry_run:
+        try:
+            plan = run_qualification_dry_run(config, candidate_manifest)
+        except ManifestPreparationError as e:
+            raise SystemExit(f"qualify-b2a-row --dry-run refused: {e}") from e
+        print("qualify-b2a-row dry-run plan:")
+        print(f"  candidate_manifest_hash: {plan['candidate_manifest_hash']}")
+        print(f"  candidates_to_attempt_in_order: {plan['candidates_to_attempt_in_order']}")
+        print(f"  qualification_conditions: {plan['qualification_conditions']}")
+        print("  no CUDA access, no model load, no inference performed by --dry-run")
+        return 0
+
+    if not args.execute:
+        raise SystemExit("qualify-b2a-row requires exactly one of --dry-run or --execute.")
+
+    import torch
+
+    if not torch.cuda.is_available():
+        raise SystemExit("qualify-b2a-row --execute requires CUDA; none is available on this machine.")
+
+    config_hash = canonical_config_hash(config)
+    try:
+        artifact = run_qualification_execute(
+            config, candidate_manifest, args.candidates, config_hash=config_hash,
+        )
+    except ManifestPreparationError as e:
+        raise SystemExit(f"qualify-b2a-row --execute refused: {e}") from e
+
+    from kvcot.discovery.attempt_artifacts import atomic_write_json
+    from pathlib import Path
+
+    output_path = Path(args.output) if args.output else Path("results/decisions/b2a_r2_qualification.json")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(output_path, artifact.to_json())
+
+    print(f"qualify-b2a-row: attempted {len(artifact.attempted)} candidate(s)")
+    for outcome in artifact.attempted:
+        print(
+            f"  ordinal={outcome.candidate_ordinal} unique_id={outcome.unique_id} "
+            f"qualified={outcome.qualified} failed_conditions={outcome.failed_conditions}"
+        )
+    if artifact.selected_ordinal is None:
+        print("qualify-b2a-row: NO QUALIFIED ROW")
+        print(f"  artifact written: {output_path}")
+        return 1
+    print(f"qualify-b2a-row: SELECTED ordinal={artifact.selected_ordinal} unique_id={artifact.selected_unique_id}")
+    print(f"  artifact written: {output_path}")
+    return 0
+
+
 # --------------------------------------------------------------------- b2a-calibrate
 #
 # One-example-only B2A calibration command (B1B-R2 §11). "B2A is a one-
@@ -2725,6 +2799,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--execute", action="store_true")
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_prepare_b2a_manifest)
+
+    p = sub.add_parser(
+        "qualify-b2a-row",
+        help="B2A-R2: FullKV-only, R-KV-free row qualification against the committed candidate manifest.",
+    )
+    p.add_argument("--config", required=True)
+    p.add_argument("--candidates", required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--execute", action="store_true")
+    p.add_argument("--output", default=None)
+    p.set_defaults(func=cmd_qualify_b2a_row)
 
     p = sub.add_parser(
         "b2a-calibrate",

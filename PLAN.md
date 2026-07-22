@@ -1,6 +1,42 @@
 # Plan and status
 
-## B2A ONE-EXAMPLE GPU AUTHORIZATION (2026-07-22)
+## B2A-R1 FAILURE CLOSURE AND B2A-R2 PRE-REGISTRATION (2026-07-22)
+
+B2A-R1 (the single attempt CLAUDE.md §1c authorized) executed against
+`example_index=0`: both FullKV and R-KV workers ran (return code 0 each),
+so the attempt is scientifically consumed, but it produced ZERO R-KV
+compaction events (prompt=105 tokens, generated=449 tokens, far under
+budget=1024) -- an ineligible calibration that tested no eviction at all.
+Full evidence and root-cause analysis:
+`docs/B2A_R1_FAILURE_AND_B2A_R2_PROTOCOL_2026-07-22.md`;
+`docs/evidence/B2A_R1_ATTEMPT_INDEX_2026-07-22.json`.
+
+Two repairs made before any B2A-R2 inference, neither touching scientific
+configuration: (1) the coordinator's `build_runtime_projection` no longer
+raises on an insufficient real-pair count -- it resolves to an explicit,
+never-fabricated "unavailable" outcome, failing the runtime gate closed;
+(2) the MATH-500 answer verifier's calling convention into `math-verify`
+was corrected (confirmed root cause: bare, non-`\boxed{}` compound LaTeX is
+unreliably parsed by that library's fallback path) -- a general fix, not
+tuned to the specific observed answer.
+
+B2A-R2 is pre-registered: a committed, deterministically-ordered 12-row
+MATH-500 candidate manifest (`configs/discovery/b2a_r2_candidate_manifest.json`),
+FullKV-only qualification (`kvcot qualify-b2a-row`, R-KV never imported)
+against 10 frozen conditions, stopping at the first qualified row -- no
+qualified row means immediate stop. The qualified row, if any, is frozen
+into a replacement one-example manifest only by a fail-closed function
+that rejects any hash/identity mismatch or row substitution. Exactly one
+further `b2a-calibrate --execute` attempt is then authorized, under the
+unchanged §1c/§4c settings.
+
+No B2A-R2 result exists yet as of this entry. No B2B result exists. No
+FaithKV method exists. B2B and any FaithKV method implementation remain
+blocked pending a separate, future, independent authorization.
+
+## Historical status
+
+## Prior status: B2A one-example GPU authorization (2026-07-22)
 
 B1 CPU closure is complete; CPU CI is green at run
 [29892965613](https://github.com/asad073-ui/Faithkv/actions/runs/29892965613)
@@ -23,8 +59,6 @@ example, hard 22 GiB / 4.00 GPU-hour limits.
 No B2A result exists yet. No B2B result exists. No FaithKV method exists.
 B2B and any FaithKV method implementation remain blocked pending a
 separate, future, independent authorization.
-
-## Historical status
 
 ## Prior status: Phase B1 final CPU closure, round 4 — B1 FINAL CPU CLOSURE VERDICT: INCOMPLETE — B2A/GPU REMAIN BLOCKED (2026-07-21)
 

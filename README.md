@@ -2,8 +2,39 @@
 
 ## Current status (read this first)
 
-**B2A ONE-EXAMPLE GPU AUTHORIZATION (2026-07-22).** B1 CPU closure is
-complete; CPU CI is green at run
+**B2A-R1 FAILURE CLOSURE AND B2A-R2 PRE-REGISTRATION (2026-07-22).**
+B2A-R1 (the single attempt CLAUDE.md §1c authorized) executed against
+`example_index=0`: both FullKV and R-KV workers ran (return code 0 each),
+so the attempt is scientifically consumed, but it produced ZERO R-KV
+compaction events (prompt=105 tokens, generated=449 tokens, far under
+budget=1024) -- an ineligible calibration that tested no eviction at all,
+not a scientific result. Full evidence:
+`docs/B2A_R1_FAILURE_AND_B2A_R2_PROTOCOL_2026-07-22.md`,
+`docs/evidence/B2A_R1_ATTEMPT_INDEX_2026-07-22.json`.
+
+Two repairs landed before any B2A-R2 inference, neither touching scientific
+configuration: the B2A coordinator no longer raises on an insufficient
+real-pair count (resolves to an explicit, never-fabricated "unavailable"
+runtime projection instead); the MATH-500 answer verifier's calling
+convention into `math-verify` was corrected (confirmed root cause: bare,
+non-`\boxed{}` compound LaTeX is unreliably parsed by that library's
+fallback path).
+
+B2A-R2 is pre-registered, not yet executed: a committed, deterministically
+-ordered 12-row MATH-500 candidate manifest, FullKV-only qualification
+(`kvcot qualify-b2a-row`, R-KV never imported) against 10 frozen
+conditions stopping at the first qualified row (no qualified row means
+immediate stop), and a fail-closed freeze step before any further
+`b2a-calibrate --execute` attempt. See CLAUDE.md §1d for the complete,
+exact scope.
+
+No B2A-R2 result exists yet. No B2B result exists. No FaithKV method exists.
+
+### Historical status
+
+#### Prior status: B2A one-example GPU authorization (2026-07-22)
+
+B1 CPU closure is complete; CPU CI is green at run
 [29892965613](https://github.com/asad073-ui/Faithkv/actions/runs/29892965613)
 (commit `a4f6e4298eba10d037ca7e6570fe6d69aad2472f`). Bounded GPU mechanical
 validation is complete on the Vast RTX 3090 host: 12 of 14 collected
@@ -23,8 +54,6 @@ example, hard 22 GiB / 4.00 GPU-hour limits. B2B and any FaithKV method
 implementation remain blocked.
 
 No B2A result exists yet. No B2B result exists. No FaithKV method exists.
-
-### Historical status
 
 **B1 FINAL CPU CLOSURE VERDICT: INCOMPLETE — B2A/GPU REMAIN BLOCKED
 (2026-07-21, round 4).** Round 3's claim that "only two audit-formality

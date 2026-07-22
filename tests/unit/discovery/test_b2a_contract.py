@@ -177,6 +177,22 @@ def test_gate_fails_on_projected_pilot_runtime_over_threshold():
     assert "runtime_within_limit" in result.failed_conditions
 
 
+def test_gate_fails_closed_on_unavailable_runtime_projection_never_fabricated_as_within_limit():
+    """B2A-R1 zero-event coordinator repair (2026-07-22): an insufficient
+    real-pair count (e.g. zero compaction events) makes the runtime
+    projection genuinely unavailable -- `None`, never `0.0`/`inf`/the
+    4.00-hour limit itself. `evaluate_b2a_gate` must fail `
+    runtime_within_limit` closed from that `None`, never compare it against
+    the threshold as if it were a real (and coincidentally passing)
+    number."""
+    measurement = _good_measurement(per_real_pair_seconds=None, projected_complete_pilot_gpu_hours=None)
+    result = evaluate_b2a_gate(_good_evidence(measurement=measurement))
+    assert result.passed is False
+    assert "runtime_within_limit" in result.failed_conditions
+    assert measurement.per_real_pair_seconds is None
+    assert measurement.projected_complete_pilot_gpu_hours is None
+
+
 def test_gate_fails_on_peak_allocated_memory_over_threshold():
     over_bytes = int((MAX_PEAK_ALLOCATED_MEMORY_GIB + 0.5) * 1024**3)
     measurement = _good_measurement(peak_cuda_allocated_bytes=over_bytes)

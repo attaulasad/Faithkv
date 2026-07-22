@@ -1,5 +1,66 @@
 # Changelog
 
+## 2026-07-22 — B2A-R1 failure closure and B2A-R2 pre-registration (B2A-R1 CONSUMED, ZERO EVENTS; B2A-R2 PRE-REGISTERED, NOT YET EXECUTED)
+
+B2A-R1 (the single attempt CLAUDE.md §1c authorized) executed against
+`example_index=0`: FullKV/R-KV inference began (both workers returned code
+0), so the attempt is consumed, but it produced zero R-KV compaction events
+(prompt=105, generated=449, budget=1024 never reached) -- an ineligible
+calibration, not a scientific result. Full rationale, evidence, and the
+pre-registered B2A-R2 procedure:
+`docs/B2A_R1_FAILURE_AND_B2A_R2_PROTOCOL_2026-07-22.md`; CLAUDE.md gained
+§1d (no existing section edited or weakened). Both preserved B2A-R1
+attempts (preflight-only and consumed) are indexed in
+`docs/evidence/B2A_R1_ATTEMPT_INDEX_2026-07-22.json`; their raw artifact
+directories were moved outside the repository after byte-for-byte archive
+verification (never committed).
+
+- **Coordinator repair (H3, test-harness/coordinator, not a scientific
+  change):** `build_runtime_projection` no longer raises on an insufficient
+  real-pair count -- it now resolves to an explicit `available=False`
+  outcome (never a fabricated `0`/`inf`/`4.00`-hour stand-in), and
+  `evaluate_b2a_gate` fails `runtime_within_limit` closed from that `None`.
+  The exactly-12 "available" path's arithmetic is unchanged. New tests in
+  `tests/unit/discovery/test_execution_measurement.py`,
+  `test_b2a_contract.py`, `test_b2a_execute_coordinator.py` (including a
+  full coordinator-level reproduction of the actual zero-event failure,
+  proving a clean `gate_failed`/`exit_code=2`/verified-`final.json` outcome
+  instead of an uncaught exception).
+- **Answer-verifier repair (confirmed defect, general fix):** audited
+  directly against the installed `math-verify==0.9.0` package using the
+  exact B2A-R1 observed strings. Root cause: `math_verify.parse`'s
+  non-anchored fallback extraction is unreliable for compound (bare,
+  non-`\boxed{}`) expressions. Fix: `Math500AnswerVerifier` now re-wraps
+  both the extracted answer and the gold answer in `\boxed{...}` before
+  verification -- confirmed whitespace-insensitive, `\left`/`\right`-
+  insensitive, order-preserving, double-wrap-safe, and not tuned to the
+  observed answer (no hard-coding, no regex-number matching). 12 new tests
+  in `tests/unit/discovery/test_math500_verification.py`.
+- **B2A-R2 candidate manifest** (`configs/discovery/b2a_r2_candidate_manifest.json`,
+  new `kvcot.discovery.b2a_r2_candidates` module): 12 level-5 MATH-500 rows
+  from the same pinned dataset revision, ordered by a fixed content-derived
+  hash, pre-registered before any qualification inference. Canonical hash
+  `ac2dcc4550a89f2cfa701acd608a8087b4a1ebaa0ea05eb15d8f71e3434ee0ec`.
+- **FullKV-only qualification** (new `kvcot.discovery.b2a_qualification`
+  module, `kvcot qualify-b2a-row` CLI command): attempts the 12 candidates
+  in committed order, R-KV never imported, stopping at the first
+  satisfying all 10 frozen conditions. Reuses (never duplicates) the
+  production FullKV natural-generation worker, a new
+  `kvcot.analysis.rkv_schedule.predicted_compaction_event_positions`
+  (extends the existing GPU-verified schedule simulator via a shared
+  internal walk), and a new `kvcot.discovery.pass1.eligible_event_positions`
+  (the position-based eligibility rule extracted from `eligible_event_ids`
+  so both share one implementation).
+- **Row freezing** (new `kvcot.discovery.b2a_r2_freeze` module): the only
+  function that may write a replacement `b2a_one_example_manifest.json`;
+  fails closed on any candidate-manifest hash mismatch, config/identity
+  mismatch, unqualified selection, or row substitution attempt.
+  `B2AOneExampleManifest`'s schema is unchanged.
+- No change to `configs/lock.yaml`, `third_party/R-KV`, the pinned R-KV
+  revision, `budget`, `divide_length`, or any parity/provenance/memory/
+  timing/device-placement gate. B2A-R2 execution itself has not yet run as
+  of this entry.
+
 ## 2026-07-22 — B2A one-example GPU authorization (AUTHORIZATION ONLY — no execution recorded by this entry; B2B/method remain blocked)
 
 Separate, explicit, dated authorization for exactly one B2A
