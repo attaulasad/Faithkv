@@ -1,6 +1,36 @@
 # Plan and status
 
-## Current status: B2A-R2 forensic closure -- merged into main (2026-07-22)
+## Current status: B2A-R3 runtime-qualified protocol frozen (2026-07-22)
+
+`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` is frozen: research
+question, outcome-blind qualification contract, deterministic candidate
+pool/ordering, the runtime predictor (with both mandatory ambiguities --
+the `10.25`s pair-time statistic and the meaningful-compression definition
+-- resolved from repository evidence, never invented), mechanical and
+scientific acceptance gates, kill gates, and the three-stage
+authorization boundary (CPU implementation / bounded FullKV qualification
+/ one B2A-R3 execution, each requiring its own separate future
+authorization).
+
+```text
+B2A-R3 STATUS:
+PROTOCOL FROZEN — CPU IMPLEMENTATION AUTHORIZED — GPU EXECUTION PROHIBITED
+```
+
+This status becomes valid only after protocol review, documentation
+validation, commit, push, and independent audit -- it does not itself
+authorize GPU activity of any kind, and does not authorize B2A-R3
+execution, B2B, or FaithKV method implementation. `CLAUDE.md` §1e records
+the same dated authorization boundary.
+
+The next task is:
+
+```text
+Independent audit of the frozen B2A-R3 protocol, followed by CPU-only
+implementation if the audit passes.
+```
+
+## Prior status: B2A-R2 forensic closure -- merged into main (2026-07-22)
 
 PR #20 (containing the B2A-R2 forensic pair-record persistence repair,
 audit rounds 1-3 below) was independently audited and merged into `main`.

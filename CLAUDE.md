@@ -199,6 +199,47 @@ procedure:
   likewise scientifically consumed — no automatic or unauthorized further
   attempt.
 
+### Section 1e — B2A-R3 protocol freeze (dated 2026-07-22)
+
+Added by
+`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md`, superseding
+nothing above. PR #20 (the B2A-R2 forensic pair-record persistence repair)
+merged into `main` (merge commit
+`9e78bc5edda0f0086d9e9aaea98896ac24caa7b0`); B2A-R2 remains consumed and
+cannot be rerun (`B2A-R2 FINAL VERDICT: FAIL -- B2B BLOCKED`, unchanged).
+This subsection records that the B2A-R3 runtime-qualified calibration
+protocol is now frozen:
+
+```text
+B2A-R3 protocol is frozen.
+CPU implementation and CPU tests are authorized after independent audit.
+GPU activity remains prohibited.
+```
+
+Explicitly allowed by this subsection, once that independent audit of the
+frozen protocol document passes: CPU-only implementation of the B2A-R3
+candidate manifest, deterministic candidate generator, runtime predictor,
+qualification evaluator, and selected-row freezer described in the
+protocol document; CPU-only tests for all of the above, using injected
+synthetic/deterministic components exactly as §1b's harness-architecture
+exception required; static candidate/qualification manifests produced by
+CPU-only code; `kvcot`'s CPU-only dry-run planning paths; documentation.
+
+Explicitly **not** authorized by this subsection: FullKV candidate
+qualification against real weights; R-KV execution; pair evaluation; any
+CUDA initialization; B2A-R3 execution; B2B; any FaithKV method
+implementation. CPU implementation becomes the next proposed action only
+after an independent audit of the frozen protocol document — this
+subsection does not itself authorize Step 3 (CPU implementation) to begin;
+it authorizes only that the protocol exists in frozen form and states what
+Step 3 will be permitted to do once that separate audit passes.
+
+- Does **not** authorize B2A-R3 execution, B2B, GPU rental, or FaithKV
+  method implementation of any kind.
+- Does **not** change any threshold, budget, model, dataset, or gate frozen
+  by §1/§1a/§1b/§1c/§1d/§4/§4a/§4b/§4c.
+- Does **not** modify `configs/lock.yaml` or the pinned R-KV revision.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

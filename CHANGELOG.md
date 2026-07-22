@@ -1,5 +1,63 @@
 # Changelog
 
+## 2026-07-22 — B2A-R3 runtime-qualified protocol frozen (DOCUMENTATION ONLY; GPU REMAINS PROHIBITED)
+
+Froze `docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` after
+inspecting B2A-R2's own timing/gate evidence (`docs/B2A_R2_RESULT_
+2026-07-22.md`, `docs/evidence/B2A_R2_ATTEMPT_INDEX_2026-07-22.json`,
+`src/kvcot/discovery/execution_measurement.py`,
+`src/kvcot/discovery/b2a_evidence.py`,
+`src/kvcot/discovery/b2a_qualification.py`,
+`src/kvcot/discovery/scientific_summary.py`,
+`src/kvcot/discovery/constants.py`) -- no source, test, or configuration
+file changed; no GPU used.
+
+- **Verified inherited settings** (§4 of the protocol): model, dataset
+  revision, R-KV budget 1024, divide length 128, bridge tokens 1, scored
+  horizon 48, 3 selected events, 4 pairs/event, 12 real interventions, 1
+  no-op, batch size 1, one RTX 3090, 22 GiB VRAM limit, 4.00 GPU-hour hard
+  gate -- each cited to its exact repository source, none silently
+  assumed.
+- **Outcome-blind qualification contract** (§6): frozen allowed inputs
+  (row identity, correctness, token counts, static R-KV schedule
+  prediction, the runtime predictor) and forbidden inputs (swap gains,
+  NLL arrays, correlations, no-op result, any pair-level scientific
+  signal) -- the qualification implementation must never import the R-KV
+  pair-evaluation path.
+- **Both mandatory ambiguities resolved from repository evidence, not
+  invented:** (1) `10.25`s is the MAXIMUM of B2A-R2's 12 observed
+  real-pair durations (`conservative_pair = max(b2a_real_pair_seconds)`,
+  `execution_measurement.py`), not a mean/median; (2) "meaningful
+  compression" is `selected_event_count >= 1 and observed_retention_ratio
+  < 1.0` (`derive_meaningful_compression_observed`,
+  `b2a_evidence.py`), copied unchanged since B2A-R2 passed this exact
+  condition.
+- **Runtime predictor frozen** (§7): formula, reference constants (all
+  from B2A-R2's real measured evidence), and the verified `12`/`144`
+  projection multiplicities (`execution_measurement.py`,
+  `constants.py`); qualification target 3.60 GPU-hours (new, explicit
+  safety margin) vs. the unchanged 4.00 GPU-hour hard gate.
+- **Deterministic candidate selection frozen** (§8-§10): 16-candidate
+  pool (8 level-4 + 8 level-5 MATH-500 rows, same pinned revision,
+  excluding all 13 rows already used by B2A-R1/B2A-R2), reusing B2A-R2's
+  own ordering-hash construction with a new protocol-version string,
+  qualification limited to the first 8 candidates, first-pass-wins
+  selection.
+- **GPU prohibition restated** (§14, §19): only CPU implementation and
+  CPU tests are authorized, and only after an independent audit of this
+  frozen protocol -- FullKV qualification, R-KV execution, B2A-R3
+  execution, B2B, and FaithKV method implementation all remain
+  unauthorized.
+
+`CLAUDE.md` §1e records the same dated authorization boundary; `PLAN.md`
+and `README.md`'s current-status sections point to the frozen protocol
+document rather than restating it.
+
+```text
+B2A-R3 STATUS:
+PROTOCOL FROZEN — CPU IMPLEMENTATION AUTHORIZED — GPU EXECUTION PROHIBITED
+```
+
 ## 2026-07-22 — B2A-R2 forensic closure: PR #20 merged into main (B2A-R3/B2B REMAIN BLOCKED)
 
 PR #20 (the B2A-R2 forensic pair-record persistence repair, audit rounds

@@ -2,11 +2,37 @@
 
 ## Current status (read this first)
 
-**B2A-R2 FORENSIC CLOSURE: MERGED (2026-07-22).** The B2A-R2 forensic
-pair-record persistence repair (three audit rounds, CPU-only, no
-GPU/inference/re-run -- see "Historical status" below and
-`docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md`) was
-independently audited and merged into `main`:
+**B2A-R3 RUNTIME-QUALIFIED PROTOCOL: FROZEN (2026-07-22).** Full protocol:
+`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` (research question,
+outcome-blind qualification contract, deterministic candidate pool, the
+runtime predictor, mechanical/scientific/kill gates, and a three-stage
+authorization boundary). This document does not restate the protocol --
+see the frozen file itself.
+
+```text
+B2A-R3 STATUS:
+PROTOCOL FROZEN — CPU IMPLEMENTATION AUTHORIZED — GPU EXECUTION PROHIBITED
+```
+
+This status is valid only after protocol review, documentation
+validation, commit, push, and independent audit -- it does **not**
+authorize GPU activity, B2A-R3 execution, B2B, or FaithKV method
+implementation of any kind (`CLAUDE.md` §1e). B2A-R2 (see "Historical
+status" below) remains a consumed experimental attempt, prohibited from
+rerun, its `B2A-R2 FINAL VERDICT: FAIL -- B2B BLOCKED` unchanged.
+
+The next required action is an independent audit of the frozen protocol,
+followed by CPU-only implementation (candidate manifest, runtime
+predictor, qualification evaluator, selected-row freezer, CPU tests, and a
+dry-run CLI) if that audit passes.
+
+### Historical status
+
+#### Prior status: B2A-R2 forensic closure -- merged into main (2026-07-22)
+
+PR #20 (the B2A-R2 forensic pair-record persistence repair, three audit
+rounds, CPU-only, no GPU/inference/re-run) was independently audited and
+merged into `main`:
 
 ```text
 PR: #20
@@ -15,34 +41,21 @@ Merge commit: 9e78bc5edda0f0086d9e9aaea98896ac24caa7b0
 Audited repair head: dc2681158ed4d68fd8fe08f313033015a54ec942
 ```
 
-This closure fixes durable pair-record persistence and outcome-consistency
-defects only -- it changes no historical B2A-R2 measurement or conclusion.
+This closure fixed durable pair-record persistence and outcome-consistency
+defects only -- it changed no historical B2A-R2 measurement or conclusion.
 B2A-R2 (`fb6f5081d47f45f4b4f9258c25e6883d`, qualified row
 `test/number_theory/820.json`) still exceeded the 4.00 GPU-hour runtime
 limit, with total projected runtime of approximately 5.01 GPU-hours, and
 its frozen verdict `B2A-R2 FINAL VERDICT: FAIL -- B2B BLOCKED` is
 unchanged. B2A-R2 is a consumed experimental attempt and is prohibited
-from rerun. This closure does not authorize B2B and does not authorize any
-FaithKV method implementation.
-
-The only next authorized activity is B2A-R3 protocol design and CPU-only
-implementation on `research/b2a-r3-runtime-qualified-calibration`:
-
-Design and implement the B2A-R3 runtime-qualified protocol entirely on CPU,
-using deterministic outcome-blind candidate selection and a conservative
-3.60-GPU-hour qualification target, while retaining the hard 4.00-GPU-hour
-execution gate.
-
-GPU rental, FullKV qualification, R-KV execution, pair evaluation, and
-B2A-R3 execution all remain unauthorized pending a new, separate, dated
-authorization.
+from rerun. This closure did not authorize B2B and did not authorize any
+FaithKV method implementation -- see "Current status" above for the
+subsequent protocol freeze.
 
 ```text
 B2A-R2 FORENSIC CLOSURE VERDICT:
 PAIR-RECORD PERSISTENCE REPAIRED AND MERGED
 ```
-
-### Historical status
 
 #### Prior status: B2A-R2 forensic pair-record persistence repair, audit round 3 (2026-07-22)
 
