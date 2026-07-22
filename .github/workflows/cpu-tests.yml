@@ -22,10 +22,29 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install CPU/test dependencies only
+      - name: Install CPU-only torch
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[cpu-tools,dev]"
+          python -m pip install torch==2.6.0 \
+            --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install CPU/test dependencies only
+        run: |
+          python -m pip install -e ".[cpu-tools,dev]"
+
+      - name: Verify CPU-only torch
+        run: |
+          python - <<'PY'
+          import torch
+
+          print("torch_version:", torch.__version__)
+          print("torch_cuda_version:", torch.version.cuda)
+          print("torch_cuda_available:", torch.cuda.is_available())
+
+          assert torch.__version__.split("+")[0] == "2.6.0"
+          assert torch.version.cuda is None
+          assert torch.cuda.is_available() is False
+          PY
 
       - name: Byte-compile source and tests
         run: python -m compileall src tests
