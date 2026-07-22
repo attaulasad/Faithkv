@@ -189,11 +189,6 @@ pre-existing function is exercised by
 non-B2A-shaped fake pair identities unrelated to this repair; folding a
 hard pair-record population/identity requirement into it would fail those
 unrelated tests for reasons that have nothing to do with what they test).
-`kvcot.discovery.b2a_execute.run_b2a_calibration` calls it as additional,
-**never-fatal** evidence recorded under `payload["pair_record_verification"]`
-in `final.json` -- it does not gate `overall_passed`, does not add a new
-`FINAL_MANDATORY_GATE_CONDITIONS` entry, and does not change B2A-R2's
-already-recorded, frozen outcome.
 
 For a genuine V2 result (`"pair_records" in rkv_result`), verification
 fails unless: both files exist and parse; every record validates as a
@@ -208,6 +203,10 @@ also appears as completed; `rkv/pair_records.json` matches
 second statistics formula). A legacy (V1) result returns `(True, ())`
 unconditionally -- it never fabricates a requirement a pre-repair result
 never had.
+
+**§10 (audit repair round 2) supersedes this section's original wiring**:
+`verify_pair_record_artifacts`'s result is now MANDATORY for a V2 attempt's
+success, not merely recorded evidence -- see §10.
 
 ## 8. Test evidence
 
@@ -239,6 +238,106 @@ require. B2B remains blocked. No FaithKV method exists. This repair adds
 durable persistence and verification infrastructure only; it establishes
 no new scientific finding about B2A-R2 and reverses none of its existing
 ones.
+
+## 10. Audit repair round 2 (dated 2026-07-22): pair-artifact verification made mandatory
+
+An independent audit found that round 1's `verify_pair_record_artifacts`
+wiring (§7, original text preserved above) was **never-fatal**: its result
+was recorded under `payload["pair_record_verification"]` but did not
+affect `overall_passed`, `exit_code`, or `completion.json`'s outcome. A
+future V2 attempt could therefore still be reported as a completed success
+while `rkv/pair_records.json`/`rkv/scientific_summary.json` was missing,
+incomplete, duplicated, mismatched, or corrupt -- defeating this repair's
+own purpose. This section documents the fix, CPU-only, no GPU/inference/
+re-run, no change to §6's underlying artifacts or the frozen B2A-R2
+verdict.
+
+**Mandatory gate wiring** (`kvcot.discovery.b2a_execute.run_b2a_calibration`):
+`verify_pair_record_artifacts` now runs BEFORE `overall_passed` is
+computed. A new derived condition,
+
+```python
+scientific_pair_artifacts_verified = (
+    isinstance(rkv, RKVWorkerResultV2) and pair_record_verified
+)
+```
+
+is combined into the outer coordinator's success determination as a third,
+independent, ANDed factor:
+
+```python
+overall_passed = bool(
+    gate_result.passed and final_gate_result.passed and scientific_pair_artifacts_verified
+)
+```
+
+exactly the same pattern already used to combine the legacy 28-condition
+gate and the final 31-condition gate at this outer layer -- **never folded
+into `FINAL_MANDATORY_GATE_CONDITIONS` itself**, which remains completely
+unmodified (CLAUDE.md's frozen-intervention-protocol constraint forbids
+touching that tuple's identity; this repair achieves the audit's required
+behavior -- `overall_passed=false`, `exit_code=2`,
+`outcome="gate_failed"` whenever pair-artifact verification fails --
+without doing so). Both the derived boolean and every reason are preserved
+in `final.json` (`payload["scientific_pair_artifacts_verified"]`,
+`payload["pair_record_verification"]["reasons"]`).
+
+This applies only to attempts this live coordinator creates going forward
+-- `rkv` is always `RKVWorkerResultV2` on that path, so the `isinstance`
+guard is a documentation-level safeguard, not a live branch. It is **not**
+applied retroactively: B2A-R2's own already-recorded, frozen
+`completion.json`/`final.json` are historical, immutable artifacts and are
+untouched by this section.
+
+**`parse_rkv_worker_result` schema-version dispatch fixed.** Previously,
+version dispatch was purely structural (`"pair_records" in raw`) -- a
+payload explicitly labeled `schema_version="rkv_worker_result.v2"` but
+missing `pair_records` (e.g. a corrupted or hand-edited historical blob)
+would fail the structural check and silently be accepted as a legitimate
+V1 (legacy) result, with its `schema_version` marker dropped by V1's
+default field-ignoring behavior -- a broken V2 payload masquerading as an
+honest legacy one. Fixed: `schema_version` is now checked FIRST. Present
+and equal to `"rkv_worker_result.v2"` -> must validate as
+`RKVWorkerResultV2` or raise (never falls back to V1).  Present and equal
+to anything else -> raises `UnknownRKVWorkerResultSchemaVersion` (an
+unrecognized version is rejected outright, never guessed at). Absent
+entirely -> the original structural fallback (the correct behavior for
+every result committed before this repair, none of which ever had a
+`schema_version` field). This function is a standalone historical-blob
+parser, not part of the live coordinator path (which already used strict
+`RKVWorkerResult.model_validate_json`, i.e. V2-only, and is unaffected).
+
+**Test evidence** (`tests/unit/discovery/test_b2a_execute_coordinator.py`,
+`tests/unit/discovery/test_pair_record_persistence.py`): ten new tests,
+asserting the COORDINATOR's outcome (`overall_passed`,
+`completion.json["exit_code"]`, `completion.json["outcome"]`), never only
+the standalone verifier's own return value -- a control case (valid
+pair-record artifacts do not spuriously fail the new gate) plus one test
+per corruption mode: missing `pair_records.json`, missing
+`scientific_summary.json`, an incomplete population (11 of 12 real
+records, deliberately chosen so the pre-existing legacy gate -- which
+never inspects `pair_records` at all -- cannot see it), a duplicate
+identity, a `completed_pair_identities` mismatch (mutating `layer_index`
+rather than `compaction_event_id`, so the pre-existing legacy identity
+conditions remain genuinely passing and the test isolates the new
+cross-artifact check specifically), a corrupted `scientific_summary.json`,
+and a `schema_version="rkv_worker_result.v2"` payload missing
+`pair_records` (both at the coordinator level, where the pre-existing,
+unmodified `RKVWorkerResult.model_validate_json` already rejects it before
+`completion.json` is ever written, and directly against
+`parse_rkv_worker_result`). Every corruption test uses the REAL
+`run_both_workers_via_subprocess` to write genuinely correct artifacts
+first, then corrupts them -- proving production code's own writer output
+is what gets caught, not a hand-built bad fixture. 231 tests across every
+directly and indirectly affected test file pass locally (torch-independent
+subset); full-suite confirmation is GitHub Actions CPU CI (this
+repository's local Windows environment cannot import real torch -- see
+CLAUDE.md's session notes).
+
+```text
+B2A-R2 FORENSIC CLOSURE VERDICT:
+PAIR-RECORD PERSISTENCE REPAIRED -- READY FOR INDEPENDENT REVIEW; B2A-R3/B2B REMAIN BLOCKED
+```
 
 ```text
 B2A-R2 FORENSIC CLOSURE VERDICT:

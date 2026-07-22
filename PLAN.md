@@ -1,6 +1,29 @@
 # Plan and status
 
-## B2A-R2 FORENSIC PAIR-RECORD PERSISTENCE REPAIR (2026-07-22)
+## B2A-R2 FORENSIC PAIR-RECORD PERSISTENCE REPAIR, AUDIT ROUND 2 (2026-07-22)
+
+An independent audit found round 1 (immediately below) left
+`verify_pair_record_artifacts` never-fatal -- a future V2 attempt could
+still be reported successful with a missing, incomplete, duplicated,
+mismatched, or corrupt `rkv/pair_records.json`/`rkv/scientific_summary.json`.
+Fixed, CPU-only: `overall_passed` now ANDs in a third gate factor,
+`scientific_pair_artifacts_verified`, derived from
+`verify_pair_record_artifacts` and `isinstance(rkv, RKVWorkerResultV2)` --
+failure now produces `exit_code=2`/`outcome="gate_failed"`, never a false
+success. `parse_rkv_worker_result` now rejects (rather than silently
+misclassifies as legacy V1) a payload labeled `schema_version=
+"rkv_worker_result.v2"` that is missing `pair_records`. Ten new
+coordinator-level tests assert `overall_passed`/exit code/`completion.json`
+directly. No GPU, no re-run, `FINAL_MANDATORY_GATE_CONDITIONS` unmodified.
+Full detail: `docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md`
+§10.
+
+```text
+B2A-R2 FORENSIC CLOSURE VERDICT:
+PAIR-RECORD PERSISTENCE REPAIRED -- READY FOR INDEPENDENT REVIEW; B2A-R3/B2B REMAIN BLOCKED
+```
+
+## Prior status: B2A-R2 forensic pair-record persistence repair, round 1 (2026-07-22)
 
 CPU-only durable-artifact repair -- no GPU, no inference, no re-run. B2A-R1
 and B2A-R2 have both already executed (see the B2A-R1/R2 section

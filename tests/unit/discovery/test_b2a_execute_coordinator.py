@@ -1012,3 +1012,278 @@ def test_malformed_real_pair_durations_still_raise_and_write_failure_not_gate_fa
     assert (attempt_directory / "failure.json").is_file()
     assert not (attempt_directory / "completion.json").exists()
     assert not (attempt_directory / "final.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# B2A-R2 forensic pair-record persistence repair, audit round 2
+# (docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md): proves the
+# pair-record gate is MANDATORY at the coordinator level -- overall_passed,
+# exit_code, and completion.json outcome -- never only the standalone
+# verifier's own (False, reasons) return. Each test forces
+# `final_gate_result.passed=True` via a monkeypatched
+# `evaluate_final_gates` -- this is NOT a real end-to-end "everything
+# passes" fixture (no test in this file builds `invocation.json`/
+# `preflight.json`/`provenance.json`/`progress.jsonl`, since those are
+# written by a still-higher CLI layer this function assumes already ran --
+# see `test_verify_attempt_artifacts_accepts_a_genuinely_consistent_attempt`
+# in `test_attempt_verification.py` for that boundary's OWN, separately-
+# scoped coverage). Patching `evaluate_final_gates` isolates exactly the
+# causal claim under test: with the OTHER 31 final-gate conditions and the
+# legacy 28-condition gate (`_passing_payloads`, already proven passing by
+# `test_full_coordinator_flow_passes_and_writes_pass_artifact` above) held
+# constant, does a defective pair-record artifact alone flip
+# `overall_passed` to `False` and `exit_code` to `2`?
+# ---------------------------------------------------------------------------
+
+
+def _force_final_gate_passing(monkeypatch):
+    from kvcot.discovery import final_contract
+
+    def fake_evaluate_final_gates(conditions):
+        return final_contract.FinalGateResult(passed=True, conditions=dict(conditions), failed_conditions=())
+
+    monkeypatch.setattr(final_contract, "evaluate_final_gates", fake_evaluate_final_gates)
+
+
+def _fake_runner_writing_with_envelopes(fullkv_payload, rkv_payload, *, attempt_id="forensic-r2-test"):
+    """Like `_fake_runner_writing`, but ALSO writes the mandatory atomic
+    envelope sibling file (`kvcot.discovery.worker_envelope`) -- required
+    once `attempt_directory` triggers `preserve=True` in the real
+    `run_both_workers_via_subprocess`, hashed from the SAME canonical
+    (typed, round-tripped) form the coordinator itself recomputes, never
+    the raw payload dict."""
+
+    def runner(argv, **kwargs):
+        role = argv[argv.index("--role") + 1]
+        output_path = Path(argv[argv.index("--output") + 1])
+        payload = fullkv_payload if role == "fullkv" else rkv_payload
+
+        from kvcot.discovery.b2a_workers import FullKVWorkerResult, RKVWorkerResult
+        from kvcot.discovery.worker_envelope import build_success_envelope, write_worker_envelope
+
+        model = FullKVWorkerResult if role == "fullkv" else RKVWorkerResult
+        canonical_payload = model.model_validate(payload).model_dump(mode="json")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(canonical_payload), encoding="utf-8")
+        envelope = build_success_envelope(
+            role=role, attempt_id=attempt_id, started_at="2026-01-01T00:00:00+00:00",
+            requested_identities={}, resolved_identities={}, result_payload=canonical_payload,
+            determinism_policy=None, software_versions={"torch": "2.0"}, hardware_metadata={},
+        )
+        write_worker_envelope(envelope, output_path)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    return runner
+
+
+def _corrupt_after_real_write(monkeypatch, attempt_directory: Path, **corruptions: bool):
+    """Wraps the REAL `run_both_workers_via_subprocess` (never a fake
+    return value) so `rkv/pair_records.json`/`rkv/scientific_summary.json`
+    are genuinely, correctly written by production code first, THEN
+    corrupted -- proving the coordinator's own gate catches post-write
+    corruption, not merely a hand-built bad fixture."""
+    from kvcot.discovery import b2a_workers
+
+    real_fn = b2a_workers.run_both_workers_via_subprocess
+
+    def wrapper(*args, **kwargs):
+        result = real_fn(*args, **kwargs)
+        if corruptions.get("delete_pair_records"):
+            (attempt_directory / "rkv" / "pair_records.json").unlink()
+        if corruptions.get("delete_summary"):
+            (attempt_directory / "rkv" / "scientific_summary.json").unlink()
+        if corruptions.get("corrupt_summary"):
+            summary_path = attempt_directory / "rkv" / "scientific_summary.json"
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary["mean_swap_gain"] = -999.0
+            summary_path.write_text(json.dumps(summary), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(b2a_workers, "run_both_workers_via_subprocess", wrapper)
+
+
+def _run_forced_isolated(config, manifest, monkeypatch, attempt_directory, fullkv_payload, rkv_payload):
+    monkeypatch.setattr(b2a_execute, "_verify_resolved_prompt_identity", lambda c, m: None)
+    _force_final_gate_passing(monkeypatch)
+    runner = _fake_runner_writing_with_envelopes(fullkv_payload, rkv_payload)
+    return b2a_execute.run_b2a_calibration(
+        config, manifest, config_path=CONFIG_PATH, manifest_path=MANIFEST_PATH,
+        python_executable="fake-python", subprocess_runner=runner, attempt_directory=attempt_directory,
+    )
+
+
+def _assert_gate_failed_on_pair_records(artifact, attempt_directory, *, reason_substring: str | None = None):
+    assert artifact.gate_result.passed is True  # legacy gate genuinely passed
+    payload = json.loads(artifact.artifact_path.read_text(encoding="utf-8"))
+    assert payload["scientific_pair_artifacts_verified"] is False
+    completion = json.loads((attempt_directory / "completion.json").read_text(encoding="utf-8"))
+    assert completion["outcome"] == "gate_failed"
+    assert completion["exit_code"] == 2
+    assert completion["gate_passed"] is False
+    if reason_substring is not None:
+        assert any(reason_substring in r for r in payload["pair_record_verification"]["reasons"])
+    return payload
+
+
+def test_valid_pair_artifacts_do_not_spuriously_fail_the_new_gate(config, manifest, monkeypatch, tmp_path):
+    """Control case: with everything else forced-passing and genuinely
+    correct pair-record artifacts, the new gate does not itself cause a
+    failure -- `scientific_pair_artifacts_verified` is True.
+
+    Also forces `verify_attempt_artifacts` (pre-final verification)
+    passing -- this test's fake runner does not produce
+    `invocation.json`/`preflight.json`/`provenance.json`/`progress.jsonl`
+    (written by a still-higher CLI layer no test in this file replicates,
+    see the section docstring above); without this, an otherwise-True
+    `overall_passed` would trip the UNRELATED
+    `if overall_passed and not prefinal_ok: raise` guard for reasons that
+    have nothing to do with pair records."""
+    from kvcot.discovery import attempt_verification
+
+    monkeypatch.setattr(attempt_verification, "verify_attempt_artifacts", lambda *a, **k: (True, ()))
+    fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
+    attempt_directory = _real_attempt_directory(tmp_path)
+    artifact = _run_forced_isolated(config, manifest, monkeypatch, attempt_directory, fullkv_payload, rkv_payload)
+    payload = json.loads(artifact.artifact_path.read_text(encoding="utf-8"))
+    assert payload["scientific_pair_artifacts_verified"] is True
+    assert payload["pair_record_verification"]["verified"] is True
+    completion = json.loads((attempt_directory / "completion.json").read_text(encoding="utf-8"))
+    assert completion["outcome"] == "gate_passed"
+    assert completion["exit_code"] == 0
+    assert completion["gate_passed"] is True
+
+
+def test_missing_pair_records_file_forces_gate_failure(config, manifest, monkeypatch, tmp_path):
+    fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
+    attempt_directory = _real_attempt_directory(tmp_path)
+    monkeypatch.setattr(b2a_execute, "_verify_resolved_prompt_identity", lambda c, m: None)
+    _force_final_gate_passing(monkeypatch)
+    _corrupt_after_real_write(monkeypatch, attempt_directory, delete_pair_records=True)
+    runner = _fake_runner_writing_with_envelopes(fullkv_payload, rkv_payload)
+    artifact = b2a_execute.run_b2a_calibration(
+        config, manifest, config_path=CONFIG_PATH, manifest_path=MANIFEST_PATH,
+        python_executable="fake-python", subprocess_runner=runner, attempt_directory=attempt_directory,
+    )
+    _assert_gate_failed_on_pair_records(artifact, attempt_directory, reason_substring="pair_records.json is missing")
+
+
+def test_missing_scientific_summary_file_forces_gate_failure(config, manifest, monkeypatch, tmp_path):
+    fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
+    attempt_directory = _real_attempt_directory(tmp_path)
+    monkeypatch.setattr(b2a_execute, "_verify_resolved_prompt_identity", lambda c, m: None)
+    _force_final_gate_passing(monkeypatch)
+    _corrupt_after_real_write(monkeypatch, attempt_directory, delete_summary=True)
+    runner = _fake_runner_writing_with_envelopes(fullkv_payload, rkv_payload)
+    artifact = b2a_execute.run_b2a_calibration(
+        config, manifest, config_path=CONFIG_PATH, manifest_path=MANIFEST_PATH,
+        python_executable="fake-python", subprocess_runner=runner, attempt_directory=attempt_directory,
+    )
+    _assert_gate_failed_on_pair_records(
+        artifact, attempt_directory, reason_substring="scientific_summary.json is missing"
+    )
+
+
+def test_incomplete_pair_record_population_forces_gate_failure(config, manifest, monkeypatch, tmp_path):
+    """Drops one real record from `pair_records` while leaving the legacy
+    count/identity fields (`completed_real_pair_count`,
+    `completed_pair_identities`, etc.) untouched -- isolates a defect the
+    LEGACY gate structurally cannot see (it never inspects `pair_records`
+    at all), proving the new gate catches something genuinely new."""
+    fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
+    incomplete = rkv_payload["pair_records"][:-2] + rkv_payload["pair_records"][-1:]  # drop one real record
+    rkv_payload = dict(rkv_payload, pair_records=incomplete)
+    attempt_directory = _real_attempt_directory(tmp_path)
+    artifact = _run_forced_isolated(config, manifest, monkeypatch, attempt_directory, fullkv_payload, rkv_payload)
+    _assert_gate_failed_on_pair_records(artifact, attempt_directory, reason_substring="real records, expected 12")
+
+
+def test_duplicate_pair_record_identity_forces_gate_failure(config, manifest, monkeypatch, tmp_path):
+    fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
+    duplicated = list(rkv_payload["pair_records"])
+    duplicated[-1] = dict(duplicated[0])  # overwrite the no-op slot with a duplicate real record
+    rkv_payload = dict(rkv_payload, pair_records=duplicated)
+    attempt_directory = _real_attempt_directory(tmp_path)
+    artifact = _run_forced_isolated(config, manifest, monkeypatch, attempt_directory, fullkv_payload, rkv_payload)
+    _assert_gate_failed_on_pair_records(artifact, attempt_directory, reason_substring="duplicate pair identities")
+
+
+def test_completed_identity_mismatch_forces_gate_failure(config, manifest, monkeypatch, tmp_path):
+    """Mutates `layer_index` (never `compaction_event_id`) on one
+    `completed_pair_identities` entry -- deliberately chosen so the LEGACY
+    gate's own identity conditions (`unique_real_pair_count_exact`,
+    `events_with_four_unique_pairs_exact`, which group by
+    `compaction_event_id` only) remain unaffected and still genuinely
+    pass, isolating the NEW cross-artifact identity check specifically."""
+    fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
+    mismatched_identities = [dict(item) for item in rkv_payload["completed_pair_identities"]]
+    mismatched_identities[0]["layer_index"] = 999
+    rkv_payload = dict(rkv_payload, completed_pair_identities=mismatched_identities)
+    attempt_directory = _real_attempt_directory(tmp_path)
+    artifact = _run_forced_isolated(config, manifest, monkeypatch, attempt_directory, fullkv_payload, rkv_payload)
+    assert "unique_real_pair_count_exact" not in artifact.gate_result.failed_conditions
+    assert "events_with_four_unique_pairs_exact" not in artifact.gate_result.failed_conditions
+    _assert_gate_failed_on_pair_records(artifact, attempt_directory, reason_substring="do not exactly match")
+
+
+def test_corrupt_scientific_summary_forces_gate_failure(config, manifest, monkeypatch, tmp_path):
+    fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
+    attempt_directory = _real_attempt_directory(tmp_path)
+    monkeypatch.setattr(b2a_execute, "_verify_resolved_prompt_identity", lambda c, m: None)
+    _force_final_gate_passing(monkeypatch)
+    _corrupt_after_real_write(monkeypatch, attempt_directory, corrupt_summary=True)
+    runner = _fake_runner_writing_with_envelopes(fullkv_payload, rkv_payload)
+    artifact = b2a_execute.run_b2a_calibration(
+        config, manifest, config_path=CONFIG_PATH, manifest_path=MANIFEST_PATH,
+        python_executable="fake-python", subprocess_runner=runner, attempt_directory=attempt_directory,
+    )
+    _assert_gate_failed_on_pair_records(artifact, attempt_directory, reason_substring="does not recompute exactly")
+
+
+def test_v2_schema_version_with_missing_pair_records_never_reaches_completion(config, manifest, monkeypatch, tmp_path):
+    """A worker payload explicitly labeled `schema_version=
+    "rkv_worker_result.v2"` but missing `pair_records` must never be
+    silently accepted (as V1, or otherwise) -- the coordinator's existing,
+    unmodified `RKVWorkerResult.model_validate_json` (strict V2) rejects it
+    outright, before completion.json is ever written, and the attempt is
+    recorded as a hard failure, never a false success."""
+    monkeypatch.setattr(b2a_execute, "_verify_resolved_prompt_identity", lambda c, m: None)
+    fullkv_payload, rkv_payload = _passing_payloads(manifest, config)
+    del rkv_payload["pair_records"]
+    rkv_payload["schema_version"] = "rkv_worker_result.v2"
+    attempt_directory = _real_attempt_directory(tmp_path)
+
+    def runner(argv, **kwargs):
+        role = argv[argv.index("--role") + 1]
+        output_path = Path(argv[argv.index("--output") + 1])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = fullkv_payload if role == "fullkv" else rkv_payload
+        output_path.write_text(json.dumps(payload), encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    with pytest.raises(Exception):  # pydantic ValidationError, propagated as a hard coordinator failure
+        b2a_execute.run_b2a_calibration(
+            config, manifest, config_path=CONFIG_PATH, manifest_path=MANIFEST_PATH,
+            python_executable="fake-python", subprocess_runner=runner, attempt_directory=attempt_directory,
+        )
+
+    assert not (attempt_directory / "completion.json").exists()
+    assert not (attempt_directory / "final.json").exists()
+
+
+def test_parse_rkv_worker_result_rejects_v2_schema_version_missing_pair_records():
+    """Unit-level companion to the coordinator test above, directly against
+    `parse_rkv_worker_result` (the standalone historical-blob parser) --
+    must raise, never silently fall back to V1."""
+    from pydantic import ValidationError
+
+    from kvcot.discovery.b2a_workers import parse_rkv_worker_result
+
+    with pytest.raises(ValidationError):
+        parse_rkv_worker_result({"role": "rkv", "schema_version": "rkv_worker_result.v2"})
+
+
+def test_parse_rkv_worker_result_rejects_unknown_schema_version():
+    from kvcot.discovery.b2a_workers import UnknownRKVWorkerResultSchemaVersion, parse_rkv_worker_result
+
+    with pytest.raises(UnknownRKVWorkerResultSchemaVersion):
+        parse_rkv_worker_result({"role": "rkv", "schema_version": "rkv_worker_result.v99_never_existed"})

@@ -326,11 +326,36 @@ class RKVWorkerResultV2(RKVWorkerResultV1):
 RKVWorkerResult = RKVWorkerResultV2
 
 
+class UnknownRKVWorkerResultSchemaVersion(ValueError):
+    pass
+
+
 def parse_rkv_worker_result(raw: dict[str, Any]) -> "RKVWorkerResultV1 | RKVWorkerResultV2":
-    """Structural (never attempt-ID/SHA-based) version dispatch: a raw dict
-    carrying a `pair_records` key parses as V2, otherwise as V1. Used to
-    parse an already-archived historical result blob (e.g. a frozen
-    B2A-R2-era `rkv/result.json` copy) without guessing its origin."""
+    """Version dispatch, explicit `schema_version` first, structural
+    fallback second -- never attempt-ID/SHA-based.
+
+    A payload carrying `schema_version="rkv_worker_result.v2"` MUST
+    validate as `RKVWorkerResultV2` -- if it is missing `pair_records` (or
+    any other V2-required field), validation raises outright; it never
+    silently falls back to being accepted as a legacy V1 result just
+    because the fallback's looser shape happens to also fit (V1 ignores
+    unknown fields, so a broken V2 payload missing `pair_records` would
+    otherwise pass V1 validation with `schema_version` silently dropped --
+    a corrupted/incomplete V2 result must fail loudly, never be
+    misclassified as an honestly-legacy one). A payload carrying any OTHER
+    non-null `schema_version` is an unknown/unsupported version and is
+    rejected outright, never guessed at. Only a payload with NO
+    `schema_version` key at all -- a genuinely pre-versioning historical
+    shape, exactly what every result committed before this repair looks
+    like -- uses the structural (`"pair_records" in raw`) fallback.
+    """
+    schema_version = raw.get("schema_version")
+    if schema_version is not None:
+        if schema_version == "rkv_worker_result.v2":
+            return RKVWorkerResultV2.model_validate(raw)
+        raise UnknownRKVWorkerResultSchemaVersion(
+            f"unrecognized RKVWorkerResult schema_version: {schema_version!r}"
+        )
     if "pair_records" in raw:
         return RKVWorkerResultV2.model_validate(raw)
     return RKVWorkerResultV1.model_validate(raw)

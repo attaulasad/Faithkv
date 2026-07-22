@@ -1,5 +1,43 @@
 # Changelog
 
+## 2026-07-22 — B2A-R2 forensic pair-record persistence repair, audit round 2 (CPU-ONLY; B2A-R3/B2B REMAIN BLOCKED)
+
+An independent audit found round 1 (below) left `verify_pair_record_artifacts`
+**never-fatal**: its result was recorded but did not affect `overall_passed`,
+`exit_code`, or `completion.json`'s outcome, so a future V2 attempt could
+still be reported successful with missing/incomplete/duplicated/mismatched/
+corrupt pair-record artifacts. Fixed:
+
+- `kvcot.discovery.b2a_execute.run_b2a_calibration` now computes
+  `scientific_pair_artifacts_verified = isinstance(rkv, RKVWorkerResultV2)
+  and pair_record_verified` and ANDs it into `overall_passed` as a third,
+  independent gate layer (alongside the legacy and final gates) -- never
+  folded into the frozen `FINAL_MANDATORY_GATE_CONDITIONS` tuple, which is
+  unmodified. A failure now produces `exit_code=2`,
+  `outcome="gate_failed"`, with every reason preserved in `final.json`.
+- `kvcot.discovery.b2a_workers.parse_rkv_worker_result` now dispatches on
+  an explicit `schema_version` first (present and `"rkv_worker_result.v2"`
+  -> must validate as V2 or raise; present and anything else -> raises
+  `UnknownRKVWorkerResultSchemaVersion`; absent -> the original structural
+  fallback) -- a payload labeled V2 but missing `pair_records` can no
+  longer silently pass as a legacy V1 result.
+- Ten new coordinator-level tests
+  (`tests/unit/discovery/test_b2a_execute_coordinator.py`) assert the
+  COORDINATOR's outcome (`overall_passed`, exit code, `completion.json`),
+  never only the standalone verifier's return value, for: valid artifacts
+  (control), missing `pair_records.json`, missing
+  `scientific_summary.json`, an incomplete population, a duplicate
+  identity, a `completed_pair_identities` mismatch, a corrupted summary,
+  and a mislabeled V2 payload missing `pair_records`.
+- No GPU, no inference, no re-run, no change to `configs/lock.yaml`/R-KV
+  revision/B2A-R2's frozen verdict/`FINAL_MANDATORY_GATE_CONDITIONS`. Full
+  detail: `docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md` §10.
+
+```text
+B2A-R2 FORENSIC CLOSURE VERDICT:
+PAIR-RECORD PERSISTENCE REPAIRED -- READY FOR INDEPENDENT REVIEW; B2A-R3/B2B REMAIN BLOCKED
+```
+
 ## 2026-07-22 — B2A-R2 forensic pair-record persistence repair (CPU-ONLY, NO GPU/RE-RUN; B2A-R3/B2B REMAIN BLOCKED)
 
 A post-run audit of the preserved B2A-R2 archive (recorded below, "Record
