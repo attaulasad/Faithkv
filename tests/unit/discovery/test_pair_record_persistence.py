@@ -119,14 +119,41 @@ def _rkv_payload(**overrides) -> dict:
 
 
 def _make_fake_runner(fullkv_payload: dict | None, rkv_payload: dict | None, *, fail_role: str | None = None):
+    """Writes both `result.json` AND its mandatory atomic
+    `result.json.envelope.json` sibling
+    (`kvcot.discovery.worker_envelope.write_worker_envelope`'s exact naming
+    convention) -- a successful worker result is invalid without one
+    (`kvcot.discovery.b2a_workers._validate_atomic_worker_envelope`)."""
+
     def runner(argv, **kwargs):
         role = argv[argv.index("--role") + 1]
         output_path = Path(argv[argv.index("--output") + 1])
         if role == fail_role:
             return SimpleNamespace(returncode=1, stdout="", stderr="simulated worker failure")
         payload = fullkv_payload if role == "fullkv" else rkv_payload
+
+        # The coordinator recomputes the envelope hash from the TYPED,
+        # round-tripped model it reads back
+        # (`FullKVWorkerResult`/`RKVWorkerResult.model_validate_json(...)
+        # .model_dump(mode="json")`) -- the envelope here must be built
+        # from that SAME canonical form, never the raw payload dict, or
+        # pydantic-filled defaults make the hashes disagree.
+        from kvcot.discovery.b2a_workers import FullKVWorkerResult, RKVWorkerResult
+
+        model = FullKVWorkerResult if role == "fullkv" else RKVWorkerResult
+        canonical_payload = model.model_validate(payload).model_dump(mode="json")
+
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(payload), encoding="utf-8")
+        output_path.write_text(json.dumps(canonical_payload), encoding="utf-8")
+
+        from kvcot.discovery.worker_envelope import build_success_envelope, write_worker_envelope
+
+        envelope = build_success_envelope(
+            role=role, attempt_id="pair-record-test", started_at="2026-01-01T00:00:00+00:00",
+            requested_identities={}, resolved_identities={}, result_payload=canonical_payload,
+            determinism_policy=None, software_versions={"torch": "0.0.0-stub"}, hardware_metadata={},
+        )
+        write_worker_envelope(envelope, output_path)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     return runner
@@ -455,7 +482,7 @@ def test_verify_pair_record_artifacts_fails_on_identity_mismatch_with_completed_
     rkv_result["completed_pair_identities"][0]["compaction_event_id"] = 999
     verified, reasons = verify_pair_record_artifacts(attempt_path, rkv_result=rkv_result)
     assert verified is False
-    assert any("does not exactly match" in r for r in reasons)
+    assert any("do not exactly match" in r for r in reasons)
 
 
 def test_verify_pair_record_artifacts_fails_on_failed_identity_represented_as_completed(tmp_path):

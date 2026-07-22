@@ -246,7 +246,13 @@ def capture_partial_evidence(
         semantic_mutation_reports = list(example_result.semantic_mutation_reports)
         # B2A-R2 forensic repair: exactly the records that genuinely
         # completed before the failure -- never padded, never fabricated.
-        pair_records = [record.model_dump(mode="json") for record in example_result.pair_records]
+        # `getattr` (matching this function's existing defensive pattern for
+        # every other optional attribute) so a test double or a genuinely
+        # early failure that never reached pair construction contributes an
+        # honestly empty list rather than raising.
+        pair_records = [
+            record.model_dump(mode="json") for record in getattr(example_result, "pair_records", ())
+        ]
         minimized_target_evidence = [
             _dataclass_dict(item) for item in getattr(example_result, "minimized_target_evidence", ())
         ]
