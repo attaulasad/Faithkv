@@ -1,0 +1,236 @@
+{
+  "schema_version": "1.0",
+  "created_at_utc": "2026-07-22T10:50:00Z",
+  "purpose": "Evidence index for the B2A-R2 execute attempt (the single authorized attempt, now consumed), preserved after archive verification.",
+  "attempt_id": "fb6f5081d47f45f4b4f9258c25e6883d",
+  "execution_sha": "f79158af5fbfa74adc48db9e6085a4238ba27837",
+  "selected_row_identity": {
+    "unique_id": "test/number_theory/820.json",
+    "example_index": 365,
+    "manifest_hash": "2a6a3de41a0d8f3a5565143017aa49caa37f261dc8d7fb4daeedf8fe57ef33e7",
+    "qualification_artifact_hash": "b5b5452636985132f02af81260523b29fad1cdf8498e77b11b1c8ab687ed58f4",
+    "candidate_manifest_hash": "ac2dcc4550a89f2cfa701acd608a8087b4a1ebaa0ea05eb15d8f71e3434ee0ec"
+  },
+  "completion": {
+    "artifact_path": "results/decisions/b2a_attempt_20260722T101253300941Z_fb6f5081d47f45f4b4f9258c25e6883d/final.json",
+    "attempt_id": "fb6f5081d47f45f4b4f9258c25e6883d",
+    "config_hash": "e8693cc5106ebcf6d2f8d942deefc211156af573c40d5249dbc95f8c8c7f3429",
+    "exit_code": 2,
+    "finished_at": "2026-07-22T10:39:04.847891+00:00",
+    "gate_passed": false,
+    "intended_final_relative_path": "final.json",
+    "manifest_hash": "2a6a3de41a0d8f3a5565143017aa49caa37f261dc8d7fb4daeedf8fe57ef33e7",
+    "outcome": "gate_failed"
+  },
+  "gate_result": {
+    "passed": false,
+    "failed_conditions": [
+      "runtime_within_limit"
+    ]
+  },
+  "final_gate_result": {
+    "passed": false,
+    "failed_conditions": [
+      "single_rtx3090_verified",
+      "runtime_within_limit",
+      "attempt_artifacts_verified"
+    ],
+    "note": "single_rtx3090_verified and attempt_artifacts_verified were spurious failures caused by two verification-layer defects (tuple/list compute_capability mismatch; incomplete RKV stage allowlist), both fixed in commit cb81bc8 and confirmed forensically against this exact unmodified evidence -- with the fix, only runtime_within_limit fails, matching the legacy gate exactly. This attempt's raw final.json is preserved UNMODIFIED (as originally produced); this note documents the forensic replay, it does not alter the archived artifact."
+  },
+  "runtime_and_memory": {
+    "fullkv_natural_generation_wall_seconds": 392.0094305810053,
+    "rkv_pass1_wall_seconds": 520.7104472969659,
+    "rkv_pass2_wall_seconds": 465.5805627510417,
+    "per_example_total_wall_seconds": 1378.3004406290129,
+    "per_real_pair_seconds": 10.247917714063078,
+    "projected_complete_pilot_gpu_hours": 5.00961210843596,
+    "projected_total_seconds": 18034.603590369457,
+    "peak_cuda_allocated_bytes": 17042383360,
+    "peak_cuda_reserved_bytes": 17160994816,
+    "peak_cuda_tracked_gib": 15.982421875,
+    "sampled_peak_device_memory_mib_nvidia_smi": 16690,
+    "total_wall_clock_seconds_this_attempt": 1571.546492
+  },
+  "compression_event_pair_counts": {
+    "event_count": 3,
+    "observed_retention_ratio": 0.27966782748459684,
+    "b2a_selected_events": 3,
+    "b2a_real_pair_evaluations_total": 12,
+    "b2a_noop_pair_evaluations_total": 1
+  },
+  "provenance_git": {
+    "all_required_ancestry_verified": true,
+    "base_main_sha": "fa117046bea2a2c492e17cd91276b2e3c6d59f7f",
+    "branch": "research/b1b-r4-final-b2a-closure",
+    "dirty": false,
+    "expected_rkv_sha": "45eaa7d69d20b7388321f077020a610d9afb65bd",
+    "head": "f79158af5fbfa74adc48db9e6085a4238ba27837",
+    "origin_branch_sha": "f79158af5fbfa74adc48db9e6085a4238ba27837",
+    "required_ancestry": {
+      "3c853cff34e52d792cd0e5a96d1a5369f17f8047": true,
+      "419bbc0020b374d6c4a2085a7a04ff293d7ec680": true,
+      "7ef13ae566e7c3e699e5143405baf76a81078edf": true
+    },
+    "rkv_submodule_match": true,
+    "rkv_submodule_sha": "45eaa7d69d20b7388321f077020a610d9afb65bd",
+    "staged_paths": [],
+    "starting_ancestor": "3c853cff34e52d792cd0e5a96d1a5369f17f8047",
+    "starting_ancestor_verified": true,
+    "starting_commit": "419bbc0020b374d6c4a2085a7a04ff293d7ec680",
+    "status": [],
+    "unstaged_paths": [],
+    "untracked_paths": []
+  },
+  "software_versions": {
+    "accelerate": "1.10.1",
+    "datasets": "3.6.0",
+    "flash-attn": "2.7.4.post1",
+    "huggingface-hub": "0.36.2",
+    "numpy": "2.5.1",
+    "pydantic": "2.13.4",
+    "python": "3.12.12",
+    "torch": "2.6.0+cu124",
+    "transformers": "4.55.4"
+  },
+  "file_inventory": [
+    {
+      "relative_path": "completion.json",
+      "size_bytes": 517,
+      "sha256": "3300502e00303424755ef45553d861bda53eee098ded0a30a4272169b371610e"
+    },
+    {
+      "relative_path": "final.json",
+      "size_bytes": 13104432,
+      "sha256": "fba2c396106813347066a8e678954165067dd0e8251a9de8c01a75d86be84e12"
+    },
+    {
+      "relative_path": "fullkv/command.json",
+      "size_bytes": 560,
+      "sha256": "4ffab33231912792bb7ccdd260d879b68d3b1655c79235278a01dfed2ae7ba87"
+    },
+    {
+      "relative_path": "fullkv/envelope.json",
+      "size_bytes": 3453499,
+      "sha256": "169821b35df26758043ddcb8dea31ca1654beb3332a0b4229930ac5cf96dc039"
+    },
+    {
+      "relative_path": "fullkv/memory.json",
+      "size_bytes": 3094,
+      "sha256": "d8b78363dcd695449eac7938b28eb488f0dbbbe30a58b365ee8f7a31055b7f68"
+    },
+    {
+      "relative_path": "fullkv/progress.jsonl",
+      "size_bytes": 2970,
+      "sha256": "24643a7c84f08eb73d84a6dc239fe70e098867c72fb387b4c4e81cd80714ffb6"
+    },
+    {
+      "relative_path": "fullkv/result.json",
+      "size_bytes": 3160264,
+      "sha256": "9dad5d93e0f28c53822a03464bb5d59024f66471d70be3f33b11b2521b3564b0"
+    },
+    {
+      "relative_path": "fullkv/result.json.envelope.json",
+      "size_bytes": 3453499,
+      "sha256": "169821b35df26758043ddcb8dea31ca1654beb3332a0b4229930ac5cf96dc039"
+    },
+    {
+      "relative_path": "fullkv/stderr.log",
+      "size_bytes": 442,
+      "sha256": "bdc3a7ec4a03b4e1f98682af73ed3de27631be8baa36d9c9538067d37105cb9e"
+    },
+    {
+      "relative_path": "fullkv/stdout.log",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "relative_path": "fullkv/timing.json",
+      "size_bytes": 1472386,
+      "sha256": "e1013d99bf38967c16194d5c7b943ba4e335f08a6f03b80a5cfb91027682dbc0"
+    },
+    {
+      "relative_path": "invocation.json",
+      "size_bytes": 563,
+      "sha256": "c9c77fc93945a52a6c6b531b8f4494fc51b2b1a222a7a775073e8250743788da"
+    },
+    {
+      "relative_path": "preflight.json",
+      "size_bytes": 569,
+      "sha256": "8d9a56fd42376eae0fc7ec1cf2f0de64cc609cc1825e442f9c0aceaa4d65b119"
+    },
+    {
+      "relative_path": "process_outcome.json",
+      "size_bytes": 314,
+      "sha256": "f6952ce6f163dbf9860314febd0c8f4d2cb347e2d25d72f96372df07addc885a"
+    },
+    {
+      "relative_path": "provenance.json",
+      "size_bytes": 2000,
+      "sha256": "faaa22705e613a32ff532f20e37080e7ac7859ec22923ab375a95af86fc35c57"
+    },
+    {
+      "relative_path": "rkv/command.json",
+      "size_bytes": 554,
+      "sha256": "e0920afdbedd2d466e1fb4f3226a26bd7f323d0828eca11a39d96a7d3358b9b8"
+    },
+    {
+      "relative_path": "rkv/envelope.json",
+      "size_bytes": 9642694,
+      "sha256": "6a5580654ac26f6149ef3ca18f14f7e7607c4fa7e3936091828e0e0ad245bb35"
+    },
+    {
+      "relative_path": "rkv/memory.json",
+      "size_bytes": 11025,
+      "sha256": "9b6c758f753df5bb3e1c2a969d7e75672727dffb4008233691b4c300e9f65723"
+    },
+    {
+      "relative_path": "rkv/pair_identities.json",
+      "size_bytes": 5577,
+      "sha256": "84ea7c0e2b10b673dc15dca2ce970feb5ac83c5257e8dd6c5eee700c4720fb23"
+    },
+    {
+      "relative_path": "rkv/progress.jsonl",
+      "size_bytes": 7077,
+      "sha256": "f01be9ebb72a0500f5fc5cd3825d5ed3aa7431f36e13e79cbaf6eb72937fdf7f"
+    },
+    {
+      "relative_path": "rkv/replay_evidence.json",
+      "size_bytes": 3144590,
+      "sha256": "5d97f9ea554d38fb1ff2be98e0d80210d11120986db546ecfa3f2edee671e9b2"
+    },
+    {
+      "relative_path": "rkv/result.json",
+      "size_bytes": 8782829,
+      "sha256": "68f314a4a05abcfdca6f9dc9a3a72df4913bf96a5ca6a20e608a9f7a2fe51818"
+    },
+    {
+      "relative_path": "rkv/result.json.envelope.json",
+      "size_bytes": 9642694,
+      "sha256": "6a5580654ac26f6149ef3ca18f14f7e7607c4fa7e3936091828e0e0ad245bb35"
+    },
+    {
+      "relative_path": "rkv/semantic_swaps.json",
+      "size_bytes": 8718,
+      "sha256": "c9ac1fa591c077a036bb0a30775c6c04214bb1551da7987711952a1c7493f4b4"
+    },
+    {
+      "relative_path": "rkv/stderr.log",
+      "size_bytes": 553,
+      "sha256": "b4bb934a0e09e8abf3b7bf8d14011b128a39b175fd7dd1d08ab64bbb72a2c738"
+    },
+    {
+      "relative_path": "rkv/stdout.log",
+      "size_bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "relative_path": "rkv/timing.json",
+      "size_bytes": 2284381,
+      "sha256": "0a9e7fc942ad7cca9779666638c48bc42b63656e6f3ee844eb73123135aee8ff"
+    }
+  ],
+  "external_archive_path": "/workspace/b2a_attempt_20260722T101253300941Z_fb6f5081d47f45f4b4f9258c25e6883d.tar.gz",
+  "external_archive_sha256": "39e78662308fa6af733c481e2c0f9b9b40ed16658861317de7f21d9400b1ab6a",
+  "no_credential_found": true,
+  "no_file_over_github_safety_limit": true
+}
