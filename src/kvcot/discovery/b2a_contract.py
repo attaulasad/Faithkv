@@ -60,34 +60,59 @@ B2A_ONE_EXAMPLE_REQUIRED_MEASUREMENTS: tuple[str, ...] = (
 # discovery pilot must stop -- this module only defines the thresholds and a
 # pure-Python evaluator; it never runs a GPU measurement itself.
 MAX_PROJECTED_PILOT_GPU_HOURS = 4.00
-MAX_PEAK_ALLOCATED_MEMORY_GIB = 22.0
+# B1B-R4 §14: renamed from allocated-only to total-peak-CUDA-tracked-memory
+# terminology -- the gate now compares against `max(peak_allocated,
+# peak_reserved)`, never allocated alone. `MAX_PEAK_ALLOCATED_MEMORY_GIB` is
+# kept as a deprecated compatibility alias (same value, same name import
+# sites already use).
+MAX_PEAK_TRACKED_MEMORY_GIB = 22.0
+MAX_PEAK_ALLOCATED_MEMORY_GIB = MAX_PEAK_TRACKED_MEMORY_GIB  # deprecated alias -- see comment above
 
 
 class B2AOneExampleMeasurement(BaseModel):
-    """What a future (not-yet-authorized) B2A one-example run must report.
-    Constructing this model does not run anything -- it is a schema a
-    future GPU-side script would populate and this module would then
-    evaluate against the hard stop conditions below."""
+    """What a B2A one-example run reports (B1B-R4 §12, superseding B1B-R3's
+    version of this schema, which conflated restore/bridge-forward timing
+    into aggregate buckets and then multiplied one of them by 144 in the
+    projection). `real_pair_wall_seconds` holds one entry PER completed real
+    pair evaluation (up to 12) -- never an aggregate bucket."""
 
     fullkv_natural_generation_wall_seconds: float = Field(ge=0.0)
     rkv_pass1_wall_seconds: float = Field(ge=0.0)
-    token_identical_pass2_wall_seconds: float = Field(ge=0.0)
-    score_recomputation_wall_seconds: float = Field(ge=0.0)
+    rkv_pass2_wall_seconds: float = Field(ge=0.0)
+    # Diagnostic submeasurement only -- ALREADY CONTAINED inside
+    # `rkv_pass2_wall_seconds` (Pass 2 performs the targeted capture inline),
+    # never added again on top of it in any projection.
     targeted_capture_wall_seconds: float = Field(ge=0.0)
-    cache_clone_restore_wall_seconds: float = Field(ge=0.0)
-    one_fixed_shape_swap_wall_seconds: float = Field(ge=0.0)
-    bridge_plus_48_scored_wall_seconds: float = Field(ge=0.0)
+    # `fullkv_natural_generation_wall_seconds + rkv_pass1_wall_seconds +
+    # rkv_pass2_wall_seconds` -- the frozen once-per-example projection
+    # component (B1B-R4 §12's "Recommended frozen projection semantics").
+    per_example_total_wall_seconds: float = Field(ge=0.0)
+    real_pair_wall_seconds: list[float] = Field(default_factory=list)
+    no_op_pair_wall_seconds: list[float] = Field(default_factory=list)
+    # The conservative per-pair statistic actually used by the projection:
+    # `max(real_pair_wall_seconds)`, never their sum and never a separately
+    # invented number -- `kvcot.discovery.b2a_evidence
+    # .per_real_pair_projection_seconds`'s output. `None` iff the attempt
+    # did not produce exactly 12 real-pair durations (B2A-R1 zero-event
+    # repair, 2026-07-22) -- an ineligible calibration, never a fabricated
+    # `0.0`.
+    per_real_pair_seconds: float | None = Field(default=None, ge=0.0)
 
     peak_cuda_allocated_bytes: int = Field(ge=0)
     peak_cuda_reserved_bytes: int = Field(ge=0)
     every_parameter_on_cuda: bool
     observed_retention_ratio: float = Field(ge=0.0, le=1.0)
     event_count: int = Field(ge=0)
-    projected_complete_pilot_gpu_hours: float = Field(ge=0.0)
+    # `None` iff the runtime projection is unavailable (B2A-R1 repair) --
+    # never `0.0`, never the `4.00`-hour limit itself, never a guess.
+    projected_complete_pilot_gpu_hours: float | None = Field(default=None, ge=0.0)
 
     @property
     def peak_vram_gib(self) -> float:
-        return self.peak_cuda_allocated_bytes / (1024**3)
+        """B1B-R4 §14: gates on the MAXIMUM of allocated and reserved --
+        never allocated alone (a run can be reserved-heavy/allocated-light
+        or vice versa; both must be tracked)."""
+        return max(self.peak_cuda_allocated_bytes, self.peak_cuda_reserved_bytes) / (1024**3)
 
 
 # Every one of these must be `True` on `B2AGateEvidence`/`B2AGateResult` for
@@ -103,6 +128,17 @@ MANDATORY_GATE_CONDITIONS: tuple[str, ...] = (
     "capture_gather_parity",
     "absolute_position_parity",
     "no_op_numerical_parity",
+    # B1B-R4.1 §18/§30: named separately from the five trajectory/parity
+    # conditions above -- those are all Pass-2-level (capture correctness,
+    # evaluated before any pair is ever attempted); this one is swap-level
+    # (did the semantic swap actually update provenance/kept-index
+    # bookkeeping for every completed real pair,
+    # `kvcot.discovery.pipeline.build_swap_pair_record`'s own parity
+    # derivation). A worker reporting a pair-level `semantic_swap_parity_
+    # failure` (`kvcot.discovery.attrition.STAGE_SEMANTIC_SWAP_PARITY_
+    # FAILURE`) must fail this condition specifically, never only the
+    # coarser `all_required_pair_evaluations_completed`.
+    "semantic_swap_parity",
     "dataset_revision_match",
     "dataset_row_identity_match",
     "manifest_hash_match",
@@ -121,6 +157,24 @@ MANDATORY_GATE_CONDITIONS: tuple[str, ...] = (
     # identity/parity conditions above, never replaced by them.
     "meaningful_compression_observed",
     "sufficient_eligible_events",
+    # B1B-R4 §21: exact selected-event and pair-completion counts as their
+    # own mandatory gate evidence -- a worker that reports only an umbrella
+    # validity boolean can no longer pass; every one of these four must be
+    # independently demonstrated.
+    "selected_event_count_exact",
+    "real_pair_count_exact",
+    "no_op_count_exact",
+    "all_required_pair_evaluations_completed",
+    # B1 execution-boundary closure §13: exact, DUPLICATE-DETECTING pair
+    # identity accounting (`kvcot.discovery.b2a_evidence.PairIdentityEvidence`)
+    # -- `real_pair_count_exact` above only ever compared a COUNT
+    # (the prior at-least-four per-event derivation) and could not tell
+    # four genuinely distinct pairs apart from the same pair recorded four
+    # times, or twelve total real records that were not actually twelve
+    # distinct (event, layer, head, candidate, donor) identities.
+    "unique_real_pair_count_exact",
+    "events_with_four_unique_pairs_exact",
+    "no_duplicate_pair_identity",
 )
 
 
@@ -142,6 +196,7 @@ class B2AGateEvidence(BaseModel):
     capture_gather_parity: bool
     absolute_position_parity: bool
     no_op_numerical_parity: bool
+    semantic_swap_parity: bool
     dataset_revision_match: bool
     dataset_row_identity_match: bool
     manifest_hash_match: bool
@@ -155,8 +210,18 @@ class B2AGateEvidence(BaseModel):
     one_example_only: bool
     meaningful_compression_observed: bool
     sufficient_eligible_events: bool
+    selected_event_count_exact: bool
+    real_pair_count_exact: bool
+    no_op_count_exact: bool
+    all_required_pair_evaluations_completed: bool
+    unique_real_pair_count_exact: bool
+    events_with_four_unique_pairs_exact: bool
+    no_duplicate_pair_identity: bool
 
-    runtime_gpu_hours: float = Field(ge=0.0)
+    # `None` iff the runtime projection is unavailable (B2A-R1 repair,
+    # 2026-07-22) -- `evaluate_b2a_gate` derives `runtime_within_limit=False`
+    # from that `None`, never from a fabricated stand-in number.
+    runtime_gpu_hours: float | None = Field(default=None, ge=0.0)
     peak_vram_gib: float = Field(ge=0.0)
 
 
@@ -169,6 +234,10 @@ def build_gate_evidence_from_measurement(
     capture_gather_parity: bool,
     absolute_position_parity: bool,
     no_op_numerical_parity: bool,
+    semantic_swap_parity: bool,
+    unique_real_pair_count_exact: bool,
+    events_with_four_unique_pairs_exact: bool,
+    no_duplicate_pair_identity: bool,
     dataset_revision_match: bool,
     dataset_row_identity_match: bool,
     manifest_hash_match: bool,
@@ -181,6 +250,10 @@ def build_gate_evidence_from_measurement(
     one_example_only: bool,
     meaningful_compression_observed: bool,
     sufficient_eligible_events: bool,
+    selected_event_count_exact: bool,
+    real_pair_count_exact: bool,
+    no_op_count_exact: bool,
+    all_required_pair_evaluations_completed: bool,
 ) -> B2AGateEvidence:
     """Build gate evidence from an already-collected `B2AOneExampleMeasurement`
     plus every identity/parity/environment condition the caller must supply
@@ -195,6 +268,10 @@ def build_gate_evidence_from_measurement(
         capture_gather_parity=capture_gather_parity,
         absolute_position_parity=absolute_position_parity,
         no_op_numerical_parity=no_op_numerical_parity,
+        semantic_swap_parity=semantic_swap_parity,
+        unique_real_pair_count_exact=unique_real_pair_count_exact,
+        events_with_four_unique_pairs_exact=events_with_four_unique_pairs_exact,
+        no_duplicate_pair_identity=no_duplicate_pair_identity,
         dataset_revision_match=dataset_revision_match,
         dataset_row_identity_match=dataset_row_identity_match,
         manifest_hash_match=manifest_hash_match,
@@ -208,6 +285,10 @@ def build_gate_evidence_from_measurement(
         one_example_only=one_example_only,
         meaningful_compression_observed=meaningful_compression_observed,
         sufficient_eligible_events=sufficient_eligible_events,
+        selected_event_count_exact=selected_event_count_exact,
+        real_pair_count_exact=real_pair_count_exact,
+        no_op_count_exact=no_op_count_exact,
+        all_required_pair_evaluations_completed=all_required_pair_evaluations_completed,
         runtime_gpu_hours=measurement.projected_complete_pilot_gpu_hours,
         peak_vram_gib=measurement.peak_vram_gib,
     )
@@ -231,6 +312,7 @@ class B2AGateResult:
     capture_gather_parity: bool
     absolute_position_parity: bool
     no_op_numerical_parity: bool
+    semantic_swap_parity: bool
     dataset_revision_match: bool
     dataset_row_identity_match: bool
     manifest_hash_match: bool
@@ -246,6 +328,13 @@ class B2AGateResult:
     one_example_only: bool
     meaningful_compression_observed: bool
     sufficient_eligible_events: bool
+    selected_event_count_exact: bool
+    real_pair_count_exact: bool
+    no_op_count_exact: bool
+    all_required_pair_evaluations_completed: bool
+    unique_real_pair_count_exact: bool
+    events_with_four_unique_pairs_exact: bool
+    no_duplicate_pair_identity: bool
     failed_conditions: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -275,7 +364,14 @@ def evaluate_b2a_gate(evidence: B2AGateEvidence) -> B2AGateResult:
     condition or any measurement over threshold is an independent hard
     stop, and every hard stop is reported (never short-circuited on the
     first failure), so a real run gets the complete failure list at once."""
-    runtime_within_limit = evidence.runtime_gpu_hours <= MAX_PROJECTED_PILOT_GPU_HOURS
+    # B2A-R1 zero-event repair (2026-07-22): an unavailable projection
+    # (`runtime_gpu_hours is None`, i.e. fewer than 12 real-pair durations
+    # were ever produced) fails this condition closed -- it is never treated
+    # as "within limit" merely because there is no over-threshold number to
+    # compare, and it is never compared against a fabricated stand-in value.
+    runtime_within_limit = (
+        evidence.runtime_gpu_hours is not None and evidence.runtime_gpu_hours <= MAX_PROJECTED_PILOT_GPU_HOURS
+    )
     peak_vram_within_limit = evidence.peak_vram_gib <= MAX_PEAK_ALLOCATED_MEMORY_GIB
 
     values: dict[str, bool] = {
@@ -285,6 +381,7 @@ def evaluate_b2a_gate(evidence: B2AGateEvidence) -> B2AGateResult:
         "capture_gather_parity": evidence.capture_gather_parity,
         "absolute_position_parity": evidence.absolute_position_parity,
         "no_op_numerical_parity": evidence.no_op_numerical_parity,
+        "semantic_swap_parity": evidence.semantic_swap_parity,
         "dataset_revision_match": evidence.dataset_revision_match,
         "dataset_row_identity_match": evidence.dataset_row_identity_match,
         "manifest_hash_match": evidence.manifest_hash_match,
@@ -300,6 +397,13 @@ def evaluate_b2a_gate(evidence: B2AGateEvidence) -> B2AGateResult:
         "one_example_only": evidence.one_example_only,
         "meaningful_compression_observed": evidence.meaningful_compression_observed,
         "sufficient_eligible_events": evidence.sufficient_eligible_events,
+        "selected_event_count_exact": evidence.selected_event_count_exact,
+        "real_pair_count_exact": evidence.real_pair_count_exact,
+        "no_op_count_exact": evidence.no_op_count_exact,
+        "all_required_pair_evaluations_completed": evidence.all_required_pair_evaluations_completed,
+        "unique_real_pair_count_exact": evidence.unique_real_pair_count_exact,
+        "events_with_four_unique_pairs_exact": evidence.events_with_four_unique_pairs_exact,
+        "no_duplicate_pair_identity": evidence.no_duplicate_pair_identity,
     }
     failed = tuple(name for name in MANDATORY_GATE_CONDITIONS if not values[name])
     return B2AGateResult(passed=not failed, failed_conditions=failed, **values)

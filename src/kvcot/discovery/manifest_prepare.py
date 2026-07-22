@@ -109,19 +109,24 @@ def _verify_row_schema(row: dict[str, Any]) -> None:
         )
 
 
-def _assert_no_weight_files_cached(tokenizer_name: str, tokenizer_revision: str) -> None:
-    """Belt-and-suspenders check (B1B-R3 §5 safety requirement: "Detect and
-    reject attempts to download weight files"): after
-    `AutoTokenizer.from_pretrained` returns, walk the huggingface_hub local
-    cache for this exact model/revision snapshot and refuse if any weight
-    file is present there -- `AutoTokenizer.from_pretrained` should never
-    fetch one on its own, but this check does not trust that by assumption."""
+def _snapshot_weight_shaped_files(tokenizer_name: str, tokenizer_revision: str) -> frozenset[str]:
+    """B1B-R4 §15 repair: a pure OBSERVATION of which weight-shaped files
+    are currently present in the huggingface_hub local cache for this exact
+    repo/revision -- never itself a pass/fail judgment. Used as a before/
+    after pair by `_assert_no_new_weight_files_introduced` below, scoped
+    ONLY to `prepare-b2a-manifest`'s own tokenizer-loading call
+    (`resolve_prompt_identity`) -- generic prompt rendering/tokenization
+    (`kvcot.discovery.b2a_execute._verify_resolved_prompt_identity`'s reuse
+    of `_render_and_tokenize`) must NEVER inspect or reject unrelated
+    pre-existing model weights, so this function is deliberately not called
+    from `_render_and_tokenize` itself."""
     from huggingface_hub import scan_cache_dir
 
     try:
         cache_info = scan_cache_dir()
     except Exception:
-        return  # no local cache at all yet -- nothing to check
+        return frozenset()  # no local cache at all yet -- nothing to snapshot
+    found: set[str] = set()
     for repo in cache_info.repos:
         if repo.repo_id != tokenizer_name:
             continue
@@ -131,11 +136,23 @@ def _assert_no_weight_files_cached(tokenizer_name: str, tokenizer_revision: str)
             for file in revision.files:
                 name = file.file_path.name
                 if name.endswith(_FORBIDDEN_WEIGHT_SUFFIXES) or name.startswith(_FORBIDDEN_WEIGHT_PREFIXES):
-                    raise ManifestPreparationError(
-                        f"refusing: a weight-shaped file {name!r} is present in the local cache for "
-                        f"{tokenizer_name}@{tokenizer_revision} -- prepare-b2a-manifest must never load "
-                        "model weights, only tokenizer files."
-                    )
+                    found.add(str(file.file_path))
+    return frozenset(found)
+
+
+def _assert_no_new_weight_files_introduced(before: frozenset[str], after: frozenset[str]) -> None:
+    """B1B-R4 §15: fail ONLY if a weight-shaped file is NEW (present after
+    but not before) -- a pre-existing weight file (e.g. from a prior,
+    separately-authorized GPU run on the same host) must never fail this
+    command; only weight files THIS command's tokenizer-loading call
+    actually introduced are a violation."""
+    new_files = after - before
+    if new_files:
+        raise ManifestPreparationError(
+            f"prepare-b2a-manifest introduced new weight-shaped file(s) during this command: "
+            f"{sorted(new_files)!r} -- this command must never download model weights, only tokenizer files. "
+            "Pre-existing weight files already in the cache before this command ran are NOT themselves a failure."
+        )
 
 
 @dataclass(frozen=True)
@@ -180,17 +197,47 @@ def build_plan(config: DiscoveryConfig, manifest_path: Path = DEFAULT_MANIFEST_P
     )
 
 
-def _render_and_tokenize(row: dict[str, Any], tokenizer_name: str, tokenizer_revision: str):
+def _render_and_tokenize(
+    row: dict[str, Any], tokenizer_name: str, tokenizer_revision: str, *, local_only_path: str | None = None
+):
     """The exact frozen chat-template call
     (`kvcot.cli.cmd_generate`'s own call shape, byte-for-byte identical --
     see module docstring of `kvcot.discovery.manifest`): one user message,
-    `add_generation_prompt=True`, `tokenize=True`, no other arguments."""
+    `add_generation_prompt=True`, `tokenize=True`, no other arguments.
+
+    B1B-R4 §15: this function is shared by BOTH `prepare-b2a-manifest`
+    (`resolve_prompt_identity` below) AND generic B2A prompt-identity
+    re-verification (`kvcot.discovery.b2a_execute
+    ._verify_resolved_prompt_identity`, which reuses it directly to avoid a
+    second, independently-written verification path) -- it must therefore
+    NEVER inspect or reject pre-existing model weights (a valid GPU host
+    that has already downloaded weights for a real, separately-authorized
+    run must not fail generic prompt verification). The weight-cache safety
+    guard lives ONLY around `resolve_prompt_identity`'s own call site,
+    scoped to manifest preparation specifically.
+
+    Independent-audit Gate H4.5 repair: `local_only_path`, when supplied
+    (`b2a_execute._verify_resolved_prompt_identity`'s call, after it has
+    already independently resolved and verified the exact local tokenizer
+    snapshot via `kvcot.discovery.snapshot_boundary.resolve_local_snapshot`),
+    loads the tokenizer from that EXACT verified local directory with
+    `local_files_only=True` -- the same strict local-asset boundary the
+    workers themselves use -- instead of `tokenizer_name`/`tokenizer_revision`
+    resolved through `huggingface_hub`'s normal (potentially network-
+    touching) cache lookup. `prepare-b2a-manifest`'s own call
+    (`resolve_prompt_identity` below) never passes this -- it is the one
+    place a live, network-capable tokenizer resolution remains explicitly
+    authorized (CLAUDE.md's tokenizer-only allowance), unchanged by this
+    repair. Defaults to `None`, preserving prior behavior exactly for that
+    caller."""
     from transformers import AutoTokenizer
 
     from kvcot.probes.templates import render_base_user_message
 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, revision=tokenizer_revision, use_fast=True)
-    _assert_no_weight_files_cached(tokenizer_name, tokenizer_revision)
+    if local_only_path is not None:
+        tokenizer = AutoTokenizer.from_pretrained(local_only_path, local_files_only=True, use_fast=True)
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, revision=tokenizer_revision, use_fast=True)
 
     if tokenizer.chat_template is None:
         raise ManifestPreparationError(
@@ -225,9 +272,17 @@ def resolve_prompt_identity(plan: PreparedManifestPlan) -> ResolvedPromptIdentit
     fetched = _fetch_pinned_dataset_row(plan.dataset_repo, plan.dataset_revision, plan.example_index)
     _verify_row_schema(fetched.row)
 
+    # B1B-R4 §15: the weight-cache safety guard is scoped to THIS command's
+    # own tokenizer-loading call only -- before/after snapshot, fail only on
+    # a NEW weight-shaped file this command's own call introduced. A
+    # pre-existing weight file (from a prior, separately-authorized GPU run
+    # on the same host) must never fail this command.
+    before = _snapshot_weight_shaped_files(plan.tokenizer_name, plan.tokenizer_revision)
     tokenizer, user_message, messages, token_ids = _render_and_tokenize(
         fetched.row, plan.tokenizer_name, plan.tokenizer_revision
     )
+    after = _snapshot_weight_shaped_files(plan.tokenizer_name, plan.tokenizer_revision)
+    _assert_no_new_weight_files_introduced(before, after)
 
     return ResolvedPromptIdentity(
         raw_content_hash=fetched.raw_content_hash,

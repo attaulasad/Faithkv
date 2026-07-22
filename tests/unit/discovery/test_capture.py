@@ -46,6 +46,80 @@ def test_wrapper_captures_gather_parity_on_real_compaction(monkeypatch):
     assert torch.equal(record.returned_value_states, v_out)
 
 
+def test_capture_timer_fn_times_the_real_gather_and_parity_computation(monkeypatch):
+    """Independent-audit Gate H2.2: when `capture_timer_fn` is supplied,
+    it must be invoked around exactly the record-building call (the real
+    gather + gather-parity + absolute-position-parity computation), and
+    its return value (not a bypassed direct call) must be what ends up in
+    `capture_sink` -- proving the timed call is genuinely load-bearing,
+    never a decorative wrapper the real result skips past."""
+    install_fake_rkv_compression_module(monkeypatch)
+    kv = FakeR1KV(budget=BUDGET, window_size=WINDOW)
+    key_states, value_states, query_states = _make_tensors(seed=1)
+
+    calls = []
+
+    def fake_timer(phase, operation):
+        calls.append(phase)
+        return operation()
+
+    sink = []
+    with capture_update_kv(
+        kv, sink, pre_event_position_map_fn=lambda: _identity_position_map(SEQ_LEN),
+        capture_timer_fn=fake_timer,
+    ):
+        kv.update_kv(key_states, query_states, value_states)
+
+    assert calls == ["capture_gather_and_parity"]
+    assert len(sink) == 1
+    assert sink[0].had_compaction is True
+    assert sink[0].gather_parity_passed is True
+
+
+def test_capture_timer_fn_not_called_for_a_non_target_pass_through_call(monkeypatch):
+    """A non-target call (`should_capture` returns `False`) bypasses the
+    whole capture path entirely -- `capture_timer_fn` must not fire for
+    calls that were never captured in the first place."""
+    install_fake_rkv_compression_module(monkeypatch)
+    kv = FakeR1KV(budget=BUDGET, window_size=WINDOW)
+    key_states, value_states, query_states = _make_tensors(seed=1)
+
+    calls = []
+
+    def fake_timer(phase, operation):
+        calls.append(phase)
+        return operation()
+
+    sink = []
+    with capture_update_kv(
+        kv, sink, pre_event_position_map_fn=lambda: _identity_position_map(SEQ_LEN),
+        layer_idx=0, current_position_fn=lambda: 0, should_capture=lambda pos, layer: False,
+        capture_timer_fn=fake_timer,
+    ):
+        kv.update_kv(key_states, query_states, value_states)
+
+    assert calls == []
+    assert sink == []
+
+
+def test_omitting_capture_timer_fn_preserves_exact_prior_behavior(monkeypatch):
+    """Backward compatibility: every pre-existing caller/test that never
+    passes `capture_timer_fn` must observe byte-identical results to
+    before this repair."""
+    install_fake_rkv_compression_module(monkeypatch)
+    kv = FakeR1KV(budget=BUDGET, window_size=WINDOW)
+    key_states, value_states, query_states = _make_tensors(seed=1)
+
+    sink = []
+    with capture_update_kv(kv, sink, pre_event_position_map_fn=lambda: _identity_position_map(SEQ_LEN)):
+        k_out, v_out = kv.update_kv(key_states, query_states, value_states)
+
+    assert len(sink) == 1
+    assert sink[0].had_compaction is True
+    assert sink[0].gather_parity_passed is True
+    assert torch.equal(sink[0].returned_key_states, k_out)
+
+
 def test_no_compaction_below_budget_skips_recomputation(monkeypatch):
     install_fake_rkv_compression_module(monkeypatch)
     kv = FakeR1KV(budget=BUDGET, window_size=WINDOW)

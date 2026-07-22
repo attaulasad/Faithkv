@@ -378,6 +378,7 @@ def capture_update_kv(
     layer_idx: int | None = None,
     current_position_fn: CurrentPositionFn | None = None,
     should_capture: ShouldCaptureFn | None = None,
+    capture_timer_fn: Callable[[str, Callable[[], "UpdateKvCaptureRecord"]], "UpdateKvCaptureRecord"] | None = None,
 ):
     """Attach the wrapper to `kv_cluster.update_kv` for the lifetime of this
     `with` block only. Restores the exact original bound method on exit,
@@ -431,6 +432,14 @@ def capture_update_kv(
     `kv_cluster` has no survivor bookkeeping at all -- there is nothing to
     compare against in that case, independent of whether a position map was
     offered.
+
+    `capture_timer_fn` (independent-audit Gate H2.2 repair), when supplied,
+    times exactly the `_build_capture_record` call below -- the gather
+    reconstruction, gather-parity check, and absolute-position-parity
+    check ARE that call, so this is genuinely the real capture/parity
+    operation's own wall-clock cost, never a later, unrelated measurement.
+    Defaults to `None`, preserving this function's exact prior behavior
+    for every existing caller/test.
     """
     original_update_kv = kv_cluster.update_kv
     had_instance_override = "update_kv" in kv_cluster.__dict__
@@ -450,11 +459,17 @@ def capture_update_kv(
 
         returned_key, returned_value = original_update_kv(key_states, query_states, value_states)
 
-        capture_sink.append(
-            _build_capture_record(
+        def _build_record():
+            return _build_capture_record(
                 kv_cluster, pre_key, pre_query, pre_value, returned_key, returned_value, pre_event_position_map
             )
+
+        record = (
+            capture_timer_fn("capture_gather_and_parity", _build_record)
+            if capture_timer_fn is not None
+            else _build_record()
         )
+        capture_sink.append(record)
         return returned_key, returned_value
 
     kv_cluster.update_kv = _wrapped

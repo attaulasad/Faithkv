@@ -68,7 +68,27 @@ class Math500AnswerVerifier:
             self.last_result = detail
             return None, "unverifiable"
 
-        verification = verify_math_equivalence(extracted.normalized_value, self.gold_answer)
+        # B2A-R1 answer-verifier repair (2026-07-22): `extracted.normalized_value`
+        # (the model's own last valid `\boxed{...}` content, already stripped of
+        # its wrapper by `extract_answer`) and `self.gold_answer` (the bare
+        # MATH-500 dataset `answer` field, e.g. `"\\left( 3, \\frac{\\pi}{2}
+        # \\right)"`) are both BARE LaTeX, never wrapped in `\boxed{}`.
+        # `math_verify.parse`'s non-anchored fallback extraction (used when no
+        # `\boxed{}`/"final answer" anchor is present in the text handed to it)
+        # is unreliable for compound expressions -- empirically, it drops an
+        # ordered pair's second component entirely for one bare string and
+        # returns no candidate at all for a whitespace-only variant of the
+        # SAME pair, even though both sides are trivially, symbolically
+        # equivalent. Re-wrapping each already-extracted final answer in its
+        # own `\boxed{...}` before verification routes both through
+        # `math_verify`'s well-tested, well-anchored boxed-extraction path
+        # instead (confirmed double-wrap-safe: `\boxed{\boxed{x}}` normalizes
+        # identically to `\boxed{x}`) -- this is a general parsing-boundary
+        # fix, not special-cased to tuples or to this specific problem's
+        # answer.
+        verification = verify_math_equivalence(
+            f"\\boxed{{{extracted.normalized_value}}}", f"\\boxed{{{self.gold_answer}}}"
+        )
         if verification.is_equivalent is True:
             status: NaturalAnswerStatus = "correct"
         elif verification.is_equivalent is False:

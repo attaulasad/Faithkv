@@ -79,7 +79,7 @@ def _assert_no_storage_overlap(named_tensors: list[tuple[str, torch.Tensor]]) ->
         seen[storage_id] = name
 
 
-def apply_within_head_swap(
+def _validate_swap_inputs(
     key_cache: list[torch.Tensor],
     value_cache: list[torch.Tensor],
     layer_index: int,
@@ -87,14 +87,13 @@ def apply_within_head_swap(
     retained_post_storage_position: int,
     candidate_key: torch.Tensor,
     candidate_value: torch.Tensor,
-) -> SwapResult:
-    """Clone the full per-layer cache list (so the caller's original tensors
-    are never mutated), then write `candidate_key`/`candidate_value`
-    (shape `(head_dim,)`) into exactly one `(layer, batch=0, kv_head, slot)`
-    position of the cloned K and V tensors. Every other layer, head, and
-    slot is byte-identical to the input, since only one indexed write
-    happens on top of an otherwise-untouched clone.
-    """
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Every check `apply_within_head_swap`/`apply_within_head_swap_owned`
+    share, factored out so there is exactly one place these invariants are
+    enforced (B1 execution-boundary closure §10) -- never duplicated
+    between the cloning and owned-mutation primitives. Returns
+    `(layer_k, layer_v)` (the validated pre-mutation tensors at
+    `layer_index`) for the caller's own use."""
     if len(key_cache) != len(value_cache):
         raise SwapIndexError(f"key_cache has {len(key_cache)} layers, value_cache has {len(value_cache)}")
     if not (0 <= layer_index < len(key_cache)):
@@ -151,6 +150,35 @@ def apply_within_head_swap(
     if candidate_value.device != layer_v.device:
         raise SwapIndexError(f"candidate_value.device ({candidate_value.device}) must equal target value-cache device ({layer_v.device})")
 
+    return layer_k, layer_v
+
+
+def apply_within_head_swap(
+    key_cache: list[torch.Tensor],
+    value_cache: list[torch.Tensor],
+    layer_index: int,
+    kv_head_index: int,
+    retained_post_storage_position: int,
+    candidate_key: torch.Tensor,
+    candidate_value: torch.Tensor,
+) -> SwapResult:
+    """Clone the full per-layer cache list (so the caller's original tensors
+    are never mutated), then write `candidate_key`/`candidate_value`
+    (shape `(head_dim,)`) into exactly one `(layer, batch=0, kv_head, slot)`
+    position of the cloned K and V tensors. Every other layer, head, and
+    slot is byte-identical to the input, since only one indexed write
+    happens on top of an otherwise-untouched clone.
+
+    Retained for callers that do NOT already own an independent clone of
+    `key_cache`/`value_cache` (this module's own tests; any future non-B2A
+    caller). The B2A discovery branch path uses
+    `apply_within_head_swap_owned` instead (below) -- see its docstring.
+    """
+    _validate_swap_inputs(
+        key_cache, value_cache, layer_index, kv_head_index, retained_post_storage_position,
+        candidate_key, candidate_value,
+    )
+
     new_key_cache = [t.clone() for t in key_cache]
     new_value_cache = [t.clone() for t in value_cache]
 
@@ -168,6 +196,54 @@ def apply_within_head_swap(
     return SwapResult(
         key_cache=new_key_cache,
         value_cache=new_value_cache,
+        layer_index=layer_index,
+        kv_head_index=kv_head_index,
+        retained_post_storage_position=retained_post_storage_position,
+        is_noop=is_noop,
+    )
+
+
+def apply_within_head_swap_owned(
+    key_cache: list[torch.Tensor],
+    value_cache: list[torch.Tensor],
+    layer_index: int,
+    kv_head_index: int,
+    retained_post_storage_position: int,
+    candidate_key: torch.Tensor,
+    candidate_value: torch.Tensor,
+) -> SwapResult:
+    """B1 execution-boundary closure §10: memory-safe variant for a caller
+    that ALREADY owns an independent, non-aliased clone of `key_cache`/
+    `value_cache` (`kvcot.discovery.pipeline.build_swap_pair_record`'s own
+    `swapped_snapshot = pristine.clone()`) and wants exactly ONE in-place
+    slot mutation -- never a second, redundant full-cache clone stacked on
+    top of the one the caller already made. Identical validation to
+    `apply_within_head_swap` (`_validate_swap_inputs`, shared, never
+    duplicated); the only difference is the write happens directly on the
+    CALLER-OWNED tensors and the SAME list/tensor objects are returned,
+    never freshly-cloned ones.
+
+    The caller is responsible for owning a non-aliased `key_cache`/
+    `value_cache` before calling this -- passing the shared/pristine list
+    directly (never cloned) would corrupt it, since no defensive clone
+    happens here.
+    """
+    layer_k, layer_v = _validate_swap_inputs(
+        key_cache, value_cache, layer_index, kv_head_index, retained_post_storage_position,
+        candidate_key, candidate_value,
+    )
+
+    pre_k = layer_k[0, kv_head_index, retained_post_storage_position, :].clone()
+    pre_v = layer_v[0, kv_head_index, retained_post_storage_position, :].clone()
+
+    layer_k[0, kv_head_index, retained_post_storage_position, :] = candidate_key
+    layer_v[0, kv_head_index, retained_post_storage_position, :] = candidate_value
+
+    is_noop = bool(torch.equal(pre_k, candidate_key) and torch.equal(pre_v, candidate_value))
+
+    return SwapResult(
+        key_cache=key_cache,
+        value_cache=value_cache,
         layer_index=layer_index,
         kv_head_index=kv_head_index,
         retained_post_storage_position=retained_post_storage_position,
@@ -200,6 +276,7 @@ def apply_semantic_within_head_swap(
     candidate_value: torch.Tensor,
     donor_absolute_position: int,
     candidate_absolute_position: int,
+    owned: bool = False,
 ) -> SemanticSwapResult:
     """B1B-R3 §10 repair: `apply_within_head_swap` (above) is a pure,
     intentionally narrow cache-content primitive -- it never touches
@@ -245,8 +322,21 @@ def apply_semantic_within_head_swap(
     handles writing back the identical value) and, for provenance/
     bookkeeping, writes back the SAME identity it already held -- a
     genuinely no-op semantic update, not a special-cased skip.
+
+    `owned` (B1 execution-boundary closure §10, default `False` --
+    preserves every pre-existing caller's exact behavior unchanged): when
+    `True`, the caller asserts `snapshot` is ALREADY an independently-owned
+    clone (e.g. `kvcot.discovery.pipeline.build_swap_pair_record`'s
+    `swapped_snapshot = pristine.clone()`), so
+    `apply_within_head_swap_owned` mutates its tensors IN PLACE instead of
+    cloning them a second time on top of the clone the caller already made.
+    Passing `owned=True` for a `snapshot` that is NOT independently owned
+    (e.g. still aliased with `pristine`) would corrupt the aliased copy --
+    this is the caller's responsibility to guarantee, exactly like
+    `apply_within_head_swap_owned`'s own docstring states.
     """
-    swap_result = apply_within_head_swap(
+    swap_fn = apply_within_head_swap_owned if owned else apply_within_head_swap
+    swap_result = swap_fn(
         key_cache=snapshot.key_cache,
         value_cache=snapshot.value_cache,
         layer_index=layer_index,

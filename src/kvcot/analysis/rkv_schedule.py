@@ -51,6 +51,56 @@ every input here is plain ints, exactly like kvcot.analysis.fixed_trace/
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class _ScheduleStep:
+    absolute_position: int
+    physical_length: int
+    # True iff THIS call both attempted compression (schedule-eligible) AND
+    # the attempt actually evicted something (the pre-eviction candidate
+    # length exceeded budget) -- a schedule-eligible call below budget is a
+    # real R1KV.update_kv no-op, never counted as an event.
+    event_fired: bool
+
+
+def _walk_schedule(prompt_length: int, max_position: int, budget: int, divide_length: int) -> Iterable[_ScheduleStep]:
+    """The one place the schedule (`self.length % divide_length`) / trigger
+    (`kv_cache_len >= budget`) mechanics are stepped through, one simulated
+    forward call at a time — `simulate_rkv_cache_lengths` (predicted cache
+    length at requested positions) and `predicted_compaction_event_positions`
+    (predicted positions where an eviction actually fires) are both thin
+    consumers of this single walk, never two independent reimplementations
+    of the same mechanics."""
+    # --- prefill: one call, self.length = prompt_length, compression=None
+    # for this call only (always attempts eviction; min() captures both the
+    # "no-op below budget" and "evict down to exactly budget" cases) ---
+    physical_length = min(prompt_length, budget)
+    self_length = prompt_length
+    yield _ScheduleStep(prompt_length, physical_length, event_fired=prompt_length > budget)
+
+    # Flag that will be READ by the NEXT call (the first decode step),
+    # computed from this call's own self.length at its end.
+    compression_flag_next = (self_length % divide_length == 0)
+
+    absolute_position = prompt_length
+    while absolute_position < max_position:
+        self_length += 1
+        absolute_position += 1
+        candidate = physical_length + 1
+        if compression_flag_next:
+            # attempted: no-op if still below budget, else evict to exactly
+            # budget — both cases are min(candidate, budget); an event only
+            # actually fires when the attempt evicted something.
+            physical_length = min(candidate, budget)
+            event_fired = candidate > budget
+        else:
+            # not scheduled this call: pure growth, no eviction attempt at all.
+            physical_length = candidate
+            event_fired = False
+        compression_flag_next = (self_length % divide_length == 0)
+        yield _ScheduleStep(absolute_position, physical_length, event_fired)
 
 
 def simulate_rkv_cache_lengths(
@@ -81,36 +131,31 @@ def simulate_rkv_cache_lengths(
                 f"({prompt_length}) — nothing to simulate before prefill completes"
             )
     max_target = max(targets) if targets else prompt_length
+    return {
+        step.absolute_position: step.physical_length
+        for step in _walk_schedule(prompt_length, max_target, budget, divide_length)
+        if step.absolute_position in targets
+    }
 
-    # --- prefill: one call, self.length = prompt_length, compression=None
-    # for this call only (always attempts eviction; min() captures both the
-    # "no-op below budget" and "evict down to exactly budget" cases) ---
-    physical_length = min(prompt_length, budget)
-    self_length = prompt_length
-    results: dict[int, int] = {}
-    if prompt_length in targets:
-        results[prompt_length] = physical_length
 
-    # Flag that will be READ by the NEXT call (the first decode step),
-    # computed from this call's own self.length at its end.
-    compression_flag_next = (self_length % divide_length == 0)
-
-    absolute_position = prompt_length
-    while absolute_position < max_target:
-        self_length += 1
-        absolute_position += 1
-        if compression_flag_next:
-            # attempted: no-op if still below budget, else evict to exactly
-            # budget — both cases are min(candidate, budget).
-            physical_length = min(physical_length + 1, budget)
-        else:
-            # not scheduled this call: pure growth, no eviction attempt at all.
-            physical_length += 1
-        compression_flag_next = (self_length % divide_length == 0)
-        if absolute_position in targets:
-            results[absolute_position] = physical_length
-
-    return results
+def predicted_compaction_event_positions(
+    prompt_length: int, max_position: int, budget: int, divide_length: int
+) -> list[int]:
+    """Predicted absolute positions where an R-KV compaction event actually
+    fires (an attempted eviction that evicted something), from FullKV
+    generation length alone — no model, no R-KV import, no GPU. Reuses the
+    exact same schedule/trigger walk `simulate_rkv_cache_lengths` consumes
+    (`_walk_schedule`), never a second, independently-derived mechanic.
+    Used by FullKV-only B2A-R2 row qualification (`kvcot.discovery
+    .b2a_qualification`), which must predict where R-KV WOULD compact
+    without ever importing or patching R-KV."""
+    if max_position < prompt_length:
+        return []
+    return [
+        step.absolute_position
+        for step in _walk_schedule(prompt_length, max_position, budget, divide_length)
+        if step.event_fired
+    ]
 
 
 def retention_ratio(physical_length: int, fullkv_equivalent_slots: int) -> float:

@@ -1,0 +1,12 @@
+{
+  "qualification_artifact_path": "results/decisions/b2a_r2_qualification.json",
+  "qualification_artifact_hash": "b5b5452636985132f02af81260523b29fad1cdf8498e77b11b1c8ab687ed58f4",
+  "candidate_manifest_path": "configs/discovery/b2a_r2_candidate_manifest.json",
+  "candidate_manifest_hash": "ac2dcc4550a89f2cfa701acd608a8087b4a1ebaa0ea05eb15d8f71e3434ee0ec",
+  "selected_ordinal": 2,
+  "selected_unique_id": "test/number_theory/820.json",
+  "selection_protocol_version": "faithkv-b2a-r2-row-order-v1",
+  "row_raw_sha256": "11506369e4085ee447d55c497c299f874e0eb692ad1305b3d93255517370a90b",
+  "prompt_token_ids_sha256": "bec0d436118ee235d7a80ec379a455ad81c908360c9cede4cebf76f5730ed241",
+  "tokenizer_revision_used_for_prompt_hash": "6a6f4aa4197940add57724a7707d069478df56b1"
+}

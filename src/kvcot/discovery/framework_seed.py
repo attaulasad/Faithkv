@@ -33,6 +33,17 @@ class DeterminismPolicy:
     attention_backend: str
     bitwise_determinism_guaranteed: bool
     tolerance_note: str
+    # B1B-R4.1 §28 repair: `random.seed()` does NOT control Python's hash
+    # randomization seed (dict/set iteration order for str/bytes/datetime
+    # keys) -- that is fixed once, at interpreter STARTUP, from the
+    # `PYTHONHASHSEED` environment variable, and cannot be changed by any
+    # code running inside the process after it has already started. This
+    # field is a genuine RUNTIME OBSERVATION (`os.environ.get`), reflecting
+    # whatever the process launcher (`kvcot.discovery.b2a_workers
+    # ._launch_worker`, which must set it BEFORE the worker subprocess
+    # starts, never inside this already-running process) actually set --
+    # never a claim this function itself makes true.
+    pythonhashseed_env_value: str | None
 
 
 def apply_framework_seed(framework_seed: int, attention_backend: str, cuda_available: bool) -> DeterminismPolicy:
@@ -45,6 +56,7 @@ def apply_framework_seed(framework_seed: int, attention_backend: str, cuda_avail
     `attention_backend="flash_attention_2"` (FlashAttention's own kernels
     are not guaranteed bitwise-deterministic across runs, independent of
     seeding) and is documented as such in `tolerance_note`."""
+    import os
     import random
 
     random.seed(framework_seed)
@@ -88,4 +100,5 @@ def apply_framework_seed(framework_seed: int, attention_backend: str, cuda_avail
         attention_backend=attention_backend,
         bitwise_determinism_guaranteed=bitwise_guaranteed,
         tolerance_note=tolerance_note,
+        pythonhashseed_env_value=os.environ.get("PYTHONHASHSEED"),
     )

@@ -425,6 +425,13 @@ def cmd_generate(args: argparse.Namespace) -> int:
             )
             generator, derived_seed = make_generator(seed, stage.dataset_manifest, row["source_row_index"], device)
 
+            # B1 execution-boundary closure: `reset_patched_state` no longer
+            # resets CUDA peak-memory stats itself -- this call preserves
+            # this loop's pre-existing per-iteration reset exactly (the
+            # run-wide `peak_vram_bytes` reported below therefore still
+            # reflects only the most recent iteration, unchanged).
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
             cache = reset_patched_state(model, lambda: DynamicCache())
             result = generate_base(
                 model, cache, prompt_token_ids, lock.generation.base_max_new_tokens,
@@ -2343,6 +2350,80 @@ def cmd_prepare_b2a_manifest(args: argparse.Namespace) -> int:
     return 0
 
 
+# ------------------------------------------------------------- qualify-b2a-row
+#
+# B2A-R2 FullKV-only row qualification (2026-07-22). `--dry-run` performs no
+# CUDA access, model load, or inference -- structural/identity validation of
+# the committed candidate manifest against the config only. `--execute`
+# loads FullKV ONLY (never R-KV) and attempts candidates, in their committed
+# deterministic order, stopping at the first one satisfying every frozen
+# qualification condition. Writes an immutable qualification artifact.
+
+
+def cmd_qualify_b2a_row(args: argparse.Namespace) -> int:
+    import json
+
+    from kvcot.discovery.b2a_qualification import (
+        run_qualification_dry_run,
+        run_qualification_execute,
+    )
+    from kvcot.discovery.discovery_config import canonical_config_hash, load_discovery_config
+    from kvcot.discovery.manifest_prepare import ManifestPreparationError
+
+    config = load_discovery_config(args.config)
+    with open(args.candidates, "r", encoding="utf-8") as f:
+        candidate_manifest = json.load(f)
+
+    if args.dry_run:
+        try:
+            plan = run_qualification_dry_run(config, candidate_manifest)
+        except ManifestPreparationError as e:
+            raise SystemExit(f"qualify-b2a-row --dry-run refused: {e}") from e
+        print("qualify-b2a-row dry-run plan:")
+        print(f"  candidate_manifest_hash: {plan['candidate_manifest_hash']}")
+        print(f"  candidates_to_attempt_in_order: {plan['candidates_to_attempt_in_order']}")
+        print(f"  qualification_conditions: {plan['qualification_conditions']}")
+        print("  no CUDA access, no model load, no inference performed by --dry-run")
+        return 0
+
+    if not args.execute:
+        raise SystemExit("qualify-b2a-row requires exactly one of --dry-run or --execute.")
+
+    import torch
+
+    if not torch.cuda.is_available():
+        raise SystemExit("qualify-b2a-row --execute requires CUDA; none is available on this machine.")
+
+    config_hash = canonical_config_hash(config)
+    try:
+        artifact = run_qualification_execute(
+            config, candidate_manifest, args.candidates, config_hash=config_hash,
+        )
+    except ManifestPreparationError as e:
+        raise SystemExit(f"qualify-b2a-row --execute refused: {e}") from e
+
+    from kvcot.discovery.attempt_artifacts import atomic_write_json
+    from pathlib import Path
+
+    output_path = Path(args.output) if args.output else Path("results/decisions/b2a_r2_qualification.json")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(output_path, artifact.to_json())
+
+    print(f"qualify-b2a-row: attempted {len(artifact.attempted)} candidate(s)")
+    for outcome in artifact.attempted:
+        print(
+            f"  ordinal={outcome.candidate_ordinal} unique_id={outcome.unique_id} "
+            f"qualified={outcome.qualified} failed_conditions={outcome.failed_conditions}"
+        )
+    if artifact.selected_ordinal is None:
+        print("qualify-b2a-row: NO QUALIFIED ROW")
+        print(f"  artifact written: {output_path}")
+        return 1
+    print(f"qualify-b2a-row: SELECTED ordinal={artifact.selected_ordinal} unique_id={artifact.selected_unique_id}")
+    print(f"  artifact written: {output_path}")
+    return 0
+
+
 # --------------------------------------------------------------------- b2a-calibrate
 #
 # One-example-only B2A calibration command (B1B-R2 §11). "B2A is a one-
@@ -2372,8 +2453,55 @@ def cmd_b2a_calibrate(args: argparse.Namespace) -> int:
     )
     from kvcot.discovery.manifest import load_b2a_one_example_manifest
 
-    config = load_discovery_config(args.config)
-    manifest = load_b2a_one_example_manifest()
+    attempt = None
+    if args.execute:
+        import os
+        import sys
+        from datetime import datetime, timezone
+
+        from kvcot.discovery.attempt_artifacts import atomic_write_json, create_attempt_directory
+        from kvcot.discovery.manifest import DEFAULT_MANIFEST_PATH as _DEFAULT_MANIFEST_PATH
+
+        attempt = create_attempt_directory()
+        atomic_write_json(
+            attempt.path / "invocation.json",
+            {
+                "attempt_id": attempt.attempt_id,
+                # F6: a real UTC start timestamp -- completion.json's
+                # finished_at is validated against this.
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "argv": [arg for arg in sys.argv if "token" not in arg.lower() and "secret" not in arg.lower()],
+                "working_directory": str(Path.cwd()),
+                "pid": os.getpid(),
+                "config_path": str(args.config),
+                "manifest_path": str(_DEFAULT_MANIFEST_PATH),
+                "environment": {
+                    "PYTHONHASHSEED": os.environ.get("PYTHONHASHSEED"),
+                    "TOKENIZERS_PARALLELISM": os.environ.get("TOKENIZERS_PARALLELISM"),
+                },
+            },
+        )
+
+    try:
+        config = load_discovery_config(args.config)
+        manifest = load_b2a_one_example_manifest()
+    except Exception as exc:
+        if attempt is not None:
+            from kvcot.discovery.attempt_artifacts import atomic_write_json
+
+            atomic_write_json(
+                attempt.path / "failure.json",
+                {"stage": "config_or_manifest_validation", "error_type": type(exc).__name__, "error": str(exc)},
+            )
+        raise
+
+    if attempt is not None:
+        from kvcot.discovery.attempt_artifacts import collect_execution_provenance
+
+        provenance = collect_execution_provenance(
+            repository=Path.cwd(), expected_rkv_sha=config.rkv.upstream_revision, artifact_root=attempt.path,
+        )
+        atomic_write_json(attempt.path / "provenance.json", provenance)
 
     blockers: list[str] = []
     if not config.dataset.revision_is_frozen:
@@ -2420,12 +2548,30 @@ def cmd_b2a_calibrate(args: argparse.Namespace) -> int:
         print(
             f"  B2B pilot cost model (planning information only, NOT authorized here): "
             f"{B2B_PILOT_EXAMPLE_COUNT} examples x {EVENTS_SELECTED_PER_EXAMPLE} events x "
-            f"{PAIR_BRANCHES_PER_EVENT} real swaps = {B2B_PILOT_TOTAL_REAL_BRANCHES} real branches"
+            f"{PAIR_BRANCHES_PER_EVENT} real pair evaluations = {B2B_PILOT_TOTAL_REAL_BRANCHES} real pair "
+            "evaluations; 0 GPU no-op pair evaluations"
         )
         print(
-            f"  B2A-only minimal no-op calibration (this example only): up to {EVENTS_SELECTED_PER_EXAMPLE} "
-            "no-op swaps -- reported separately, never added to the 144-branch B2B total"
+            f"  B2A pair-evaluation accounting (this example only): {EVENTS_SELECTED_PER_EXAMPLE} selected events "
+            f"x {PAIR_BRANCHES_PER_EVENT} real pair evaluations = 12 real pair evaluations, PLUS exactly 1 no-op "
+            "pair evaluation -- reported separately, never added to the 144 B2B total"
         )
+        print("  strict hardware boundary: exactly one visible NVIDIA RTX 3090 at explicit cuda:0")
+        print("  immutable snapshots: exact 40-SHA local model/tokenizer paths; local_files_only=True; no offload")
+        print("  compact capture: full Pass-2 records convert to selected-only CompactBranchTarget objects")
+        print("  capture-release boundary: full captured K/V, returned K/V, and score tensors released before pair 1")
+        print("  branch-memory guard: synchronized, shape/dtype-derived estimate before every real pair and no-op")
+        print("  pair topology: 3 unique selected events; 4 unique real pairs/event; 12 total; 1 deterministic no-op")
+        print("  branch scoring: one bridge token plus exactly 48 scored targets; NLL scalars retained, logits/cache released")
+        print("  timing: synchronized startup/load/pass1/pass2/compact/per-pair phases; load-inclusive projection")
+        print("  memory: before-load, model-load, post-load, inference/pass/capture/compact/pair/no-op/worker phases")
+        print("  artifacts: immutable b2a_attempt_<UTC>_<UUID>/ with atomic results/envelopes/logs/journals/hashes")
+        print("  mandatory gates: identity, expected generation, actual batch, complete traces, raw pair/no-op,")
+        print("    semantic swap, timings, memory phases, runtime/VRAM, envelopes, and attempt artifacts all fail closed")
+        from kvcot.discovery.final_contract import FINAL_MANDATORY_GATE_CONDITIONS
+
+        for gate_name in FINAL_MANDATORY_GATE_CONDITIONS:
+            print(f"    - {gate_name}")
         print(f"  canonical_config_hash={canonical_config_hash(config)}")
         print(f"  generation_config_hash={generation_config_hash(config.generation)}")
         print(f"  rkv_config_hash={rkv_config_hash(config.rkv)}")
@@ -2437,7 +2583,7 @@ def cmd_b2a_calibrate(args: argparse.Namespace) -> int:
                 print(f"    - {blocker}")
         else:
             print("  no unresolved/inconsistent identity fields detected")
-        print("  no result files created; no model loaded; no CUDA required")
+        print("  dry-run only: no CUDA/model execution performed; no result files created; no model loaded; no CUDA required")
         return 0 if not blockers else 2
 
     # ---- explicit GPU execution mode ----
@@ -2452,30 +2598,123 @@ def cmd_b2a_calibrate(args: argparse.Namespace) -> int:
             "manifest example runs, never a range, multiple ids, or unrestricted dataset iteration."
         )
     if blockers:
+        if attempt is not None:
+            from kvcot.discovery.attempt_artifacts import atomic_write_json
+            atomic_write_json(attempt.path / "failure.json", {"stage": "preflight", "blockers": blockers})
         raise SystemExit("b2a-calibrate --execute refused:\n" + "\n".join(f"  - {b}" for b in blockers))
 
     import torch
 
     if not torch.cuda.is_available():
+        if attempt is not None:
+            from kvcot.discovery.attempt_artifacts import atomic_write_json
+            atomic_write_json(
+                attempt.path / "failure.json", {"stage": "cuda_preflight", "reason": "CUDA unavailable"}
+            )
         raise SystemExit("b2a-calibrate --execute requires CUDA; none is available on this machine.")
+
+    # Independent-audit Gate H4.3 repair: the CLI used to write a trivial
+    # `preflight.json` (`{"passed": True, ...}` -- a literal, never a real
+    # device observation) BEFORE even checking CUDA availability, and never
+    # verified the single-RTX-3090 policy at all before launching workers.
+    # `verify_single_rtx3090` is called here -- the SAME raw-evidence
+    # producer the workers themselves use (`kvcot.discovery.strict_device`)
+    # -- and its result is both written into `preflight.json` AND passed
+    # into the coordinator so the final gate can cross-check THREE
+    # independent observations (CLI, FullKV worker, R-KV worker), never
+    # just two.
+    from kvcot.discovery.strict_device import StrictDeviceError, verify_single_rtx3090
+
+    try:
+        device_preflight = verify_single_rtx3090(torch.cuda, torch_module=torch)
+    except StrictDeviceError as exc:
+        if attempt is not None:
+            from kvcot.discovery.attempt_artifacts import atomic_write_json
+            atomic_write_json(
+                attempt.path / "failure.json", {"stage": "device_preflight", "reason": str(exc)}
+            )
+        raise SystemExit(f"b2a-calibrate --execute refused: device preflight failed: {exc}")
+
+    if attempt is not None:
+        from kvcot.discovery.attempt_artifacts import atomic_write_json
+
+        atomic_write_json(
+            attempt.path / "preflight.json",
+            {
+                "passed": True, "blockers": [], "config_hash": canonical_config_hash(config),
+                "manifest_hash": manifest.manifest_hash(), "device": dict(device_preflight.__dict__),
+            },
+        )
 
     from kvcot.discovery.b2a_execute import run_b2a_calibration
     from kvcot.discovery.manifest import DEFAULT_MANIFEST_PATH
 
-    # The coordinator never loads a model itself (B1B-R3 §11) -- it launches
-    # the FullKV and R-KV workers as separate subprocesses, each re-loading
-    # config/manifest from these same paths independently.
-    artifact = run_b2a_calibration(
-        config, manifest, config_path=str(args.config), manifest_path=str(DEFAULT_MANIFEST_PATH),
-    )
-    print(f"b2a-calibrate result: passed={artifact.gate_result.passed}")
-    print(f"  artifact written: {artifact.artifact_path}")
-    if not artifact.gate_result.passed:
-        print(f"  failed_conditions={artifact.gate_result.failed_conditions}")
-        return 2
+    # Independent-audit Gate H7.2 repair: `invocation.json` is immutable
+    # (like every attempt artifact) and was never rewritten with an end
+    # timestamp -- a SEPARATE `completion.json` is now written exactly
+    # once, in a `finally` block, so it is guaranteed to exist whether this
+    # command reaches a gate result, a refusal, or an uncaught exception.
+    completion = {"outcome": "exception", "exit_code": None, "artifact_path": None, "gate_passed": None}
+    try:
+        # The coordinator never loads a model itself (B1B-R3 §11) -- it
+        # launches the FullKV and R-KV workers as separate subprocesses,
+        # each re-loading config/manifest from these same paths
+        # independently.
+        artifact = run_b2a_calibration(
+            config, manifest, config_path=str(args.config), manifest_path=str(DEFAULT_MANIFEST_PATH),
+            attempt_directory=attempt.path,
+            # Same `{"verified": True, **device.__dict__}` convention the
+            # workers themselves use (`kvcot.discovery.b2a_workers`) -- so
+            # the coordinator's raw-evidence gate treats all three
+            # observations (CLI, FullKV, R-KV) uniformly.
+            cli_device_preflight={"verified": True, **device_preflight.__dict__},
+        )
+        # B2A-R2 forensic repair (audit round 3,
+        # docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md §11):
+        # `artifact.overall_passed` is the ONE authoritative outcome the
+        # coordinator itself already computed (legacy gate AND final gate
+        # AND pair-artifact verification) -- this CLI must never recompute
+        # success from a subset of gates, or it can print/return a
+        # different verdict than the coordinator's own `completion.json`.
+        overall_passed = artifact.overall_passed
+        completion["artifact_path"] = str(artifact.artifact_path)
+        completion["gate_passed"] = overall_passed
+        print(f"b2a-calibrate result: passed={overall_passed}")
+        print(f"  artifact written: {artifact.artifact_path}")
+        if not overall_passed:
+            print(f"  failed_conditions={artifact.gate_result.failed_conditions}")
+            if artifact.final_gate_result is None:
+                print("  final_failed_conditions=['final_gate_result_missing']")
+            elif not artifact.final_gate_result.passed:
+                print(f"  final_failed_conditions={artifact.final_gate_result.failed_conditions}")
+            if not artifact.scientific_pair_artifacts_verified:
+                print(f"  pair_artifact_verification_reasons={list(artifact.pair_record_verification_reasons)}")
+            completion["outcome"] = "gate_failed"
+            completion["exit_code"] = 2
+            return 2
 
-    print("  stop: B2B pilot NOT started by this command.")
-    return 0
+        print("  stop: B2B pilot NOT started by this command.")
+        completion["outcome"] = "gate_passed"
+        completion["exit_code"] = 0
+        return 0
+    finally:
+        # F5: on the successful path the coordinator itself already wrote
+        # `completion.json` BEFORE `final.json` (so the final reference
+        # manifest includes it); this fallback covers only paths where the
+        # coordinator never got that far, and NEVER overwrites it.
+        if attempt is not None and not (attempt.path / "completion.json").exists():
+            import datetime as datetime_module
+
+            from kvcot.discovery.attempt_artifacts import atomic_write_json
+
+            atomic_write_json(
+                attempt.path / "completion.json",
+                {
+                    "attempt_id": attempt.attempt_id,
+                    "finished_at": datetime_module.datetime.now(datetime_module.timezone.utc).isoformat(),
+                    **completion,
+                },
+            )
 
 
 # ----------------------------------------------------------------------------- main
@@ -2568,6 +2807,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--execute", action="store_true")
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_prepare_b2a_manifest)
+
+    p = sub.add_parser(
+        "qualify-b2a-row",
+        help="B2A-R2: FullKV-only, R-KV-free row qualification against the committed candidate manifest.",
+    )
+    p.add_argument("--config", required=True)
+    p.add_argument("--candidates", required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--execute", action="store_true")
+    p.add_argument("--output", default=None)
+    p.set_defaults(func=cmd_qualify_b2a_row)
 
     p = sub.add_parser(
         "b2a-calibrate",

@@ -1,6 +1,273 @@
 # Plan and status
 
-## Current status: Phase B1B-R3 — executable B2A boundary and evidence producer — IMPLEMENTED FOR REVIEW; GPU/B2A/B2B STILL BLOCKED
+## B2A-R2 FORENSIC PAIR-RECORD PERSISTENCE REPAIR, AUDIT ROUND 3 (2026-07-22)
+
+An independent audit found round 2 (immediately below) correctly gated
+`completion.json` but never propagated the pair-artifact outcome to
+`final.json`'s `payload["passed"]` (computed earlier, never updated),
+`B2ACalibrationArtifact` (no pair-artifact fields at all), or the CLI
+(`kvcot.cli.cmd_b2a_calibrate` independently recomputed a two-gate result,
+ignoring pair-artifact verification -- could print `passed=True`/exit `0`
+while `completion.json` said `gate_failed`/`2`). Fixed, CPU-only: ONE
+`overall_passed` computed before `payload` is built and used consistently
+everywhere; `B2ACalibrationArtifact` now exposes `overall_passed`/
+`scientific_pair_artifacts_verified`/`pair_record_verification_reasons`;
+the CLI reads `artifact.overall_passed` directly instead of recomputing;
+a new `verify_pair_record_population` ensures the no-attempt-directory
+path is never silently treated as verified. New coordinator- and CLI-level
+tests confirm the CLI returns exit code 2 for an isolated pair-artifact
+failure. Full detail:
+`docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md` §11.
+
+```text
+B2A-R2 FORENSIC CLOSURE VERDICT:
+PAIR-RECORD PERSISTENCE REPAIRED -- READY FOR INDEPENDENT REVIEW; B2A-R3/B2B REMAIN BLOCKED
+```
+
+## Prior status: B2A-R2 forensic pair-record persistence repair, audit round 2 (2026-07-22)
+
+An independent audit found round 1 (immediately below) left
+`verify_pair_record_artifacts` never-fatal -- a future V2 attempt could
+still be reported successful with a missing, incomplete, duplicated,
+mismatched, or corrupt `rkv/pair_records.json`/`rkv/scientific_summary.json`.
+Fixed, CPU-only: `overall_passed` now ANDs in a third gate factor,
+`scientific_pair_artifacts_verified`, derived from
+`verify_pair_record_artifacts` and `isinstance(rkv, RKVWorkerResultV2)` --
+failure now produces `exit_code=2`/`outcome="gate_failed"`, never a false
+success. `parse_rkv_worker_result` now rejects (rather than silently
+misclassifies as legacy V1) a payload labeled `schema_version=
+"rkv_worker_result.v2"` that is missing `pair_records`. Ten new
+coordinator-level tests assert `overall_passed`/exit code/`completion.json`
+directly. No GPU, no re-run, `FINAL_MANDATORY_GATE_CONDITIONS` unmodified.
+Full detail: `docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md`
+§10.
+
+```text
+B2A-R2 FORENSIC CLOSURE VERDICT:
+PAIR-RECORD PERSISTENCE REPAIRED -- READY FOR INDEPENDENT REVIEW; B2A-R3/B2B REMAIN BLOCKED
+```
+
+## Prior status: B2A-R2 forensic pair-record persistence repair, round 1 (2026-07-22)
+
+CPU-only durable-artifact repair -- no GPU, no inference, no re-run. B2A-R1
+and B2A-R2 have both already executed (see the B2A-R1/R2 section
+immediately below, now historical) -- any wording elsewhere in this
+repository implying B2A has never run refers to a status prior to
+2026-07-22 and is superseded here.
+
+B2A-R2 (`fb6f5081d47f45f4b4f9258c25e6883d`, qualified row
+`test/number_theory/820.json`) ran to completion: 27/28 legacy-gate
+conditions passed; the sole failure, `runtime_within_limit` (5.01 projected
+GPU-hours vs. the 4.00-hour limit), remains the frozen verdict, unchanged
+by this repair: `B2A-R2 FINAL VERDICT: FAIL -- B2B BLOCKED`.
+
+A post-run audit of the preserved archive found that "full per-pair
+evidence" was too broad: execution accounting, identities, and mutation/
+parity evidence survived, but the twelve real interventions' scientific
+outcomes (`swap_gain`, 48-value `baseline_per_token_nll`/
+`swapped_per_token_nll`) were never exported by `RKVWorkerResult` and are
+unrecoverable from the archive (the GPU instance is gone; no value was
+estimated, inferred, or backfilled). Repaired: `RKVWorkerResult` split
+into structurally-versioned `RKVWorkerResultV1` (legacy, unmodified,
+still parseable) / `RKVWorkerResultV2` (adds a REQUIRED `pair_records`
+field); `run_rkv_worker` now populates it directly from
+`ExampleResult.pair_records`; every future successful attempt durably
+writes `rkv/pair_records.json` and `rkv/scientific_summary.json` (a pure
+CPU summary including a dependency-free tie-aware Spearman correlation);
+a new, deliberately-standalone
+`kvcot.discovery.attempt_verification.verify_pair_record_artifacts`
+checks population completeness, identity agreement, and exact
+recomputation -- wired into the live coordinator as additional,
+never-fatal evidence, never a new mandatory gate condition. Full detail:
+`docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md`;
+`docs/B2A_R2_RESULT_2026-07-22.md` §8 (dated clarification; also corrects
+a decimal-GB-labeled-as-GiB documentation arithmetic error in that
+document's memory table -- does not change any verdict).
+
+**No B2A-R3 attempt is authorized by this document. B2B remains blocked.
+No FaithKV method exists.**
+
+```text
+B2A-R2 FORENSIC CLOSURE VERDICT:
+PAIR-RECORD PERSISTENCE REPAIRED -- READY FOR INDEPENDENT REVIEW; B2A-R3/B2B REMAIN BLOCKED
+```
+
+## Prior status: B2A-R1 failure closure and B2A-R2 pre-registration (2026-07-22)
+
+B2A-R1 (the single attempt CLAUDE.md §1c authorized) executed against
+`example_index=0`: both FullKV and R-KV workers ran (return code 0 each),
+so the attempt is scientifically consumed, but it produced ZERO R-KV
+compaction events (prompt=105 tokens, generated=449 tokens, far under
+budget=1024) -- an ineligible calibration that tested no eviction at all.
+Full evidence and root-cause analysis:
+`docs/B2A_R1_FAILURE_AND_B2A_R2_PROTOCOL_2026-07-22.md`;
+`docs/evidence/B2A_R1_ATTEMPT_INDEX_2026-07-22.json`.
+
+Two repairs made before any B2A-R2 inference, neither touching scientific
+configuration: (1) the coordinator's `build_runtime_projection` no longer
+raises on an insufficient real-pair count -- it resolves to an explicit,
+never-fabricated "unavailable" outcome, failing the runtime gate closed;
+(2) the MATH-500 answer verifier's calling convention into `math-verify`
+was corrected (confirmed root cause: bare, non-`\boxed{}` compound LaTeX is
+unreliably parsed by that library's fallback path) -- a general fix, not
+tuned to the specific observed answer.
+
+B2A-R2 is pre-registered: a committed, deterministically-ordered 12-row
+MATH-500 candidate manifest (`configs/discovery/b2a_r2_candidate_manifest.json`),
+FullKV-only qualification (`kvcot qualify-b2a-row`, R-KV never imported)
+against 10 frozen conditions, stopping at the first qualified row -- no
+qualified row means immediate stop. The qualified row, if any, is frozen
+into a replacement one-example manifest only by a fail-closed function
+that rejects any hash/identity mismatch or row substitution. Exactly one
+further `b2a-calibrate --execute` attempt is then authorized, under the
+unchanged §1c/§4c settings.
+
+No B2A-R2 result exists yet as of this entry. No B2B result exists. No
+FaithKV method exists. B2B and any FaithKV method implementation remain
+blocked pending a separate, future, independent authorization.
+
+## Historical status
+
+## Prior status: B2A one-example GPU authorization (2026-07-22)
+
+B1 CPU closure is complete; CPU CI is green at run
+[29892965613](https://github.com/asad073-ui/Faithkv/actions/runs/29892965613)
+(commit `a4f6e4298eba10d037ca7e6570fe6d69aad2472f`). Bounded GPU mechanical
+validation is complete on the Vast RTX 3090 host: 12 of 14 collected
+GPU-marked tests pass (replay identity, stock-vs-patched no-op parity,
+cross-example state isolation, snapshot restoration, R-KV schedule
+prediction, and more). The remaining two
+(`test_probe_stability_gpu.py`'s f=1 stability checks — FullKV 17/20, R-KV
+b256 15/20, against the 0.90 threshold) are a preserved, unmodified
+historical Stage 0 result for the archived Qwen-1.5B/GSM8K early-answering
+protocol; they are non-blocking for B2A, which exercises a disjoint
+mechanism (greedy decoding throughout, no early-answering control suffix,
+`DeepSeek-R1-Distill-Llama-8B`/MATH-500). See
+`docs/B2A_ONE_EXAMPLE_GPU_AUTHORIZATION_2026-07-22.md` and CLAUDE.md
+§1c/§4c for the full authorization and its exact scope: exactly one B2A
+(`b2a-calibrate --execute`) engineering-calibration attempt, one frozen
+example, hard 22 GiB / 4.00 GPU-hour limits.
+
+No B2A result exists yet. No B2B result exists. No FaithKV method exists.
+B2B and any FaithKV method implementation remain blocked pending a
+separate, future, independent authorization.
+
+## Prior status: Phase B1 final CPU closure, round 4 — B1 FINAL CPU CLOSURE VERDICT: INCOMPLETE — B2A/GPU REMAIN BLOCKED (2026-07-21)
+
+**Round 4 (2026-07-21).** The round-3 paragraph below claimed
+only two documentation formalities remained — that was an overclaim. A
+final independent audit confirmed nine further functional
+execution-boundary defects (F1–F9: wrong failing-stage attribution,
+dropped partial R-KV evidence, missing memory failure messages, incomplete
+artifact verification, `final.json` written before `completion.json`,
+incomplete provenance, a narrower-than-claimed device/placement gate,
+weak snapshot revalidation, duplicate-tolerant timing/memory contracts)
+plus the two formalities (F10). All ten are repaired and locally
+validated (1,187 collected; 1,173 passed / 14 deselected; dry-runs exit
+0). The sole open item is independent CI evidence: GitHub Actions is
+locked at the account level (billing), so no run can start. See
+`docs/B1_INDEPENDENT_AUDIT_REPAIR.md` §8/§9 (authoritative),
+`docs/B1_FINAL_REPAIR_LEDGER.md` "Round 4", and
+`docs/B1_FINAL_EXECUTION_CALL_GRAPH.md`.
+
+Round 3 (historical, overclaim corrected above): three forward-only
+repair passes closed Gates H1-H7 in full and H8.2; it claimed the only
+remaining items were H4.7 and H8.6, "both audit-formality items rather
+than functional defects" — incorrect, per the round-4 findings.
+Non-GPU suite at round 3: 1102 passed, 14 deselected.
+
+No B2A result exists. No B2B result exists. No RTX 3090 timing exists. No
+FaithKV method exists. Independent audit is required before any GPU
+authorization.
+
+## Current status: Phase B1 execution-boundary closure — focused completion pass on B1B-R4.1 — INCOMPLETE; GPU/B2A/B2B STILL BLOCKED
+
+**Phase B1 execution-boundary closure (2026-07-20, CHANGELOG.md) is a
+forward completion pass on top of the already-pushed B1B-R4.1 commit**
+(`4e45beac1912a0a7852a034420732a10d0d703e7`, itself already self-recorded
+INCOMPLETE), fixing five concrete defects a fresh evidence-based audit (16
+numbered claims, all 16 confirmed against the actual current code)
+found: `reset_patched_state` no longer secretly resets CUDA peak-memory
+stats (the R-KV worker's Pass-2 state construction was silently wiping
+Pass 1's already-accumulated peak); baseline/swapped branch evaluation now
+releases down to a compact score object the instant each branch finishes,
+not just the initial snapshot clone (the prior pass's own gap, closed one
+layer deeper); the semantic swap on an already-owned snapshot clone no
+longer clones the cache a second time; the `semantic_swap_parity` gate
+condition now requires POSITIVE attempted/passed counts instead of
+absence-of-a-failure-record; three new gate conditions replace a bare
+per-event pair count with exact, duplicate-detecting pair-identity
+accounting. 20 new CPU tests; full non-GPU suite: 970 passed, 0 failed.
+Full detail, including an HONEST itemized list of everything still open
+(largest: `Pass2Result.target_captures` still retains full capture tensors
+through all 12+1 pair evaluations — no `CompactBranchTarget` conversion
+was built; plus no CUDA-synchronized timing, no VRAM phase split, no full
+worker-level success test, no Hub snapshot resolver, no strict single-GPU
+load path, no immutable attempt-directory architecture, and more):
+`docs/B1_EXECUTION_BOUNDARY_FINAL_CLOSURE.md`. **Status: B1
+EXECUTION-BOUNDARY CLOSURE VERDICT: INCOMPLETE — B2A/GPU REMAIN BLOCKED.
+No discovery result exists. No method exists.**
+
+## Prior status: Phase B1B-R4.1 — focused completion amendment on B1B-R4 — INCOMPLETE; GPU/B2A/B2B STILL BLOCKED
+
+**Phase B1B-R4.1 (2026-07-20, CHANGELOG.md) is a forward completion pass on
+top of the already-pushed B1B-R4 commit** (`4d7971b7b09c004c4670bfde
+3939416ab550ea71`), fixing seven concrete defects an evidence-based audit
+of the actual current code found (not the full list a much larger task
+brief assumed — several assumed defects, e.g. non-Pydantic schemas, turned
+out to already be fixed): one authoritative Pass-1/Pass-2 provenance state
+(removing a Pass-2 shadow `LayerProvenance` track); selected-event count
+now derived from the frozen Pass-1 plan instead of surviving pair records;
+structured per-pair failure evidence actually populated (was always empty
+in production); the capture-minimization bound now enforced in production,
+not only in its own test file; baseline/swapped branch snapshots now
+released sequentially, proven via `weakref`, instead of both live at once;
+semantic-swap parity/byte-delta evidence now derived from the real
+mutation report instead of hard-coded `True`/`0`; `PYTHONHASHSEED` now set
+on the subprocess environment before worker launch instead of ineffectively
+inside the already-running process. One new gate condition
+(`semantic_swap_parity`) was added. Every repair has a new CPU test (25 new
+tests total); full non-GPU suite: 950 passed, 0 failed. Full detail,
+including an HONEST, itemized list of everything the originating task
+brief asked for that this pass did NOT implement (CUDA-synchronized
+timing, model-load VRAM phases, a strict single-GPU load path, a Hub
+snapshot identity resolver, an immutable attempt-directory architecture,
+the remaining gate conditions, and more):
+`docs/B1B_R4_1_FINAL_CLOSURE.md`. **Status: B1 FINAL CLOSURE VERDICT:
+INCOMPLETE — B2A/GPU REMAIN BLOCKED. No discovery result exists. No method
+exists.**
+
+## Prior status: Phase B1B-R4 — final executable, measurement, and worker-evidence closure — IMPLEMENTED FOR REVIEW; GPU/B2A/B2B STILL BLOCKED
+
+**Phase B1B-R4 (2026-07-20, CHANGELOG.md) repairs the remaining defects
+found during an independent audit of the merged PR #19 (B1B-R3, commit
+`fa117046bea2a2c492e17cd91276b2e3c6d59f7f`)**: FullKV sampling replaced
+with exact greedy generation reusing R-KV Pass 1's own loop; framework
+determinism applied and recorded independently in both worker processes;
+`NoOpMode` now actually controls pair construction
+(`kvcot.discovery.orchestrator.PairExecutionPolicy`) instead of only
+documenting intent; five trajectory/parity conditions derived
+independently instead of copied from one umbrella boolean; resolved-vs-
+requested revision read back via `transformers`' own commit-hash
+attributes; batch size/parameter placement/one-example scope derived from
+real observations; per-pair timing measured individually (never an
+aggregate bucket multiplied by 144); branch-restored compaction history
+reconstructed from the snapshot instead of reset; VRAM gate uses
+`max(allocated, reserved)`; the weight-cache guard scoped to manifest
+preparation only; partial FullKV evidence preserved on R-KV failure;
+durable per-attempt worker envelopes; collision-resistant artifact naming;
+bounded selected-capture minimization; one canonical FullKV/R-KV worker
+API exercised by CPU tests against injected fakes. This pass's own
+adversarial self-review found and fixed three further defects (documented
+in `docs/B1B_R4_FINAL_B2A_CLOSURE.md` §5). Full detail:
+`docs/B1B_R4_FINAL_B2A_CLOSURE.md`. **Status: B1B-R4 implemented, ready for
+independent CPU audit. GPU, B2A, and B2B remain blocked. No discovery
+result exists. No method exists.** The full 12-real+1-no-op success path
+is not exercised by any `run_rkv_worker`-level CPU test (a fake-model
+fixture limitation, documented in that document's §4) — the orchestrator-
+level success path IS exercised extensively elsewhere.
+
+## Prior status: Phase B1B-R3 — executable B2A boundary and evidence producer — IMPLEMENTED FOR REVIEW; GPU/B2A/B2B STILL BLOCKED
 
 **Phase B1B-R3 (2026-07-20, CHANGELOG.md) repairs twelve defects found
 during an independent audit of the merged PR #18 (B1B-R2, commit

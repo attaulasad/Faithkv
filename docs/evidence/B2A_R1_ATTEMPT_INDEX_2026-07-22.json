@@ -1,0 +1,202 @@
+{
+  "schema_version": "1.0",
+  "created_at_utc": "2026-07-22T08:50:00Z",
+  "purpose": "Evidence index for B2A-R1 preflight-only and consumed attempts, preserved before B2A-R2 work begins.",
+  "attempts": [
+    {
+      "attempt_id": "d0fdfe807d5b4c9da0bef3fb0bfa276d",
+      "original_relative_path": "results/decisions/b2a_attempt_20260722T071154983421Z_d0fdfe807d5b4c9da0bef3fb0bfa276d",
+      "classification": "preflight_only",
+      "execution_sha": "0e2b1006679ebf87c8792ec7205db1fc93652deb",
+      "file_inventory": [
+        {
+          "relative_path": "invocation.json",
+          "size_bytes": 563,
+          "sha256": "ebccb7671cbe33e395cd8595ad6ac0e9bbd8696ad6c90de4e8de3f6098a3a30f"
+        },
+        {
+          "relative_path": "provenance.json",
+          "size_bytes": 2000,
+          "sha256": "a45282a21b6b62be4ea6205660f4a5feac2547ae02eb38ccd53a26e2ce74e045"
+        }
+      ],
+      "external_archive_path": "/workspace/b2a_attempt_20260722T071154983421Z_d0fdfe807d5b4c9da0bef3fb0bfa276d.tar.gz",
+      "external_archive_sha256": "584f0e6bad4bbc45090d76880d244af35919e5b3379bdb743c86d5ab4fffbd6c",
+      "no_credential_found": true,
+      "no_file_over_github_safety_limit": true,
+      "model_config_manifest_hashes": {},
+      "notes": "Crashed at device preflight: AttributeError: torch.cuda has no attribute 'cudnn'. 0 MiB GPU memory used; no worker inference began. Fixed by commit 0f86e27."
+    },
+    {
+      "attempt_id": "10ac7b389ff84a9b90d39d1d65753c9a",
+      "original_relative_path": "results/decisions/b2a_attempt_20260722T072823470986Z_10ac7b389ff84a9b90d39d1d65753c9a",
+      "classification": "consumed_zero_compaction",
+      "execution_sha": "0f86e27a8e836db78f4544f11804d085ea1af491",
+      "file_inventory": [
+        {
+          "relative_path": "completion.json",
+          "size_bytes": 203,
+          "sha256": "4d1d11dd435ef358dff1f070ca0cbef82e511ef9a0f0e32de1c9a4956b1d2a09"
+        },
+        {
+          "relative_path": "failure.json",
+          "size_bytes": 1101,
+          "sha256": "da12da153952ea1e54f60725e5ebbfeb229695f41514d93ca051fe17acb4dc8c"
+        },
+        {
+          "relative_path": "fullkv/command.json",
+          "size_bytes": 560,
+          "sha256": "428635590db5f60506a2103832271379400aefb4fa5545e20aff4a536ed3ce74"
+        },
+        {
+          "relative_path": "fullkv/envelope.json",
+          "size_bytes": 340197,
+          "sha256": "a959b30987ce97dbceac95b96f9a8df27e0111577151983d4ba0a02be4b451d1"
+        },
+        {
+          "relative_path": "fullkv/memory.json",
+          "size_bytes": 3094,
+          "sha256": "e0ba947026722fa6e08a79331f76685fb589d400478b89aecc98d7727c6c62f2"
+        },
+        {
+          "relative_path": "fullkv/progress.jsonl",
+          "size_bytes": 2970,
+          "sha256": "1b359cf00eb00932ec95da7771af92ea57f79f80fb328ad4d6f4eac733926a29"
+        },
+        {
+          "relative_path": "fullkv/result.json",
+          "size_bytes": 309342,
+          "sha256": "4b0a877b9523ed1945969aba8d9b772e0aa952c68a32b07f5fbbd88bb3826d25"
+        },
+        {
+          "relative_path": "fullkv/result.json.envelope.json",
+          "size_bytes": 340197,
+          "sha256": "a959b30987ce97dbceac95b96f9a8df27e0111577151983d4ba0a02be4b451d1"
+        },
+        {
+          "relative_path": "fullkv/stderr.log",
+          "size_bytes": 442,
+          "sha256": "d1d12cfd886d6a6626f2a950e61d1eba9e863f314cc59e548c8303c847f53751"
+        },
+        {
+          "relative_path": "fullkv/stdout.log",
+          "size_bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "relative_path": "fullkv/timing.json",
+          "size_bytes": 140200,
+          "sha256": "0dcb023c43d6edb9fc74d24ad6a4f20f1ff82526912c33bab000ad6672353931"
+        },
+        {
+          "relative_path": "invocation.json",
+          "size_bytes": 563,
+          "sha256": "d4922d85c8bf5d13ac0916f6148ccc522220c381ca4c213081b286c4959e3a39"
+        },
+        {
+          "relative_path": "preflight.json",
+          "size_bytes": 569,
+          "sha256": "534bc279d656d8f03bbe0ca2dee619f2a70ff181adbc2d2bc6f82553c48261cf"
+        },
+        {
+          "relative_path": "process_outcome.json",
+          "size_bytes": 314,
+          "sha256": "402e2d555a90b03d014cc4b9e9dd9bdc3d386dc0b6f843c1e02a7cf56f5d72f3"
+        },
+        {
+          "relative_path": "provenance.json",
+          "size_bytes": 2457,
+          "sha256": "4bb7a474c93fd345ede1bf44bda823a51dbd986e7b7fe3817c2573d9a8e568b3"
+        },
+        {
+          "relative_path": "rkv/command.json",
+          "size_bytes": 554,
+          "sha256": "35deb95d82d889fb5c9fc6c20722e722a0c6323e1958db5e9de0438f3f0ad09f"
+        },
+        {
+          "relative_path": "rkv/envelope.json",
+          "size_bytes": 588436,
+          "sha256": "c912d17aa5b0c4716a88ffe5c828b4848960da2b94ce9bacf775920c70751d97"
+        },
+        {
+          "relative_path": "rkv/memory.json",
+          "size_bytes": 3056,
+          "sha256": "a085b9cb534b6ebbb7bfe32bd4a08461064c0e249a15fef9ee8b4bee51c8bc8b"
+        },
+        {
+          "relative_path": "rkv/pair_identities.json",
+          "size_bytes": 74,
+          "sha256": "3e56be0ce79f0e0eceb10ccbf2b560d79817591ce2a82a1c07c14b82bd89adbf"
+        },
+        {
+          "relative_path": "rkv/progress.jsonl",
+          "size_bytes": 2887,
+          "sha256": "720ea158bff868c152366b5cca4afcbc27dcf26a65a4c36886c9db8200bcd3bd"
+        },
+        {
+          "relative_path": "rkv/replay_evidence.json",
+          "size_bytes": 201153,
+          "sha256": "5841ca8a547890936a91be80550716fd1b606db5bf087262ead74bcfc23e5ba0"
+        },
+        {
+          "relative_path": "rkv/result.json",
+          "size_bytes": 534163,
+          "sha256": "c07059443d2dbe3a8bf95f938253580a5c950e04b7d5b0b70a8f0a16dd4e902a"
+        },
+        {
+          "relative_path": "rkv/result.json.envelope.json",
+          "size_bytes": 588436,
+          "sha256": "c912d17aa5b0c4716a88ffe5c828b4848960da2b94ce9bacf775920c70751d97"
+        },
+        {
+          "relative_path": "rkv/semantic_swaps.json",
+          "size_bytes": 3,
+          "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+        },
+        {
+          "relative_path": "rkv/stderr.log",
+          "size_bytes": 553,
+          "sha256": "97e85326a70a1b0c403db00265da72ced6fd0f40aeb536c37bc98fc91b9d0a59"
+        },
+        {
+          "relative_path": "rkv/stdout.log",
+          "size_bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "relative_path": "rkv/timing.json",
+          "size_bytes": 141850,
+          "sha256": "def2ace813ab4c92de6ef1ddc82946086201f3e9c5f6692bd8f4482f9e5a2a6b"
+        }
+      ],
+      "external_archive_path": "/workspace/b2a_attempt_20260722T072823470986Z_10ac7b389ff84a9b90d39d1d65753c9a.tar.gz",
+      "external_archive_sha256": "50f1ce65599b26ab69acb43dd5c792317246ca88ffac2093ede3451034196ed6",
+      "no_credential_found": true,
+      "no_file_over_github_safety_limit": true,
+      "model_config_manifest_hashes": {
+        "config_hash": "e8693cc5106ebcf6d2f8d942deefc211156af573c40d5249dbc95f8c8c7f3429",
+        "manifest_hash": "e202f81747c18c0d70cf2fce6a890a36146612bb7580fa47a9010f14fa28ca93",
+        "preflight_config_hash": "e8693cc5106ebcf6d2f8d942deefc211156af573c40d5249dbc95f8c8c7f3429",
+        "preflight_manifest_hash": "e202f81747c18c0d70cf2fce6a890a36146612bb7580fa47a9010f14fa28ca93"
+      },
+      "model": {
+        "name": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        "revision": "6a6f4aa4197940add57724a7707d069478df56b1"
+      },
+      "dataset": {
+        "repo": "HuggingFaceH4/MATH-500",
+        "revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be"
+      },
+      "failure_reason": "ValueError: runtime projection requires exactly 12 B2A real-pair durations",
+      "completion": {
+        "artifact_path": null,
+        "attempt_id": "10ac7b389ff84a9b90d39d1d65753c9a",
+        "exit_code": null,
+        "finished_at": "2026-07-22T07:30:22.558173+00:00",
+        "gate_passed": null,
+        "outcome": "exception"
+      },
+      "notes": "Preflight passed (single RTX 3090, CUDA 12.4, driver 560.35.03). Both FullKV and R-KV workers completed process execution (return code 0 each), but the coordinator crashed in build_runtime_projection: 'ValueError: runtime projection requires exactly 12 B2A real-pair durations'. Root cause (established in Section 4 of this task): the frozen one-example row produced 0 compaction events (prompt=105 tokens, generated=449 tokens, processed length ~554, well under R-KV budget=1024), so zero real pairs were ever produced. This is a scientific ineligibility (no eviction occurred, causal-swap hypothesis untested), not a coordinator software defect by itself -- the defect was that this condition raised an uncaught exception instead of a clean gate_failed outcome. artifact_path=null, gate_passed=null, outcome='exception'. No scientific result was produced or claimed."
+    }
+  ]
+}

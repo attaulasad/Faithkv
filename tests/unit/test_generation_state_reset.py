@@ -3,6 +3,8 @@ here with both Qwen2-shaped and Llama-shaped fake model objects (identical
 attribute names, per third_party/R-KV/HuggingFace/rkv/modeling.py's three
 *Attention_init functions) -- no real model or GPU required.
 """
+import torch
+
 from kvcot.generation.state import reset_patched_state
 
 
@@ -108,3 +110,26 @@ def test_reset_returns_a_fresh_cache_via_the_factory():
     sentinel = object()
     result = reset_patched_state(model, fresh_cache_factory=lambda: sentinel)
     assert result is sentinel
+
+
+def test_reset_patched_state_never_resets_cuda_peak_memory_stats(monkeypatch):
+    """B1 execution-boundary closure §4: `reset_patched_state` owns MODEL
+    and CACHE state only -- it must never touch CUDA peak-memory
+    measurement state (that is exclusively the caller's responsibility,
+    `kvcot.discovery.b2a_workers.run_fullkv_worker`/`run_rkv_worker`'s own
+    explicit reset). This machine has no CUDA device, so
+    `torch.cuda.is_available()` monkeypatched to `True` proves the function
+    body itself contains no reset call -- not merely that the reset never
+    ran because CUDA was unavailable here."""
+    calls: list[str] = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda *a, **kw: calls.append("reset"))
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda *a, **kw: calls.append("synchronize"))
+
+    model = _FakeCausalLM(n_layers=2)
+    reset_patched_state(model, fresh_cache_factory=lambda: object())
+
+    assert calls == [], (
+        "reset_patched_state must never call torch.cuda.reset_peak_memory_stats() or "
+        "torch.cuda.synchronize() -- it owns model/cache state only"
+    )

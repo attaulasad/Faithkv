@@ -1,9 +1,813 @@
 # Changelog
 
+## 2026-07-22 — B2A-R2 forensic pair-record persistence repair, audit round 3 (CPU-ONLY; B2A-R3/B2B REMAIN BLOCKED)
+
+An independent audit found round 2 (below) correctly gated
+`completion.json` on pair-artifact verification but never propagated that
+result to `payload["passed"]` (`final.json`, computed earlier from only
+the legacy and final gates and never updated), `B2ACalibrationArtifact`
+(exposed no pair-artifact outcome), or `kvcot.cli.cmd_b2a_calibrate`
+(independently recomputed a two-gate `overall_passed`, ignoring
+pair-artifact verification -- could print `passed=True`/return exit `0`
+while `completion.json` said `gate_failed`/`2`). Fixed:
+
+- `run_b2a_calibration` computes `overall_passed`/
+  `scientific_pair_artifacts_verified` ONCE, before `payload` is built;
+  `payload["passed"]` is set from it directly, never recomputed
+  separately from `completion.json`.
+- `kvcot.discovery.attempt_verification.verify_pair_record_population`
+  (new): the in-memory-only population/identity checks, extracted so the
+  `attempt_directory is None` path (helper/test callers only -- production
+  `--execute` always supplies a directory) is never silently treated as
+  "successfully verified" -- it is still genuinely checked against the
+  worker's reported result.
+- `B2ACalibrationArtifact` gained `overall_passed`,
+  `scientific_pair_artifacts_verified`, `pair_record_verification_reasons`
+  -- populated once at the single return site, never reconstructed by a
+  caller.
+- `kvcot.cli.cmd_b2a_calibrate` now reads `overall_passed =
+  artifact.overall_passed` instead of recomputing a two-gate result; on
+  failure it also prints the pair-artifact verification reasons.
+- New/updated tests: `tests/unit/discovery/test_b2a_execute_coordinator.py`
+  (strengthened shared assertions across all six corruption scenarios plus
+  a new no-attempt-directory test) and
+  `tests/unit/test_cli_b2a_calibrate.py` (an isolated-pair-artifact-failure
+  case returning exit code 2, a full-pass case, and a parametrized
+  cross-surface invariant test; two pre-existing fakes updated for the new
+  required fields).
+- No GPU, no inference, no re-run, no change to `configs/lock.yaml`, the
+  R-KV revision, B2A-R2's frozen verdict, or
+  `FINAL_MANDATORY_GATE_CONDITIONS`. Full detail:
+  `docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md` §11.
+
+```text
+B2A-R2 FORENSIC CLOSURE VERDICT:
+PAIR-RECORD PERSISTENCE REPAIRED -- READY FOR INDEPENDENT REVIEW; B2A-R3/B2B REMAIN BLOCKED
+```
+
+## 2026-07-22 — B2A-R2 forensic pair-record persistence repair, audit round 2 (CPU-ONLY; B2A-R3/B2B REMAIN BLOCKED)
+
+An independent audit found round 1 (below) left `verify_pair_record_artifacts`
+**never-fatal**: its result was recorded but did not affect `overall_passed`,
+`exit_code`, or `completion.json`'s outcome, so a future V2 attempt could
+still be reported successful with missing/incomplete/duplicated/mismatched/
+corrupt pair-record artifacts. Fixed:
+
+- `kvcot.discovery.b2a_execute.run_b2a_calibration` now computes
+  `scientific_pair_artifacts_verified = isinstance(rkv, RKVWorkerResultV2)
+  and pair_record_verified` and ANDs it into `overall_passed` as a third,
+  independent gate layer (alongside the legacy and final gates) -- never
+  folded into the frozen `FINAL_MANDATORY_GATE_CONDITIONS` tuple, which is
+  unmodified. A failure now produces `exit_code=2`,
+  `outcome="gate_failed"`, with every reason preserved in `final.json`.
+- `kvcot.discovery.b2a_workers.parse_rkv_worker_result` now dispatches on
+  an explicit `schema_version` first (present and `"rkv_worker_result.v2"`
+  -> must validate as V2 or raise; present and anything else -> raises
+  `UnknownRKVWorkerResultSchemaVersion`; absent -> the original structural
+  fallback) -- a payload labeled V2 but missing `pair_records` can no
+  longer silently pass as a legacy V1 result.
+- Ten new coordinator-level tests
+  (`tests/unit/discovery/test_b2a_execute_coordinator.py`) assert the
+  COORDINATOR's outcome (`overall_passed`, exit code, `completion.json`),
+  never only the standalone verifier's return value, for: valid artifacts
+  (control), missing `pair_records.json`, missing
+  `scientific_summary.json`, an incomplete population, a duplicate
+  identity, a `completed_pair_identities` mismatch, a corrupted summary,
+  and a mislabeled V2 payload missing `pair_records`.
+- No GPU, no inference, no re-run, no change to `configs/lock.yaml`/R-KV
+  revision/B2A-R2's frozen verdict/`FINAL_MANDATORY_GATE_CONDITIONS`. Full
+  detail: `docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md` §10.
+
+```text
+B2A-R2 FORENSIC CLOSURE VERDICT:
+PAIR-RECORD PERSISTENCE REPAIRED -- READY FOR INDEPENDENT REVIEW; B2A-R3/B2B REMAIN BLOCKED
+```
+
+## 2026-07-22 — B2A-R2 forensic pair-record persistence repair (CPU-ONLY, NO GPU/RE-RUN; B2A-R3/B2B REMAIN BLOCKED)
+
+A post-run audit of the preserved B2A-R2 archive (recorded below, "Record
+B2A-R2 calibration result") found that the archive's "full per-pair
+evidence" claim was too broad: execution accounting, pair identities, and
+semantic-mutation/parity evidence survived, but the twelve real
+interventions' scientific outcomes -- `swap_gain` and the 48-value
+`baseline_per_token_nll`/`swapped_per_token_nll` arrays -- were never
+exported by `kvcot.discovery.b2a_workers.RKVWorkerResult` and cannot be
+recovered from the archive (the GPU instance that produced them is gone;
+no value is estimated, inferred from identities, or backfilled anywhere in
+this repair). B2A-R2's frozen mechanical/runtime verdict is unchanged:
+`B2A-R2 FINAL VERDICT: FAIL -- B2B BLOCKED` (5.01 projected GPU-hours vs.
+the 4.00-hour limit) -- no causal-mismatch conclusion can be drawn from
+B2A-R2's per-pair science, because that science was never durably
+recorded in the first place.
+
+- **Version-aware schema repair.** `RKVWorkerResult` split into
+  structurally-versioned `RKVWorkerResultV1` (the original, unmodified
+  shape -- kept so an already-archived legacy result blob remains
+  parseable for historical integrity checking, never fabricating a field
+  it never had) and `RKVWorkerResultV2` (adds a **required**
+  `pair_records: list[SwapPairRecord]` field -- a payload omitting it now
+  fails validation outright). `RKVWorkerResult` is now an alias for V2;
+  every current/future production construction requires `pair_records`
+  explicitly. `run_rkv_worker`'s single return statement now passes
+  `pair_records=list(example_result.pair_records)`, read from the same
+  in-memory population every other field on that return already reads
+  from -- never reconstructed from identities or summaries. Dispatch
+  (`parse_rkv_worker_result`) and classification
+  (`classify_pair_record_availability`) are structural (presence/absence
+  of the `pair_records` key), never attempt-ID- or SHA-based.
+- **New durable artifacts.** Every future successful V2 R-KV worker run
+  that preserves an attempt directory now atomically writes
+  `rkv/pair_records.json` (the canonical, complete serialized
+  `SwapPairRecord` population) and `rkv/scientific_summary.json` (a new
+  pure-Python `kvcot.discovery.scientific_summary.build_scientific_summary`
+  -- real/no-op counts, positive-gain counts, median/mean/min/max swap
+  gain, and a dependency-free tie-aware Spearman correlation between
+  `score_margin_e_minus_r` and `swap_gain`; every statistic is `null`,
+  never a fabricated `0.0`, when zero valid real records exist). Both
+  files are included in the coordinator's final reference manifest and
+  hash-verified exactly like every other attempt artifact
+  (`kvcot.discovery.attempt_artifacts`'s semantic-role map extended, never
+  special-cased by filename elsewhere).
+- **Partial-failure path.** `kvcot.discovery.worker_partial_evidence
+  .PartialWorkerEvidence` gained a `pair_records` field -- exactly the
+  records that genuinely completed before a failure, never padded toward
+  12 or 13, honestly empty for a failure before any pair evaluation began.
+- **Dedicated verification.** New, deliberately standalone
+  `kvcot.discovery.attempt_verification.verify_pair_record_artifacts` --
+  kept separate from the pre-existing, shared `verify_attempt_artifacts`
+  (whose own tests use minimal, non-B2A-shaped fake pair identities
+  unrelated to this repair) -- checks population completeness (12 real +
+  1 no-op), per-record typed validity, identity agreement with
+  `completed_pair_identities`, no failed identity double-counted as
+  completed, and exact `scientific_summary.json` recomputation. Wired into
+  `kvcot.discovery.b2a_execute.run_b2a_calibration` as additional,
+  **never-fatal** evidence (`payload["pair_record_verification"]`) -- adds
+  no new `FINAL_MANDATORY_GATE_CONDITIONS` entry and does not change
+  B2A-R2's already-recorded outcome.
+- **Documentation.** New
+  `docs/B2A_R2_FORENSIC_PAIR_RECORD_PERSISTENCE_2026-07-22.md`.
+  `docs/B2A_R2_RESULT_2026-07-22.md` gained a dated §8 clarification (the
+  quoted finding above) and a documentation-arithmetic correction: its
+  peak-memory table had labeled decimal GB (bytes / 1000^3) as GiB;
+  corrected to true GiB (bytes / 1024^3) with raw byte counts preserved,
+  plus an explicit one-time-setup + per-example + per-pair projected-
+  runtime breakdown -- neither correction changes `runtime_within_limit`'s
+  outcome or the frozen verdict. `README.md`/`PLAN.md` status sections
+  updated to stop reading as if B2A has never executed (it has, twice:
+  B2A-R1 and B2A-R2) while distinguishing that history from the
+  still-unauthorized B2A-R3/B2B.
+- Tests: new `tests/unit/discovery/test_pair_record_persistence.py`
+  (serialization/round-trip, structural version dispatch, tie-aware
+  Spearman edge cases, scientific-summary recomputation, coordinator
+  persistence via a faked subprocess runner, every listed
+  `verify_pair_record_artifacts` failure mode, partial-failure/pre-pair-
+  failure paths). Pre-existing fixtures that construct a full
+  `RKVWorkerResult` payload
+  (`tests/unit/discovery/test_b2a_workers.py`,
+  `tests/unit/discovery/test_b2a_execute_coordinator.py`) updated in place
+  to supply the new required field.
+- No change to `configs/lock.yaml`, `third_party/R-KV`, the pinned R-KV
+  revision, budget, divide length, bridge token count, scored horizon, or
+  any frozen model/dataset/generation setting. No GPU used. No model
+  inference. No B2A-R3 execution. No B2B execution. No FaithKV method.
+
+```text
+B2A-R2 FORENSIC CLOSURE VERDICT:
+PAIR-RECORD PERSISTENCE REPAIRED -- READY FOR INDEPENDENT REVIEW; B2A-R3/B2B REMAIN BLOCKED
+```
+
+## 2026-07-22 — B2A-R1 failure closure and B2A-R2 pre-registration (B2A-R1 CONSUMED, ZERO EVENTS; B2A-R2 PRE-REGISTERED, NOT YET EXECUTED)
+
+B2A-R1 (the single attempt CLAUDE.md §1c authorized) executed against
+`example_index=0`: FullKV/R-KV inference began (both workers returned code
+0), so the attempt is consumed, but it produced zero R-KV compaction events
+(prompt=105, generated=449, budget=1024 never reached) -- an ineligible
+calibration, not a scientific result. Full rationale, evidence, and the
+pre-registered B2A-R2 procedure:
+`docs/B2A_R1_FAILURE_AND_B2A_R2_PROTOCOL_2026-07-22.md`; CLAUDE.md gained
+§1d (no existing section edited or weakened). Both preserved B2A-R1
+attempts (preflight-only and consumed) are indexed in
+`docs/evidence/B2A_R1_ATTEMPT_INDEX_2026-07-22.json`; their raw artifact
+directories were moved outside the repository after byte-for-byte archive
+verification (never committed).
+
+- **Coordinator repair (H3, test-harness/coordinator, not a scientific
+  change):** `build_runtime_projection` no longer raises on an insufficient
+  real-pair count -- it now resolves to an explicit `available=False`
+  outcome (never a fabricated `0`/`inf`/`4.00`-hour stand-in), and
+  `evaluate_b2a_gate` fails `runtime_within_limit` closed from that `None`.
+  The exactly-12 "available" path's arithmetic is unchanged. New tests in
+  `tests/unit/discovery/test_execution_measurement.py`,
+  `test_b2a_contract.py`, `test_b2a_execute_coordinator.py` (including a
+  full coordinator-level reproduction of the actual zero-event failure,
+  proving a clean `gate_failed`/`exit_code=2`/verified-`final.json` outcome
+  instead of an uncaught exception).
+- **Answer-verifier repair (confirmed defect, general fix):** audited
+  directly against the installed `math-verify==0.9.0` package using the
+  exact B2A-R1 observed strings. Root cause: `math_verify.parse`'s
+  non-anchored fallback extraction is unreliable for compound (bare,
+  non-`\boxed{}`) expressions. Fix: `Math500AnswerVerifier` now re-wraps
+  both the extracted answer and the gold answer in `\boxed{...}` before
+  verification -- confirmed whitespace-insensitive, `\left`/`\right`-
+  insensitive, order-preserving, double-wrap-safe, and not tuned to the
+  observed answer (no hard-coding, no regex-number matching). 12 new tests
+  in `tests/unit/discovery/test_math500_verification.py`.
+- **B2A-R2 candidate manifest** (`configs/discovery/b2a_r2_candidate_manifest.json`,
+  new `kvcot.discovery.b2a_r2_candidates` module): 12 level-5 MATH-500 rows
+  from the same pinned dataset revision, ordered by a fixed content-derived
+  hash, pre-registered before any qualification inference. Canonical hash
+  `ac2dcc4550a89f2cfa701acd608a8087b4a1ebaa0ea05eb15d8f71e3434ee0ec`.
+- **FullKV-only qualification** (new `kvcot.discovery.b2a_qualification`
+  module, `kvcot qualify-b2a-row` CLI command): attempts the 12 candidates
+  in committed order, R-KV never imported, stopping at the first
+  satisfying all 10 frozen conditions. Reuses (never duplicates) the
+  production FullKV natural-generation worker, a new
+  `kvcot.analysis.rkv_schedule.predicted_compaction_event_positions`
+  (extends the existing GPU-verified schedule simulator via a shared
+  internal walk), and a new `kvcot.discovery.pass1.eligible_event_positions`
+  (the position-based eligibility rule extracted from `eligible_event_ids`
+  so both share one implementation).
+- **Row freezing** (new `kvcot.discovery.b2a_r2_freeze` module): the only
+  function that may write a replacement `b2a_one_example_manifest.json`;
+  fails closed on any candidate-manifest hash mismatch, config/identity
+  mismatch, unqualified selection, or row substitution attempt.
+  `B2AOneExampleManifest`'s schema is unchanged.
+- No change to `configs/lock.yaml`, `third_party/R-KV`, the pinned R-KV
+  revision, `budget`, `divide_length`, or any parity/provenance/memory/
+  timing/device-placement gate. B2A-R2 execution itself has not yet run as
+  of this entry.
+
+## 2026-07-22 — B2A one-example GPU authorization (AUTHORIZATION ONLY — no execution recorded by this entry; B2B/method remain blocked)
+
+Separate, explicit, dated authorization for exactly one B2A
+(`b2a-calibrate --execute`) engineering-calibration attempt against the
+committed one-example manifest, per CLAUDE.md §1a/§1b's requirement that
+B2A needs its own future authorization. Full rationale and evidence:
+`docs/B2A_ONE_EXAMPLE_GPU_AUTHORIZATION_2026-07-22.md`; CLAUDE.md gained
+§1c and §4c (no existing section edited or weakened).
+
+- CPU CI green at `a4f6e4298eba10d037ca7e6570fe6d69aad2472f` (run
+  [29892965613](https://github.com/asad073-ui/Faithkv/actions/runs/29892965613)),
+  bounded GPU mechanical validation complete (12/14 collected GPU tests
+  passing; the two `test_probe_stability_gpu.py` failures are preserved,
+  unmodified historical Stage 0 results for the archived Qwen-1.5B/GSM8K
+  protocol and do not gate this disjoint Llama-8B/MATH-500 mechanism).
+- Authorizes exactly one execution attempt, one frozen example, hard limits
+  of 22 GiB peak tracked memory and 4.00 projected GPU-hours, one RTX 3090,
+  no offload. Does not authorize B2B, a 12-example pilot, a second attempt,
+  a threshold change, or any method implementation.
+- No source, test, config, manifest, or submodule change in this entry —
+  documentation only.
+
+## 2026-07-21 — Final bounded B1 independent-audit repair, round 4: F1–F10 (INCOMPLETE — B2A/GPU remain blocked; no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; forward-only from `419bbc0020b374d6c4a2085a7a04ff293d7ec680`)
+
+Fourth forward-only repair pass. Round 3's claim that only documentation
+remained was an overclaim: an independent audit verified nine functional
+execution-boundary defects (F1–F9) plus two formalities (F10). All ten are
+repaired. Authoritative detail: `docs/B1_INDEPENDENT_AUDIT_REPAIR.md` §8/§9;
+ledger: `docs/B1_FINAL_REPAIR_LEDGER.md` "Round 4".
+
+- **F1** — typed `WorkerExecutionState`; `failing_stage` is now the stage
+  that was *executing* at failure (never the last completed one);
+  `attempt_id`/`last_completed_stage` propagate into failure envelopes.
+- **F2** — `capture_partial_evidence` now preserves every available field
+  of an aborted example (failed/attempted/completed pair identities, pair
+  failure details, minimized targets, pre-branch guard evidence, no-op
+  identity/evidence when constructed, replay evidence, Pass-1/Pass-2 token
+  and compaction evidence, attrition, abort type/message/OOM) via the SAME
+  `b2a_evidence` helpers the success path uses — one derivation, never two.
+- **F3** — `MemoryPhaseEvidence.failure_message` added; failed measured
+  operations preserve their full record.
+- **F4** — `attempt_verification` is now the one authoritative
+  successful-attempt verifier: top-level artifact parsing/cross-checks,
+  exact worker command identity (incl. `text: True`), saved-vs-supplied
+  result equality, typed envelope/result validation, the new
+  coordinator-owned `process_outcome.json`, full progress-journal
+  validation (ordering, multiplicities, 12 unique real pairs + 1 no-op),
+  and `verify_final_reference_manifest` hash recomputation.
+- **F5** — lifecycle reordered: `completion.json` (attempt ID, outcome,
+  exit code, intended final path) is written BEFORE the reference manifest
+  and `final.json` (written LAST, excluded from its own reference set);
+  final-write failure preserves all pre-final artifacts and writes
+  `final_write_failure.json`; `invocation.json` gains a real UTC
+  `started_at`; the CLI completion write is a write-if-missing fallback.
+- **F6** — provenance completed: origin-branch SHA, three-way required
+  ancestry (`419bbc0`/`7ef13ae`/`3c853cf` — never only `3c853cf`), full
+  system block (OS/kernel/arch/CPU/logical CPUs/total physical RAM via a
+  CPU-safe chain/disk free), software versions, GPU-evidence
+  cross-references.
+- **F7** — new mandatory final gate `no_offload_and_placement_verified`:
+  explicit `requested_device == "cuda:0"` in device evidence (three-way)
+  and complete CPU/disk/meta/offload/off-index placement rejection from
+  both workers' raw parameter-placement evidence (`unique_devices`).
+- **F8** — snapshot revalidation now equals the resolver: exported
+  inventory hash/sizes/count, index content hashes, referenced/missing
+  shards, recognized weights; raw revalidation plus on-disk recomputation
+  when readable (never network).
+- **F9** — exact timing/memory multiplicities (singletons ×1, capture ×3,
+  12 unique pair phases ×1 each with every subphase ×1); decode/prefill
+  counts agree with raw actual-call evidence; duplicates and
+  failed-as-completed records rejected.
+- **F10** — `docs/B1_TOKENIZER_ONLY_VALIDATION_CLARIFICATION.md` (H4.7)
+  and `docs/B1_FINAL_EXECUTION_CALL_GRAPH.md` (H8.6).
+
+Validation (newly observed): compileall clean; 1,187 tests collected;
+non-GPU suite 1,173 passed / 14 deselected; both dry-runs exit 0;
+`git diff --check` clean. CI: the equivalent CPU workflow
+(`.github/workflows/cpu-tests.yml`) exists, but GitHub Actions is locked
+at the account level ("account is locked due to a billing issue") — no
+run starts, so no completed successful CI run exists; the verdict remains
+**INCOMPLETE — B2A/GPU REMAIN BLOCKED** on that sole open item.
+
+## 2026-07-21 — Independent-audit repair pass on B1, round 3: verify and close remaining round-2 gaps (INCOMPLETE — GPU/B2A/B2B remain blocked; no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; prior commit `f077314...` not reset/rebased/amended)
+
+Third forward-only repair pass, prompted by a request to VERIFY round 2's
+own "remaining gaps" list against the actual code rather than accept it as
+final. Full detail: `docs/B1_INDEPENDENT_AUDIT_REPAIR.md` §4; ledger:
+`docs/B1_FINAL_REPAIR_LEDGER.md`'s "Round 3" section.
+
+**`manifest_prepare.py`'s 3 bare `except Exception:` instances** (flagged
+"not investigated" after rounds 1-2) were read in full context and
+confirmed valid with exact proof: a weight-cache-safety-net snapshot that
+conservatively defaults to an empty set on scan failure, and two
+old-manifest-parse fallbacks that treat a non-parsing file as "not yet
+resolved" -- none silently masks a real defect.
+
+**Gate H2.2 (sub-phase timing granularity) closes.** `capture
+.capture_update_kv` gained an optional `capture_timer_fn` parameter,
+threaded through `pass2.run_pass2_capture` and `orchestrator.run_example`
+(both backward-compatible, defaulting to `None`) down to the real workers'
+`timer.measure` -- it now times exactly the real target-capture-gather +
+gather-parity + absolute-position-parity computation
+(`_build_capture_record`) under a new, accurately-named
+`capture_gather_and_parity` phase, firing once per selected target.
+
+**Gate H4.5 closes.** `_verify_resolved_prompt_identity` used to resolve
+the tokenizer via `tokenizer_name`/`tokenizer_revision` through
+`huggingface_hub`'s ordinary (potentially network-touching) lookup, never
+proven local-only despite verifying a strict local-snapshot boundary. It
+now resolves the exact local tokenizer snapshot first
+(`snapshot_boundary.resolve_local_snapshot`, the same function the workers
+use), fails closed if unavailable, and loads the tokenizer from that exact
+path with `local_files_only=True`.
+
+**Gate H6.4 closes.** Confirmed a genuine duplicate: the worker body
+already appends a live "completed" progress event for every named phase as
+it finishes; `b2a_worker_entry.py`'s success path ALSO replayed the final
+timing list and re-appended a second "completed" event for each of those
+same phases. The redundant post-hoc replay is removed.
+
+**Gate H7.4 closes.** New `attempt_verification
+.verify_progress_stage_completeness` checks a progress journal against the
+exact stage names this repository's worker bodies/entry point actually
+emit, wired into the existing artifact-content verifier.
+
+`python -m compileall src tests`: exit 0. `python -m pytest --collect-only
+-q`: 1116 tests collected. `python -m pytest -m "not gpu" -q`: 1102
+passed, 14 deselected (up from 1093; 9 new tests, zero regressions). One
+unrelated, pre-existing flake (`test_math_verifier.py
+::test_accepted_equivalences`, a subprocess-timeout-sensitive test in a
+module untouched since 2026-07-19) was observed, confirmed non-
+reproducible in isolation, and not modified. Both CLI dry-runs and
+`python -m kvcot --help` exit 0. `git diff --check`: exit 0.
+
+**B1 FINAL CPU CLOSURE VERDICT: INCOMPLETE — B2A/GPU REMAIN BLOCKED.**
+Only H4.7 (a documentation distinction) and H8.6 (a formal call-graph
+document) remain, both audit-formality items rather than functional
+defects -- an unfinished item may still not be called optional, so the
+verdict stays INCOMPLETE. No B2A result exists. No B2B result exists. No
+real CUDA timing exists. No RTX 3090 memory measurement exists. No FaithKV
+method exists. Another independent audit is required before any GPU
+authorization.
+
+## 2026-07-21 — Independent-audit repair pass on B1, round 2: close Gates H4-H8 (INCOMPLETE — GPU/B2A/B2B remain blocked; no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; prior commit `84d81a3c...` not reset/rebased/amended)
+
+Second forward-only repair pass on branch `research/b1b-r4-final-b2a-closure`,
+on top of round 1's commit (below), closing the majority of what round 1
+explicitly left open. Full detail: `docs/B1_INDEPENDENT_AUDIT_REPAIR.md`
+§3/§5; ledger: `docs/B1_FINAL_REPAIR_LEDGER.md`'s "Round 2" section.
+
+**Gate H4 (device/snapshot verification) — closed for the CPU-auditable
+path.** `kvcot.cli.cmd_b2a_calibrate --execute` used to write a trivial
+`preflight.json` literal before even checking CUDA availability, and never
+called the real device-verification function at all. It now calls
+`verify_single_rtx3090`, writes its actual result into `preflight.json`,
+and threads it into the coordinator as a third independent observation —
+`strict_device.verify_device_gate_from_raw_evidence` now cross-checks CLI,
+FullKV, and R-KV device evidence together (backward compatible: `None`
+preserves the original two-way check). New `snapshot_boundary
+.verify_snapshot_evidence_raw` re-validates a worker-reported snapshot's
+full content (repository identity, exact-SHA revision agreement,
+`local_files_only`, non-empty inventory, no incomplete/lock files,
+required files present) instead of trusting a bare `verified=True` plus
+one revision-string comparison.
+
+**Gate H5 (pre-branch memory estimate) — closed.** `check_pre_branch_memory`
+no longer takes an opaque caller-computed byte total — it derives K/V
+growth across the full bridge-plus-scored-token branch horizon, a
+conservative reallocation-headroom term, an explicit (not omitted)
+zero for R-KV's fixed-size query-cache window, and position-tracking
+growth, all from the snapshot's own real tensor shapes and the frozen
+horizon constants. Every component is independently visible on
+`PreBranchMemoryEvidence`.
+
+**Gate H6 (artifact content verification) — closed.** New module
+`kvcot.discovery.attempt_verification`: `verify_attempt_artifacts` parses
+every required pre-final artifact and cross-validates envelope/result
+hash agreement, timing/memory/pair-identity/semantic-swap/replay-evidence
+mirrors against their source, command correctness, and progress-journal
+validity — replacing the pure-existence `required_attempt_files
+.issubset(existing)` check the hostile audit flagged verbatim.
+`verify_worker_envelopes` replaces a bare `.is_file()` check similarly.
+
+**Gate H7 (provenance/progress lifecycle) — immutable start/end split and
+device-preflight artifact closed.** `cmd_b2a_calibrate --execute` now
+writes a separate, immutable `completion.json` (finished-at timestamp,
+outcome, exit code, artifact reference) in a `finally` block, guaranteed
+to exist whether the command passes, fails its gate, or crashes —
+`invocation.json` is never rewritten. `preflight.json` (from Gate H4) now
+doubles as the dedicated post-CUDA device-preflight artifact this gate
+asked for, distinct from the CPU-safe `provenance.json` written earlier.
+
+**Gate H8.2 (contract-consistency test) — built.** New
+`test_contract_consistency.py` (10 tests): every required timing phase is
+genuinely emitted in production code; `capture_and_parity` is permanently
+barred from reappearing; the dry-run's printed gate list exactly matches
+`FINAL_MANDATORY_GATE_CONDITIONS`; every mandatory gate has a real,
+directly-executed negative test; every attrition `STAGE_*` constant is
+registered in `STAGE_ORDER` in both directions; `WorkerEnvelope`'s
+failure fields match what `PartialWorkerEvidence` can populate; the
+mismatch schema is frozen; the old existence-only artifact check is
+barred from reappearing as code.
+
+**Not repaired this round (explicit):** H2.2's finer sub-phase
+granularity inside Pass 2's capture/parity work (assessed as requiring
+deep instrumentation surgery inside `pass2.py`/`capture.py`'s per-layer
+hook); H4.5/H4.7 (no new proof that prompt-tokenizer resolution can't
+fall back to network; tokenizer-only-validation distinction not
+re-examined); H6.4 (no progress-journal live-vs-materialized duplication
+detector); H7.4 (no dedicated full-stage-list completeness verifier);
+H8.6 (no standalone formal call-graph document); `manifest_prepare.py`'s
+3 pre-existing bare `except Exception:` instances remain uninvestigated.
+
+`python -m compileall src tests`: exit 0. `python -m pytest --collect-only
+-q`: 1107 tests collected. `python -m pytest -m "not gpu" -q`: 1093 passed,
+14 deselected (up from 1039 at the start of this round — 54 new tests,
+zero regressions). Both CLI dry-runs and `python -m kvcot --help` exit 0.
+`git diff --check`: exit 0 (CRLF-normalization warnings only).
+
+**B1 FINAL CPU CLOSURE VERDICT: INCOMPLETE — B2A/GPU REMAIN BLOCKED.**
+Remaining gaps are narrow and named (listed above), not open-ended. No
+B2A result exists. No B2B result exists. No real CUDA timing exists. No
+RTX 3090 memory measurement exists. No FaithKV method exists. Another
+independent audit is required before any GPU authorization.
+
+## 2026-07-21 — Independent-audit repair pass on B1, round 1: close Gates H1-H3, partial H4 (INCOMPLETE — GPU/B2A/B2B remain blocked; no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; prior commit `7ef13ae566e...` not reset/rebased/amended)
+
+Forward-only repair on branch `research/b1b-r4-final-b2a-closure`, starting
+commit `7ef13ae566e7c3e699e5143405baf76a81078edf` (self-reported "READY FOR
+INDEPENDENT AUDIT", found **incomplete** by this independent audit). Full
+detail, evidence-based findings table, and remaining-gap list:
+`docs/B1_INDEPENDENT_AUDIT_REPAIR.md`; ledger:
+`docs/B1_FINAL_REPAIR_LEDGER.md` (new "Independent-audit repair pass"
+section, historical rows preserved).
+
+**Gate H1 (durable partial worker evidence) — complete.** Worker failure
+envelopes previously discarded ALL partial evidence unconditionally
+(`b2a_worker_entry.py`: `partial_measurements=None, determinism_policy=None`
+on any exception), because `run_fullkv_worker`/`run_rkv_worker` had no
+`try/except` around their bodies at all. New `kvcot.discovery
+.worker_partial_evidence` module (`PartialWorkerEvidence`,
+`WorkerBodyFailure`, `classify_failure` for OOM/timeout detection,
+`capture_partial_evidence` reading whatever local variables were already
+bound at the point of failure) is now threaded through both worker bodies,
+the envelope schema (new typed `failure_stage`/`last_completed_stage`/
+`is_oom`/`is_timeout` fields), and the worker-entry failure branch (correct
+ordering: durable failure event, then envelope, then environment restore).
+`kvcot.discovery.orchestrator.run_example` now catches exceptions from Pass
+2 capture and from the per-pair evaluation loop (two new attrition stages),
+returning an `ExampleResult` with `aborted=True` and every pair/attrition/
+mutation record completed before the abort preserved — plus, found by this
+pass's own hostile audit (not in the original brief), the pre-existing
+Pass-1 exception handler's bare `except Exception:` (discarding the real
+exception type/message entirely) now populates the same abort metadata.
+The coordinator (`run_both_workers_via_subprocess`) now writes a
+coordinator-authored `termination.json` on subprocess timeout or nonzero
+exit, distinguishing an externally-observed termination from a
+worker-authored failure envelope.
+
+**Gate H2 (timing semantics) — mostly complete.** The `capture_and_parity`
+timing phase measured only a post-Pass-2 call-boundary trace comparison,
+never the real capture/gather/parity work (which happens earlier, already
+timed under `rkv_pass2_prefill`/`rkv_pass2_decode`/`snapshot_creation`) —
+renamed to `call_trace_comparison`. The startup/load runtime-projection
+component summed only 2 of 5 genuinely one-time, non-overlapping,
+sequential setup phases — expanded to all 5, each listed explicitly.
+Coordinator-observed worker-process-launch timing is now measured and
+exported as a separate `process_overhead_diagnostic`, never folded into
+the existing projection formula.
+
+**Gate H3 (replay/mismatch evidence) — partial.** New `kvcot.discovery
+.mismatch.build_mismatch_record` canonical schema (matched/
+first_mismatch_index/expected_value/observed_value/expected_length/
+observed_length/mismatch_kind) replaces bare mismatch indices in
+`replay_evidence`'s four comparisons (token/logical-call/actual-call/
+compaction). `orchestrator.py`'s Pass-2-invalid path was discarding the
+actual replayed token IDs (`pass2_result.replayed_token_ids`) despite
+already having them in scope — now threaded through.
+
+**Gate H4 (device verification) — partial.** The final coordinator gate
+derived `single_rtx3090_verified` from a bare worker-reported
+`verified=True` boolean with no raw-field recomputation and no
+cross-worker agreement check — new `strict_device
+.verify_device_gate_from_raw_evidence` recomputes from raw fields
+(visible GPU count, device index, GPU name, VRAM range, driver/CUDA/cuDNN
+presence) on both workers and requires their mutual agreement.
+
+**Not repaired this pass (explicit, not claimed complete):** Gate H5's
+componentized pre-branch memory estimate (branch-horizon K/V growth,
+query-cache growth); Gate H6's content/hash-verifying attempt-artifact
+lifecycle (`attempt_files_verified`/`worker_envelopes_verified` remain
+existence-only `issubset`/`.is_file()` checks); Gate H7's immutable
+start/end artifact split and dedicated device-preflight artifact; Gate
+H4's CLI preflight artifact and typed snapshot-evidence re-validation;
+Gate H8's unified contract-consistency test. All are GPU-execution-time
+defects unreachable on this CPU-only build, documented as open in
+`docs/B1_INDEPENDENT_AUDIT_REPAIR.md` §4.
+
+`python -m compileall src tests`: exit 0. `python -m pytest --collect-only
+-q`: 1053 tests collected. `python -m pytest -m "not gpu" -q`: 1039 passed,
+14 deselected (up from 998 passed at the starting commit — 41 new tests,
+zero regressions). Both `kvcot prepare-b2a-manifest --dry-run` and `kvcot
+b2a-calibrate --dry-run` exit 0 with no CUDA/model execution. `git diff
+--check`: exit 0 (CRLF-normalization warnings only).
+
+**B1 FINAL CPU CLOSURE VERDICT: INCOMPLETE — B2A/GPU REMAIN BLOCKED.** No
+B2A result exists. No B2B result exists. No real CUDA timing exists. No
+RTX 3090 memory measurement exists. No FaithKV method exists. Another
+independent audit is required before any GPU authorization.
+
+## 2026-07-20 — Final B1 CPU execution-boundary closure (GPU/B2A/B2B remain blocked)
+
+Forward-only work from ancestor `3c853cff34e52d792cd0e5a96d1a5369f17f8047`
+closes the remaining CPU-auditable boundary: compact selected-only capture,
+single-live-branch ownership transfer, complete controlled worker success,
+synchronized timing and phase-owned memory, load-inclusive projection,
+strict RTX-3090/local-snapshot loaders, raw scientific identities/traces,
+29 explicit final gates, and immutable attempt artifacts/provenance. A real
+isolated tokenizer-only validation succeeded without any weight file. See
+`docs/B1_FINAL_CPU_CLOSURE.md` and `docs/B1_FINAL_REPAIR_LEDGER.md`.
+Compilation passed, 1,012 tests collected, and the complete non-GPU suite
+passed: 998 passed, 14 deselected. Both required CLI dry-runs passed.
+
+**B1 FINAL CPU CLOSURE VERDICT: READY FOR INDEPENDENT AUDIT — B2A/GPU
+REMAIN BLOCKED.**
+
+No B2A result exists. No B2B result exists. No RTX 3090 timing exists. No
+FaithKV method exists. Independent audit is required before any GPU
+authorization.
+
 Frozen settings (`configs/lock.yaml`, and Sections 1/4/8/9 mirrored into
 `CLAUDE.md`) may only change via a dated entry here, added **before** the
 run that depends on the change (per the build brief). Entries are ordered
 newest first.
+
+## 2026-07-20 — Phase B1 execution-boundary closure: focused completion pass on B1B-R4.1 (no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; prior commit `4e45beac...` not reset/rebased/amended)
+
+Run on branch `research/b1b-r4-final-b2a-closure`, a forward completion
+commit on top of `4e45beac1912a0a7852a034420732a10d0d703e7` ("Finish B1
+final GPU boundary closure", already pushed and self-recorded INCOMPLETE).
+Full detail: `docs/B1_EXECUTION_BOUNDARY_FINAL_CLOSURE.md`.
+
+**Authorization.** No new `CLAUDE.md` exception — stays inside the
+CPU-side harness architecture already authorized by §1b/§4b. No model
+weights, no CUDA, no Vast.ai activity of any kind.
+
+An evidence-based audit (16 numbered claims, all 16 confirmed against the
+actual current code before any repair began) found and this pass repaired
+**five confirmed defects**, each with new CPU tests: (1)
+`kvcot.generation.state.reset_patched_state` no longer calls
+`torch.cuda.reset_peak_memory_stats()` itself — the R-KV worker's Pass-2
+state construction was silently wiping Pass 1's already-accumulated peak
+partway through measurement; peak-memory reset is now owned exclusively by
+each caller's own measurement boundary, with the primary pipeline
+(`kvcot.cli.cmd_generate`, `kvcot.generation.replay.replay_and_snapshot`)
+gaining an explicit, behavior-preserving replacement reset. (2) Baseline
+and swapped branch evaluation are now released down to a compact
+`kvcot.discovery.branch_eval.CompactBranchScore` (per-token NLL, mean,
+hash) the instant each branch's evaluation finishes — the prior pass
+released the snapshot clone but left `evaluate_branch`'s full returned
+result (including a real-model `_LiveBranchState`'s complete live cache)
+reachable through the swapped branch's entire construction; proven via a
+`weakref` to the exact live-cache object. (3) The semantic swap on an
+already-owned snapshot clone no longer clones the cache a second time
+(`kvcot.discovery.swap.apply_within_head_swap_owned`, dispatched via a new
+`owned=True` parameter defaulting to the prior cloning behavior for every
+other caller). (4) `semantic_swap_parity`'s gate derivation changed from
+absence-of-a-failure-record (vacuously true for a worker that never
+reached the check for any pair at all) to positive
+`checks_attempted == checks_passed == checks_required(12)` counts,
+threaded through `PairBuildResult`/`ExampleResult`/`RKVWorkerResult`. (5)
+Three new gate conditions (`unique_real_pair_count_exact`,
+`events_with_four_unique_pairs_exact`, `no_duplicate_pair_identity`)
+replace a bare per-event count (`count >= 4`) that could not distinguish
+four genuinely distinct `(event, layer, head, candidate, donor)` identities
+from the same identity recorded more than once.
+
+Hostile self-audit (`docs/B1_EXECUTION_BOUNDARY_FINAL_CLOSURE.md` §4): a
+forbidden-pattern grep over only the newly-ADDED lines found every hit
+already accounted for (the two intentional replacement CUDA resets, two
+`count >= 4` mentions inside comments describing the repaired defect, and
+one pre-existing broad `except` unchanged in kind). A full re-read of the
+reordered `build_swap_pair_record` found no leftover duplicate code from
+the reordering.
+
+`python -m pytest -m "not gpu" -q`: 970 passed, 0 failed, 14 deselected
+(gpu-marked); 984 tests collected total. Both `kvcot prepare-b2a-manifest
+--dry-run` and `kvcot b2a-calibrate --dry-run` still run to completion
+unchanged (no model loaded, no CUDA required; printed plan is
+byte-identical to the prior pass's, since none of the still-open gaps that
+would alter it were closed this pass).
+
+**This pass explicitly did NOT close everything it was given** —
+`docs/B1_EXECUTION_BOUNDARY_FINAL_CLOSURE.md` §3 lists every remaining gap
+plainly, largest first: `Pass2Result.target_captures` still retains the
+FULL capture record (complete pre-call/returned K/V tensors) through all
+12+1 pair evaluations (`MinimizedTargetEvidence` is evidence-only, never
+substituted into the actual pair-building loop) — the single largest
+remaining memory-safety gap, comparable in scope to everything fixed this
+pass combined; no CUDA-synchronized timing abstraction and no
+model-load-inclusive runtime projection; VRAM still has one reset spanning
+the whole worker, no load-vs-inference phase split, no pre-branch memory
+guard; the full 12-real+1-no-op `run_rkv_worker`-level CPU success test
+still does not exist (an already-acknowledged deferral, still open); no
+Hub snapshot resolver and no real-tokenizer network validation was run;
+batch size still derived from an independently-constructed tensor;
+`device_map="auto"` still used in the exercised path, no strict
+single-GPU load path; no immutable attempt-directory architecture, worker
+envelope still non-atomic and still never cross-referenced into the final
+artifact; no expanded provenance export; no contract-consistency test.
+**Status: B1 EXECUTION-BOUNDARY CLOSURE VERDICT: INCOMPLETE — B2A/GPU
+REMAIN BLOCKED.** No discovery result exists. No method exists. GPU, B2A,
+and B2B remain fully unauthorized by this entry.
+
+## 2026-07-20 — Phase B1B-R4.1: focused completion amendment on B1B-R4 (no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; prior commit `4d7971b7...` not reset/rebased/amended)
+
+Run on branch `research/b1b-r4-final-b2a-closure`, a forward completion
+commit on top of `4d7971b7b09c004c4670bfde3939416ab550ea71` ("Complete
+B1B-R4 final B2A closure", already pushed). Full detail:
+`docs/B1B_R4_1_FINAL_CLOSURE.md`.
+
+**Authorization.** No new `CLAUDE.md` exception — stays inside the
+CPU-side harness architecture already authorized by §1b/§4b. No model
+weights, no CUDA, no Vast.ai activity of any kind.
+
+An evidence-based audit of the ACTUAL current code (not the assumed defect
+list of the originating task brief — several assumed defects, e.g.
+non-Pydantic worker-result schemas, turned out already fixed) found and
+this pass repaired **seven confirmed defects**, each with a new CPU test:
+(1) `kvcot.discovery.pass2.run_pass2_capture` no longer maintains its own
+mutable `LayerProvenance` shadow track for the real-model path —
+`kvcot.discovery.real_model_adapter.RealModelState` is now the sole
+authoritative provenance owner, exposing a `projected_pre_event_position_
+map` derived via a disposable `LayerProvenance.clone()` (never
+re-implementing position arithmetic) from pending-position registration
+(`register_pending_fed_positions`/`clear_pending`, cleared on any forward
+exception before a partial commit); the CPU synthetic-harness path is
+unchanged. This pass's own hostile review of its new integration test
+found (and documented, not silently papered over) a genuine pre-existing
+boundary-condition ambiguity in the ported R-KV bookkeeping formula
+(`evicted_token_num` staying 0 across a reorder-without-shrink eviction),
+orthogonal to the repair. (2) `selected_compaction_events` (feeding the
+`selected_event_count_exact` gate) is now derived from the frozen Pass-1
+plan (`ExampleResult.selected_event_ids`, populated once, right after
+`build_pass1_plan` succeeds) instead of counting distinct event IDs across
+surviving pair records — the prior derivation silently under-counted
+whenever every pair for a selected event failed attrition; a new
+`events_with_at_least_one_completed_real_pair` field keeps the weaker,
+completion-based quantity separately named. (3) `pair_failure_details` was
+always an empty tuple in the production R-KV worker path (a parameter
+existed but was never actually threaded through) — `kvcot.discovery
+.orchestrator.run_example` now builds one structured
+`kvcot.discovery.attrition.PairFailureDetail` (event/layer/head/candidate/
+donor/kind/stage/detail/elapsed-time) per failed pair, live. (4)
+`kvcot.discovery.capture_minimize.assert_minimized_bound` had zero call
+sites outside its own test file — `run_example` now calls it on every
+target it builds. (5) Baseline and swapped branch snapshot clones are now
+released sequentially (baseline cloned, evaluated, explicitly `del`eted in
+a `finally` — covering the exception path — BEFORE the swapped clone is
+even created) instead of both being held live for the whole pair-build
+call; proven via a `weakref` to the actual clone object. (6)
+`kvcot.discovery.pipeline.build_swap_pair_record`'s `parity_check_passed`/
+`net_physical_bytes_changed` were literal `True`/`0` despite
+`apply_semantic_within_head_swap` already returning a real, unused
+`SemanticSwapResult` — a direct instance of this project's own forbidden-
+pattern list; both are now derived from that report (provenance/kept-index
+bookkeeping updates mandatory whenever present, gated independently since
+the CPU synthetic harness's snapshots carry one without the other; byte
+delta genuinely computed, not asserted). (7) `PYTHONHASHSEED` is now set on
+the worker subprocess's environment BEFORE launch
+(`kvcot.discovery.b2a_workers._worker_subprocess_env`/`_launch_worker`,
+reading `framework_seed` off the same frozen config the worker itself
+loads) — `random.seed()` inside the already-running worker process cannot
+retroactively change that process's already-fixed hash seed.
+
+**One gate-condition addition:** `semantic_swap_parity`, a new named
+`MANDATORY_GATE_CONDITIONS` entry, derived from whether the R-KV worker
+reported any `pair_failure_details` entry with the new
+`STAGE_SEMANTIC_SWAP_PARITY_FAILURE` stage — proven (in
+`test_b2a_execute_coordinator.py`) to fail the gate independently, with
+every count-based condition still passing.
+
+Hostile self-audit (`docs/B1B_R4_1_FINAL_CLOSURE.md` §4): a forbidden-
+pattern grep over only the newly-ADDED lines found two hits, both
+justified and documented at their call sites (a descriptive comment, and
+one deliberately narrow `except Exception:` for an auxiliary env-var
+fallback whose authoritative check still happens moments later inside the
+worker itself). No new instance of a hard-coded parity/count literal,
+`device_map="auto"`, or a bare `except:` was introduced.
+
+`python -m pytest -m "not gpu" -q`: 950 passed, 0 failed, 14 deselected
+(gpu-marked); 964 tests collected total. Both `kvcot prepare-b2a-manifest
+--dry-run` and `kvcot b2a-calibrate --dry-run` still run to completion
+unchanged (no model loaded, no CUDA required).
+
+**This pass explicitly did NOT close the full 41-section task brief it was
+given** — `docs/B1B_R4_1_FINAL_CLOSURE.md` §5 lists every remaining gap
+plainly: no CUDA-synchronized timing or model-load-inclusive projection
+(§5/§6 of that brief), no distinct model-load-phase VRAM checkpoint or
+pre-branch memory guard (§7), no discovery-only strict single-GPU load path
+(§8, `device_map="auto"` still in the exercised path), no Hub snapshot
+identity resolver and no real-tokenizer network validation was run this
+pass (§9/§35), batch size still derived from an independently-constructed
+tensor rather than the actually-observed call (§11), no NLL/cache-state
+hashes for the no-op control (§19), the full 12-real+1-no-op
+`run_rkv_worker`-level CPU success path is still not exercised (§21, an
+already-existing B1B-R4 deferral), no immutable attempt-directory
+architecture and the worker envelope is still non-atomic and still never
+cross-referenced into the final artifact (§22-§26), and most of the
+remaining requested gate conditions (§30: `git_clean_verified`,
+`rkv_submodule_match`, `single_rtx3090_verified`, and others) were not
+added. **Status: B1 FINAL CLOSURE VERDICT: INCOMPLETE — B2A/GPU REMAIN
+BLOCKED.** No discovery result exists. No method exists. GPU, B2A, and B2B
+remain fully unauthorized by this entry.
+
+## 2026-07-20 — Phase B1B-R4: final executable, measurement, and worker-evidence closure (no GPU used, no model inference, no model weights downloaded, no Vast.ai activity; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; PR #19 merge not undone)
+
+Run on branch `research/b1b-r4-final-b2a-closure`, cut from `main` at
+commit `fa117046bea2a2c492e17cd91276b2e3c6d59f7f` (the merged PR #19,
+B1B-R3). Full detail: `docs/B1B_R4_FINAL_B2A_CLOSURE.md`.
+
+**Authorization.** No new `CLAUDE.md` exception — stays inside the
+CPU-side harness architecture already authorized by §1b/§4b. No model
+weights, no CUDA, no Vast.ai activity of any kind.
+
+**Seventeen repairs** (independent audit of merged PR #19), plus three
+further defects found and fixed by this pass's own adversarial
+self-review: (1) execution-count vocabulary frozen ("pair evaluations",
+never "branches"); (2) FullKV now uses exact greedy generation
+(`kvcot.discovery.pass1.run_natural_pass1` + the real adapter), replacing a
+sampling call given `temperature=0.0`/`generator=None`; (3) framework
+determinism applied and recorded independently in both worker processes;
+(4) `NoOpMode` now actually controls pair construction
+(`kvcot.discovery.orchestrator.PairExecutionPolicy`) instead of only
+documenting an intended interpretation; (5) five trajectory/parity
+conditions (`token_identical_replay`, `prefill_decode_boundary_parity`,
+`compaction_position_equality`, `capture_gather_parity`,
+`absolute_position_parity`) are now derived independently
+(`kvcot.discovery.b2a_evidence`, `kvcot.discovery.call_trace`) instead of
+all five copied from one `example_valid` boolean; (6) resolved-vs-requested
+model/tokenizer revision read back via `transformers`' own `_commit_hash`
+attributes (`kvcot.discovery.runtime_evidence`); (7) batch size, parameter
+placement, and one-example scope derived from real observations, never
+hard-coded; (8) per-real-pair-evaluation timing measured individually via
+an injectable clock (`kvcot.discovery.orchestrator.run_example`'s
+`clock_fn`), never an aggregate bucket multiplied by 144; (9)
+branch-restored `CompactionTracker` state reconstructed from the snapshot
+(`restore_compaction_tracker_from_snapshot`) instead of reset to empty;
+(10) VRAM gate uses `max(peak_allocated, peak_reserved)` across both
+workers; (11) the weight-cache safety guard scoped to
+`prepare-b2a-manifest`'s own call site only (before/after snapshot diff),
+no longer rejecting generic prompt verification on a host with
+pre-existing model weights; (12) partial FullKV evidence preserved when
+R-KV fails after FullKV succeeds; (13) every worker subprocess launch uses
+`capture_output=True, timeout=7200, check=False`, and every attempt writes
+a durable `WorkerEnvelope`; (14) artifact names include microseconds and a
+random UUID4 suffix; (15) selected-capture evidence minimized to a bounded
+per-target record (`kvcot.discovery.capture_minimize`), finally closing the
+B1B-R3 Defect-11 deferral; (16) one canonical FullKV/R-KV worker API
+(`kvcot.discovery.b2a_workers.run_fullkv_worker`/`run_rkv_worker`),
+removing the B1B-R3 split with a `NotImplementedError` stub; (17) both
+worker-control bodies are now exercised by CPU tests against injected fake
+backends, never a preconstructed result. Adversarial self-review (§5,
+`docs/B1B_R4_FINAL_B2A_CLOSURE.md`) additionally found and fixed: the
+`no_offload_verified` gate condition using a weaker check than available;
+the four dataset/manifest identity conditions checking only worker-vs-
+worker agreement, never worker-vs-manifest; and Pass 2 snapshot/capture
+time being measured but never folded into `wall_seconds_pass2`,
+under-counting the projection. `python -m pytest -m "not gpu" -q`: 931
+passed, 14 deselected, 0 failed. **Status: B1B-R4 implemented,
+ready for independent CPU audit. GPU, B2A, and B2B remain blocked.**
 
 ## 2026-07-20 — Phase B1B-R3: executable B2A boundary and evidence producer (no GPU used, no model inference, no model weights downloaded; one pinned MATH-500 row and the pinned tokenizer's config-only files downloaded via `kvcot prepare-b2a-manifest --execute`; `third_party/R-KV` pinned commit unchanged; `configs/lock.yaml` unchanged; PR #18 merge not undone)
 

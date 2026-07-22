@@ -176,6 +176,430 @@ def test_multi_event_plan_has_non_identity_pre_event_map_on_a_later_event(monkey
 
 
 # --------------------------------------------------------------------------
+# 1a. B1B-R4.1 §16: the capture-minimization bound is enforced in production
+# --------------------------------------------------------------------------
+
+
+def test_run_example_enforces_the_minimized_capture_bound_not_just_the_test_suite(monkeypatch):
+    """`kvcot.discovery.capture_minimize.assert_minimized_bound` used to be
+    exercised only by `test_capture_minimize.py` -- never called from
+    `run_example` itself, so a regression that grew persistent per-target
+    storage would have gone undetected outside that one test file. Proven
+    by monkeypatching `build_minimized_target_evidence` to return an
+    evidence object that reports MORE persistent elements than its own
+    `head_dim` bound allows, and confirming `run_example` now raises
+    rather than silently returning an over-bound result."""
+    import kvcot.discovery.capture_minimize as capture_minimize_mod
+    from kvcot.discovery.capture_minimize import CaptureMinimizationError
+
+    real_build = capture_minimize_mod.build_minimized_target_evidence
+
+    def _oversized_build(event_plan, capture_record):
+        import dataclasses
+
+        evidence = real_build(event_plan, capture_record)
+        return dataclasses.replace(evidence, persistent_tensor_numel=evidence.persistent_tensor_numel + 1_000_000)
+
+    # `run_example` does `from kvcot.discovery.capture_minimize import
+    # build_minimized_target_evidence` freshly on every call (a local, not
+    # module-level, import) -- patching the source module's attribute is
+    # what that fresh lookup actually resolves at call time.
+    monkeypatch.setattr(capture_minimize_mod, "build_minimized_target_evidence", _oversized_build)
+
+    with pytest.raises(CaptureMinimizationError):
+        _run_example(monkeypatch)
+
+
+# --------------------------------------------------------------------------
+# 1b. B1B-R4.1 §15: structured per-pair failure evidence is actually populated
+# --------------------------------------------------------------------------
+
+
+def test_pair_failure_details_records_exactly_the_failed_pairs_not_an_empty_placeholder(monkeypatch):
+    """`ExampleResult.pair_failure_details` used to be sourced from a
+    parameter (`pair_attrition_dropped_stages`) the production R-KV worker
+    path never actually populated, so it was always empty regardless of how
+    many pairs failed. This proves the real, live-built path: force exactly
+    ONE of the 15 pair attempts to fail (a `STAGE_BRANCH_EVALUATION_FAILURE`,
+    via a patched `pipeline.build_swap_pair_record` that fails only for one
+    specific (evicted, donor) pair) and confirms the resulting
+    `pair_failure_details` names exactly that pair -- event, layer, head,
+    positions, kind, stage, and a non-trivial elapsed time -- while every
+    other pair still succeeds normally."""
+    import kvcot.discovery.orchestrator as orchestrator_mod
+
+    real_build = orchestrator_mod.build_swap_pair_record
+    forced_failure: dict[str, object] = {}
+
+    def _sometimes_failing_build(**kwargs):
+        if not forced_failure and kwargs["evicted_absolute_position"] != kwargs["donor_absolute_position"]:
+            forced_failure["event"] = kwargs["target_capture"].event_plan.compaction_event_id
+            forced_failure["evicted"] = kwargs["evicted_absolute_position"]
+            forced_failure["donor"] = kwargs["donor_absolute_position"]
+            from kvcot.discovery.pipeline import STAGE_BRANCH_EVALUATION_FAILURE, PairBuildResult
+
+            return PairBuildResult(None, STAGE_BRANCH_EVALUATION_FAILURE, "forced_failure_for_test")
+        return real_build(**kwargs)
+
+    monkeypatch.setattr(orchestrator_mod, "build_swap_pair_record", _sometimes_failing_build)
+
+    result, example_attrition, pair_attrition = _run_example(monkeypatch)
+
+    assert result.valid is True
+    assert forced_failure, "the patched build function never saw a real pair -- test setup is broken"
+    assert len(result.pair_failure_details) == 1
+    failure = result.pair_failure_details[0]
+    assert failure.compaction_event_id == forced_failure["event"]
+    assert failure.evicted_absolute_position == forced_failure["evicted"]
+    assert failure.donor_absolute_position == forced_failure["donor"]
+    assert failure.pair_kind == "real"
+    assert failure.stage == "branch_evaluation_failure"
+    assert failure.detail == "forced_failure_for_test"
+    assert failure.elapsed_seconds >= 0.0
+
+    # Exactly one of the 15 total pair attempts failed -- every other pair
+    # still succeeded normally (never dropped as collateral damage).
+    assert len(result.pair_records) == 15 - 1
+    pair_attrition.assert_consistent()
+    assert pair_attrition.dropped_at["branch_evaluation_failure"] == 1
+
+
+# --------------------------------------------------------------------------
+# 2b. B1B-R4.1 §18: semantic-swap parity/byte evidence is derived, not hard-coded
+# --------------------------------------------------------------------------
+
+
+def test_semantic_swap_parity_is_derived_and_catches_a_missing_provenance_update(monkeypatch):
+    """`build_swap_pair_record` must derive `parity_check_passed` from the
+    real `SemanticSwapResult` mutation report, not report a hard-coded
+    `True` regardless -- proven by monkeypatching
+    `apply_semantic_within_head_swap` to report a missing provenance update
+    on a snapshot that DOES carry provenance (the synthetic harness's own
+    snapshots deliberately carry `provenance=None`, so a dummy provenance
+    object is attached here to exercise the mandatory-update branch that
+    only real-model-adapter snapshots would otherwise reach) and confirming
+    the resulting build fails with a reason naming the exact defect, rather
+    than silently succeeding."""
+    import kvcot.discovery.pipeline as pipeline_mod
+    from kvcot.generation.provenance import LayerProvenance, ModelProvenance
+
+    install_fake_rkv_compression_module(monkeypatch)
+    prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
+
+    trace = run_natural_pass1(
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, decode_one_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID,
+        _always_correct,
+    )
+    plan, failure = build_pass1_plan(trace, NUM_LAYERS, NUM_HEADS, IDENTITY)
+    assert failure is None and plan is not None
+
+    pass2_result = run_pass2_capture(
+        plan, trace.full_token_ids, HarnessState(), prefill_fn, decode_one_fn, build_snapshot_from_state
+    )
+    assert pass2_result.valid is True
+    target_capture = pass2_result.target_captures[0]
+    cd = target_capture.event_plan.candidate_donor_selection
+
+    # A properly-SHAPED dummy provenance (one column per live cache slot at
+    # each layer, matching the pristine snapshot's own key_cache length) --
+    # `LayerProvenance.empty` alone has zero columns and cannot be indexed
+    # at the swap's target slot.
+    fake_provenance = ModelProvenance(
+        layers={
+            i: LayerProvenance(
+                positions=torch.arange(target_capture.pristine_snapshot.key_cache[i].shape[-2])
+                .unsqueeze(0)
+                .expand(NUM_HEADS, -1)
+                .clone()
+            )
+            for i in range(NUM_LAYERS)
+        }
+    )
+    pristine_with_provenance = dataclasses.replace(target_capture.pristine_snapshot, provenance=fake_provenance)
+    target_capture_with_provenance = dataclasses.replace(target_capture, pristine_snapshot=pristine_with_provenance)
+
+    real_apply = pipeline_mod.apply_semantic_within_head_swap
+
+    def _reporting_no_provenance_update(*args, **kwargs):
+        result = real_apply(*args, **kwargs)
+        return dataclasses.replace(result, provenance_updated=False)
+
+    monkeypatch.setattr(pipeline_mod, "apply_semantic_within_head_swap", _reporting_no_provenance_update)
+
+    build_result = build_swap_pair_record(
+        example_id="ex-1",
+        model_revision="rev-a",
+        rkv_revision="rkv-rev",
+        target_capture=target_capture_with_provenance,
+        evicted_absolute_position=cd.evicted_selected[0],
+        donor_absolute_position=cd.donor_selected[0],
+        trace=trace,
+        branch_step_fn=branch_step_fn,
+    )
+
+    # The record is still schema-valid (a well-formed report of a failed
+    # pair, not dropped) -- `build_swap_pair_record`'s own docstring commits
+    # to "the SAME code path, never a special case" for exactly this reason.
+    assert build_result.record is not None, build_result.failure_detail
+    assert build_result.record.parity_check_passed is False
+    assert build_result.record.valid_flag is False
+    assert "semantic_swap_parity_provenance_not_updated" in build_result.record.parity_failure_reason
+    assert "semantic_swap_parity_provenance_not_updated" in build_result.record.invalid_reason
+
+
+def test_baseline_snapshot_clone_is_released_before_swapped_clone_is_created(monkeypatch):
+    """B1B-R4.1 §17: baseline and swapped snapshot clones must never be
+    live at the same time -- proven via a weakref to each
+    `ModelStateSnapshot.clone()` result: the baseline clone must already be
+    unreachable (garbage-collected) once its evaluation has finished and
+    `build_swap_pair_record` has moved on, not merely 'eventually' released
+    after the whole pair completes. A custom step function that never hands
+    back the SAME snapshot object it was given (`state.clone()` each call,
+    exactly the shape the real-model adapter's restore-once branch stepping
+    also has: `_LiveBranchState` is a different object than the
+    `ModelStateSnapshot` it was restored from) is required -- the default
+    synthetic `branch_step_fn` returns the identical snapshot object
+    unchanged, which would keep it alive regardless of this repair and
+    prove nothing."""
+    import gc
+    import weakref
+
+    install_fake_rkv_compression_module(monkeypatch)
+    prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
+    trace = run_natural_pass1(
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, decode_one_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID,
+        _always_correct,
+    )
+    plan, _ = build_pass1_plan(trace, NUM_LAYERS, NUM_HEADS, IDENTITY)
+    pass2_result = run_pass2_capture(
+        plan, trace.full_token_ids, HarnessState(), prefill_fn, decode_one_fn, build_snapshot_from_state
+    )
+    target_capture = pass2_result.target_captures[0]
+    cd = target_capture.event_plan.candidate_donor_selection
+
+    clone_refs: list[weakref.ReferenceType] = []
+    real_clone = ModelStateSnapshot.clone
+
+    def _spying_clone(self):
+        result = real_clone(self)
+        clone_refs.append(weakref.ref(result))
+        return result
+
+    monkeypatch.setattr(ModelStateSnapshot, "clone", _spying_clone)
+
+    def _non_retaining_step_fn(state, token_id):
+        logits, _ = branch_step_fn(state, token_id)
+        return logits, state.clone()  # never hands back the caller's own object
+
+    build_result = build_swap_pair_record(
+        example_id="ex-1", model_revision="rev-a", rkv_revision="rkv-rev",
+        target_capture=target_capture,
+        evicted_absolute_position=cd.evicted_selected[0], donor_absolute_position=cd.donor_selected[0],
+        trace=trace, branch_step_fn=_non_retaining_step_fn,
+    )
+    assert build_result.record is not None, build_result.failure_detail
+
+    # `clone_refs[0]`/`[1]` are the two top-level clones `build_swap_pair_record`
+    # itself makes (baseline, then swapped) -- every later entry comes from
+    # `_non_retaining_step_fn`'s own per-token re-clones inside evaluation.
+    assert len(clone_refs) >= 2
+    gc.collect()
+    baseline_ref = clone_refs[0]
+    assert baseline_ref() is None, (
+        "the baseline snapshot clone was still reachable after its own evaluation finished -- "
+        "it must be released before the swapped clone is created, never held simultaneously"
+    )
+
+
+def test_baseline_branch_eval_result_is_released_before_swapped_snapshot_is_cloned(monkeypatch):
+    """B1 execution-boundary closure §8: it is not enough to release the
+    baseline SNAPSHOT clone (already proven by
+    `test_baseline_snapshot_clone_is_released_before_swapped_clone_is_created`)
+    -- the full `BranchEvalResult` `evaluate_branch` returns (specifically
+    its `final_cache_state`, a complete live cache on the real-model path)
+    must ALSO be unreachable before the swapped branch is even cloned, not
+    merely released by the time the whole pair finishes. Proven via a
+    weakref to the exact `final_cache_state` object `evaluate_branch`
+    returns for baseline, captured by wrapping `pipeline.evaluate_branch`
+    itself."""
+    import gc
+    import weakref
+
+    import kvcot.discovery.pipeline as pipeline_mod
+
+    install_fake_rkv_compression_module(monkeypatch)
+    prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
+    trace = run_natural_pass1(
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, decode_one_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID,
+        _always_correct,
+    )
+    plan, _ = build_pass1_plan(trace, NUM_LAYERS, NUM_HEADS, IDENTITY)
+    pass2_result = run_pass2_capture(
+        plan, trace.full_token_ids, HarnessState(), prefill_fn, decode_one_fn, build_snapshot_from_state
+    )
+    target_capture = pass2_result.target_captures[0]
+    cd = target_capture.event_plan.candidate_donor_selection
+
+    final_cache_state_refs: list[weakref.ReferenceType] = []
+    real_evaluate_branch = pipeline_mod.evaluate_branch
+
+    def _spying_evaluate_branch(step_fn, initial_cache_state, bridge_token_id, reference_token_ids):
+        result = real_evaluate_branch(step_fn, initial_cache_state, bridge_token_id, reference_token_ids)
+        final_cache_state_refs.append(weakref.ref(result.final_cache_state))
+        return result
+
+    monkeypatch.setattr(pipeline_mod, "evaluate_branch", _spying_evaluate_branch)
+
+    def _non_retaining_step_fn(state, token_id):
+        logits, _ = branch_step_fn(state, token_id)
+        return logits, state.clone()  # never hands back the caller's own object
+
+    build_result = build_swap_pair_record(
+        example_id="ex-1", model_revision="rev-a", rkv_revision="rkv-rev",
+        target_capture=target_capture,
+        evicted_absolute_position=cd.evicted_selected[0], donor_absolute_position=cd.donor_selected[0],
+        trace=trace, branch_step_fn=_non_retaining_step_fn,
+    )
+    assert build_result.record is not None, build_result.failure_detail
+
+    assert len(final_cache_state_refs) == 2  # baseline, then swapped
+    gc.collect()
+    baseline_final_cache_ref = final_cache_state_refs[0]
+    assert baseline_final_cache_ref() is None, (
+        "baseline's full BranchEvalResult (and its final_cache_state) was still reachable after "
+        "the compact score was extracted -- it must be released before the swapped branch begins"
+    )
+
+
+def test_semantic_swap_parity_passes_and_reports_zero_bytes_changed_on_the_real_happy_path(monkeypatch):
+    """The companion positive case: with the real (unpatched)
+    `apply_semantic_within_head_swap`, `net_physical_bytes_changed` must be
+    an actually-computed 0 (fixed-shape swap invariant), not merely a
+    literal that happens to also be 0."""
+    install_fake_rkv_compression_module(monkeypatch)
+    prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
+
+    trace = run_natural_pass1(
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, decode_one_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID,
+        _always_correct,
+    )
+    plan, failure = build_pass1_plan(trace, NUM_LAYERS, NUM_HEADS, IDENTITY)
+    assert failure is None and plan is not None
+    pass2_result = run_pass2_capture(
+        plan, trace.full_token_ids, HarnessState(), prefill_fn, decode_one_fn, build_snapshot_from_state
+    )
+    target_capture = pass2_result.target_captures[0]
+    cd = target_capture.event_plan.candidate_donor_selection
+
+    build_result = build_swap_pair_record(
+        example_id="ex-1",
+        model_revision="rev-a",
+        rkv_revision="rkv-rev",
+        target_capture=target_capture,
+        evicted_absolute_position=cd.evicted_selected[0],
+        donor_absolute_position=cd.donor_selected[0],
+        trace=trace,
+        branch_step_fn=branch_step_fn,
+    )
+
+    assert build_result.record is not None, build_result.failure_detail
+    assert build_result.record.parity_check_passed is True
+    assert build_result.record.net_physical_bytes_changed == 0
+    # B1 execution-boundary closure §12: the check was attempted AND passed
+    # -- positive evidence, set at the return point, not inferred later.
+    assert build_result.semantic_swap_check_attempted is True
+    assert build_result.semantic_swap_check_passed is True
+
+
+def test_semantic_swap_check_attempted_but_not_passed_when_provenance_update_missing(monkeypatch):
+    """Companion to `test_semantic_swap_parity_is_derived_and_catches_a_missing_provenance_update`:
+    confirms `PairBuildResult.semantic_swap_check_attempted`/`.semantic_swap_check_passed`
+    reflect that specific failure -- attempted (the swap itself succeeded),
+    but not passed (the derived parity failed)."""
+    import kvcot.discovery.pipeline as pipeline_mod
+    from kvcot.generation.provenance import LayerProvenance, ModelProvenance
+
+    install_fake_rkv_compression_module(monkeypatch)
+    prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
+
+    trace = run_natural_pass1(
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, decode_one_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID,
+        _always_correct,
+    )
+    plan, failure = build_pass1_plan(trace, NUM_LAYERS, NUM_HEADS, IDENTITY)
+    assert failure is None and plan is not None
+
+    pass2_result = run_pass2_capture(
+        plan, trace.full_token_ids, HarnessState(), prefill_fn, decode_one_fn, build_snapshot_from_state
+    )
+    target_capture = pass2_result.target_captures[0]
+    cd = target_capture.event_plan.candidate_donor_selection
+
+    fake_provenance = ModelProvenance(
+        layers={
+            i: LayerProvenance(
+                positions=torch.arange(target_capture.pristine_snapshot.key_cache[i].shape[-2])
+                .unsqueeze(0)
+                .expand(NUM_HEADS, -1)
+                .clone()
+            )
+            for i in range(NUM_LAYERS)
+        }
+    )
+    pristine_with_provenance = dataclasses.replace(target_capture.pristine_snapshot, provenance=fake_provenance)
+    target_capture_with_provenance = dataclasses.replace(target_capture, pristine_snapshot=pristine_with_provenance)
+
+    real_apply = pipeline_mod.apply_semantic_within_head_swap
+
+    def _reporting_no_provenance_update(*args, **kwargs):
+        result = real_apply(*args, **kwargs)
+        return dataclasses.replace(result, provenance_updated=False)
+
+    monkeypatch.setattr(pipeline_mod, "apply_semantic_within_head_swap", _reporting_no_provenance_update)
+
+    build_result = build_swap_pair_record(
+        example_id="ex-1", model_revision="rev-a", rkv_revision="rkv-rev",
+        target_capture=target_capture_with_provenance,
+        evicted_absolute_position=cd.evicted_selected[0], donor_absolute_position=cd.donor_selected[0],
+        trace=trace, branch_step_fn=branch_step_fn,
+    )
+
+    assert build_result.semantic_swap_check_attempted is True
+    assert build_result.semantic_swap_check_passed is False
+
+
+def test_semantic_swap_check_not_attempted_when_candidate_donor_pool_lookup_fails(monkeypatch):
+    """A pair that fails BEFORE the swap is even called (candidate/donor
+    not found in the pre-event pool) must report
+    `semantic_swap_check_attempted=False` -- the check never ran, so it
+    cannot be reported as having run and passed."""
+    install_fake_rkv_compression_module(monkeypatch)
+    prefill_fn, decode_one_fn = make_step_fns(stop_at_predicted_position=STOP_AT)
+    trace = run_natural_pass1(
+        PROVENANCE, PROMPT_TOKEN_IDS, HarnessState(), prefill_fn, decode_one_fn, MAX_NEW_TOKENS, EOS_TOKEN_ID,
+        _always_correct,
+    )
+    plan, failure = build_pass1_plan(trace, NUM_LAYERS, NUM_HEADS, IDENTITY)
+    assert failure is None and plan is not None
+    pass2_result = run_pass2_capture(
+        plan, trace.full_token_ids, HarnessState(), prefill_fn, decode_one_fn, build_snapshot_from_state
+    )
+    target_capture = pass2_result.target_captures[0]
+
+    build_result = build_swap_pair_record(
+        example_id="ex-1", model_revision="rev-a", rkv_revision="rkv-rev",
+        target_capture=target_capture,
+        evicted_absolute_position=999_999,  # not in any pool -- pool lookup fails immediately
+        donor_absolute_position=999_998,
+        trace=trace, branch_step_fn=branch_step_fn,
+    )
+
+    assert build_result.record is None
+    assert build_result.semantic_swap_check_attempted is False
+    assert build_result.semantic_swap_check_passed is False
+
+
+# --------------------------------------------------------------------------
 # 3. Pass-2 token mismatch invalidates example
 # --------------------------------------------------------------------------
 
