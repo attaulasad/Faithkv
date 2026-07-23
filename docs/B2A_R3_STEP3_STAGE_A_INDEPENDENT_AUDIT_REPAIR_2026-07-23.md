@@ -224,12 +224,12 @@ strict verifier and the frozen committed config hash.
 All local validation used `CUDA_VISIBLE_DEVICES=""` and `PYTHONPATH=src`.
 
 - `python -m compileall -q src tests`: pass.
-- Independent-audit attack file: 48 passed.
-- Aggregate R3 suite: 329 passed.
+- Independent-audit attack file: 49 passed.
+- Aggregate R3 suite: 330 passed.
 - Historical qualification/contract/timing/schedule/worker/MATH regression
   set: 191 passed.
 - Subprocess import guards and source scan: 6 passed, 9 deselected.
-- `python -m pytest -m "not gpu" -q`: 1685 passed, 14 deselected.
+- `python -m pytest -m "not gpu" -q`: 1686 passed, 14 deselected.
 - `git diff --check`: pass.
 
 The first aggregate attempts exposed an intermittent historical test issue:
@@ -240,7 +240,14 @@ typed equivalent result without a subprocess; every non-identical
 comparison retains the frozen symbolic verifier and timeout. The focused
 worker/MATH regressions and subsequent complete CPU run are green.
 
-Remote CPU CI is recorded in the final audit report after the final SHA is
+The first pushed repair SHA's Linux CI run `29988322217` exposed a
+platform-specific exact-byte config identity: Windows checked out the
+frozen config with CRLF (the candidate manifest's recorded `de8ac65…`
+hash), while Linux checked it out with LF (`98d958…`). The protocol's
+required `sha256_file` algorithm and candidate manifest were preserved;
+`.gitattributes` now freezes CRLF for that one config on every platform,
+with a focused checkout-byte/hash regression. The replacement remote CI
+result is recorded in the final audit report after the new final SHA is
 pushed. Until then: `REMOTE CPU CI UNCONFIRMED`.
 
 ## Final state
