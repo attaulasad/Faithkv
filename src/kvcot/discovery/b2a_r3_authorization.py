@@ -43,8 +43,6 @@ from kvcot.discovery.b2a_r3_provenance import (
     verify_attempt_provenance,
     verify_git_state_bound_to_repository_root,
 )
-from kvcot.utils.hashing import sha256_file
-
 __all__ = [
     "AuthorizationAlreadyConsumed",
     "AuthorizationClaimRefused",
@@ -89,10 +87,10 @@ class AuthorizationClaimR3(BaseModel):
     authorization_document_sha256: str
     authorized_repository: str
     authorized_branch: str
-    authorized_commit_sha: str
+    authorized_code_commit_sha: str
     observed_repository: str
     observed_branch: str
-    observed_commit_sha: str
+    observed_execution_commit_sha: str
     required_ancestor_shas: list[str]
     required_rkv_sha: str
     observed_rkv_sha: str
@@ -249,7 +247,7 @@ def verify_authorization_preconditions(
     outright, before any Git state is even inspected.
     """
     from kvcot.discovery.b2a_r3_authorization_document import (
-        parse_authorization_document,
+        parse_authorization_document_text,
         policy_from_authorization_document,
     )
 
@@ -278,14 +276,24 @@ def verify_authorization_preconditions(
         raise AuthorizationClaimRefused("authorization document is missing or not the exact claimed path")
     if not git_state.is_path_committed(claim.authorization_document_path):
         raise AuthorizationClaimRefused("authorization document is not committed")
-    observed_document_hash = sha256_file(supplied_document)
+    if not git_state.commit_exists(claim.authorized_code_commit_sha):
+        raise AuthorizationClaimRefused("authorized code commit does not exist")
+    if not git_state.commit_exists(claim.observed_execution_commit_sha):
+        raise AuthorizationClaimRefused("observed execution commit does not exist")
+    observed_document_hash = git_state.file_sha256_at_commit(
+        claim.authorization_document_path, claim.observed_execution_commit_sha
+    )
     if observed_document_hash != claim.authorization_document_sha256:
-        raise AuthorizationClaimRefused("authorization document byte hash does not match the claim")
+        raise AuthorizationClaimRefused("execution-commit authorization document byte hash does not match the claim")
 
     try:
-        document = parse_authorization_document(supplied_document)
+        document = parse_authorization_document_text(
+            git_state.file_text_at_commit(claim.authorization_document_path, claim.observed_execution_commit_sha)
+        )
     except Exception as exc:
-        raise AuthorizationClaimRefused(f"authorization document is not machine-readable: {exc}") from exc
+        raise AuthorizationClaimRefused(
+            f"authorization document is not machine-readable at the execution commit: {exc}"
+        ) from exc
 
     if document.authorization_id != claim.authorization_id:
         raise AuthorizationClaimRefused("document authorization_id does not match the claim")
@@ -293,8 +301,8 @@ def verify_authorization_preconditions(
         raise AuthorizationClaimRefused("document authorization_stage does not match the claim")
     if document.authorized_branch != claim.authorized_branch:
         raise AuthorizationClaimRefused("document authorized_branch does not match the claim")
-    if document.authorized_commit_sha != claim.authorized_commit_sha:
-        raise AuthorizationClaimRefused("document authorized_commit_sha does not match the claim")
+    if document.authorized_code_commit_sha != claim.authorized_code_commit_sha:
+        raise AuthorizationClaimRefused("document authorized_code_commit_sha does not match the claim")
     if tuple(document.required_ancestor_shas) != tuple(claim.required_ancestor_shas):
         raise AuthorizationClaimRefused("document required_ancestor_shas does not match the claim")
     if document.required_rkv_sha != claim.required_rkv_sha:
@@ -315,7 +323,18 @@ def verify_authorization_preconditions(
     # the claim (Step 3R4 Finding 3). The claim-vs-document equality
     # checks above already ensure the claim cannot smuggle a divergent
     # value past this point.
-    policy = policy_from_authorization_document(document, authorization_document_sha256=observed_document_hash)
+    policy = AttemptProvenancePolicy(
+        provenance_policy_version=policy_from_authorization_document(
+            document, authorization_document_sha256=observed_document_hash
+        ).provenance_policy_version,
+        required_repository=document.authorized_repository,
+        required_branch=document.authorized_branch,
+        required_commit_sha=claim.observed_execution_commit_sha,
+        required_ancestor_shas=tuple([document.authorized_code_commit_sha, *document.required_ancestor_shas]),
+        required_rkv_sha=document.required_rkv_sha,
+        authorization_id=document.authorization_id,
+        authorization_document_sha256=observed_document_hash,
+    )
 
     if not (
         claim.observed_repository == claim.authorized_repository == policy.required_repository == REQUIRED_REPOSITORY
@@ -323,8 +342,30 @@ def verify_authorization_preconditions(
         raise AuthorizationClaimRefused("observed/authorized/required repository identities disagree")
     if not (claim.observed_branch == claim.authorized_branch == policy.required_branch):
         raise AuthorizationClaimRefused("observed/authorized/required branch identities disagree")
-    if not (claim.observed_commit_sha == claim.authorized_commit_sha == policy.required_commit_sha):
-        raise AuthorizationClaimRefused("observed/authorized/required commit identities disagree")
+    if claim.observed_execution_commit_sha != policy.required_commit_sha:
+        raise AuthorizationClaimRefused("observed execution commit does not match the enforced policy")
+    if not git_state.is_ancestor(claim.authorized_code_commit_sha, claim.observed_execution_commit_sha):
+        raise AuthorizationClaimRefused("authorized code commit is not an ancestor of the execution commit")
+    changed_paths = set(git_state.changed_paths_between(
+        claim.authorized_code_commit_sha, claim.observed_execution_commit_sha
+    ))
+    if changed_paths != {claim.authorization_document_path}:
+        raise AuthorizationClaimRefused(
+            "execution commit differs from authorized code commit outside the exact authorization document: "
+            f"{sorted(changed_paths)}"
+        )
+    if not git_state.is_path_committed_at_commit(
+        claim.authorization_document_path, claim.observed_execution_commit_sha
+    ):
+        raise AuthorizationClaimRefused("authorization document is not committed at the execution commit")
+    if git_state.file_sha256_at_commit(
+        claim.authorization_document_path, claim.observed_execution_commit_sha
+    ) != claim.authorization_document_sha256:
+        raise AuthorizationClaimRefused("execution-commit authorization document bytes do not match the claim")
+    if git_state.rkv_submodule_sha_at_commit(claim.authorized_code_commit_sha) != claim.required_rkv_sha:
+        raise AuthorizationClaimRefused("authorized code commit R-KV gitlink does not match the claim")
+    if git_state.rkv_submodule_sha_at_commit(claim.observed_execution_commit_sha) != claim.required_rkv_sha:
+        raise AuthorizationClaimRefused("execution commit R-KV gitlink does not match the claim")
     if not (claim.observed_rkv_sha == claim.required_rkv_sha == policy.required_rkv_sha):
         raise AuthorizationClaimRefused("observed/required R-KV identities disagree")
 
@@ -574,31 +615,44 @@ def verify_persisted_stage_b_authorization_binding(
     if claim.candidate_manifest_canonical_sha256 != candidate.canonical_sha256:
         raise AuthorizationClaimRefused("persisted Stage-B claim does not authorize the supplied candidate manifest")
 
-    document_path = Path(repository_root) / claim.authorization_document_path
-    if not document_path.is_file():
-        raise AuthorizationClaimRefused("Stage-B authorization document is missing from the current checkout")
-    if not git_state.is_path_committed(claim.authorization_document_path):
-        raise AuthorizationClaimRefused("Stage-B authorization document is not tracked in the current checkout")
-    observed_document_hash = sha256_file(document_path)
+    if not git_state.commit_exists(claim.authorized_code_commit_sha):
+        raise AuthorizationClaimRefused("persisted Stage-B authorized code commit does not exist")
+    if not git_state.commit_exists(claim.observed_execution_commit_sha):
+        raise AuthorizationClaimRefused("persisted Stage-B execution commit does not exist")
+    if not git_state.is_ancestor(claim.authorized_code_commit_sha, claim.observed_execution_commit_sha):
+        raise AuthorizationClaimRefused("persisted Stage-B code commit is not an ancestor of the execution commit")
+    if set(git_state.changed_paths_between(
+        claim.authorized_code_commit_sha, claim.observed_execution_commit_sha
+    )) != {claim.authorization_document_path}:
+        raise AuthorizationClaimRefused(
+            "persisted Stage-B execution commit differs from authorized code commit outside the authorization document"
+        )
+    if not git_state.is_path_committed_at_commit(
+        claim.authorization_document_path, claim.observed_execution_commit_sha
+    ):
+        raise AuthorizationClaimRefused("persisted Stage-B document is not committed at the execution commit")
+    observed_document_hash = git_state.file_sha256_at_commit(
+        claim.authorization_document_path, claim.observed_execution_commit_sha
+    )
     if observed_document_hash != claim.authorization_document_sha256:
-        raise AuthorizationClaimRefused("Stage-B authorization document hash does not match the claim")
+        raise AuthorizationClaimRefused("persisted Stage-B execution-commit document bytes do not match the claim")
     try:
-        document = parse_authorization_document_text(document_path.read_text(encoding="utf-8"))
+        document = parse_authorization_document_text(
+            git_state.file_text_at_commit(claim.authorization_document_path, claim.observed_execution_commit_sha)
+        )
     except Exception as exc:
         raise AuthorizationClaimRefused(
-            f"Stage-B authorization document is not machine-readable: {exc}"
+            f"Stage-B authorization document is not machine-readable at the execution commit: {exc}"
         ) from exc
 
-    if not git_state.commit_exists(claim.authorized_commit_sha):
-        raise AuthorizationClaimRefused("persisted Stage-B authorized commit does not exist")
     if document.authorization_id != claim.authorization_id:
         raise AuthorizationClaimRefused("historical document authorization_id does not match the claim")
     if document.authorization_stage != claim.authorization_stage:
         raise AuthorizationClaimRefused("historical document authorization_stage does not match the claim")
     if document.authorized_branch != claim.authorized_branch:
         raise AuthorizationClaimRefused("historical document authorized_branch does not match the claim")
-    if document.authorized_commit_sha != claim.authorized_commit_sha:
-        raise AuthorizationClaimRefused("historical document authorized_commit_sha does not match the claim")
+    if document.authorized_code_commit_sha != claim.authorized_code_commit_sha:
+        raise AuthorizationClaimRefused("historical document authorized_code_commit_sha does not match the claim")
     if tuple(document.required_ancestor_shas) != tuple(claim.required_ancestor_shas):
         raise AuthorizationClaimRefused("historical document required_ancestor_shas does not match the claim")
     if document.required_rkv_sha != claim.required_rkv_sha:
@@ -617,22 +671,35 @@ def verify_persisted_stage_b_authorization_binding(
     ):
         raise AuthorizationClaimRefused("persisted Stage-B claim must not contain Stage-C artifact hashes")
 
-    policy = policy_from_authorization_document(document, authorization_document_sha256=observed_document_hash)
+    document_policy = policy_from_authorization_document(document, authorization_document_sha256=observed_document_hash)
+    policy = AttemptProvenancePolicy(
+        provenance_policy_version=document_policy.provenance_policy_version,
+        required_repository=document_policy.required_repository,
+        required_branch=document_policy.required_branch,
+        required_commit_sha=claim.observed_execution_commit_sha,
+        required_ancestor_shas=tuple([claim.authorized_code_commit_sha, *document_policy.required_ancestor_shas]),
+        required_rkv_sha=document_policy.required_rkv_sha,
+        authorization_id=document_policy.authorization_id,
+        authorization_document_sha256=document_policy.authorization_document_sha256,
+    )
     if not (
         claim.observed_repository == claim.authorized_repository == policy.required_repository == REQUIRED_REPOSITORY
     ):
         raise AuthorizationClaimRefused("persisted Stage-B repository identities disagree")
     if not (claim.observed_branch == claim.authorized_branch == policy.required_branch):
         raise AuthorizationClaimRefused("persisted Stage-B branch identities disagree")
-    if not (claim.observed_commit_sha == claim.authorized_commit_sha == policy.required_commit_sha):
-        raise AuthorizationClaimRefused("persisted Stage-B commit identities disagree")
+    if claim.observed_execution_commit_sha != policy.required_commit_sha:
+        raise AuthorizationClaimRefused("persisted Stage-B execution commit identity disagrees")
     for ancestor_sha in policy.required_ancestor_shas:
         if not git_state.is_ancestor(ancestor_sha, policy.required_commit_sha):
             raise AuthorizationClaimRefused(
                 f"historical Stage-B required ancestor {ancestor_sha!r} does not verify"
             )
-    observed_rkv_sha = git_state.rkv_submodule_sha_at_commit(policy.required_commit_sha)
-    if not (claim.observed_rkv_sha == claim.required_rkv_sha == policy.required_rkv_sha == observed_rkv_sha):
+    code_rkv_sha = git_state.rkv_submodule_sha_at_commit(claim.authorized_code_commit_sha)
+    execution_rkv_sha = git_state.rkv_submodule_sha_at_commit(claim.observed_execution_commit_sha)
+    if not (
+        claim.observed_rkv_sha == claim.required_rkv_sha == policy.required_rkv_sha == code_rkv_sha == execution_rkv_sha
+    ):
         raise AuthorizationClaimRefused("historical Stage-B R-KV gitlink does not match the claim/document")
 
     verified = VerifiedAuthorizationContext(

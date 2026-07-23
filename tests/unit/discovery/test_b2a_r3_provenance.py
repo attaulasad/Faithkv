@@ -3,7 +3,7 @@
 torch, no CUDA."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 import pytest
@@ -36,6 +36,8 @@ class FakeGitState:
     # callers that verify authorization preconditions bind this against a
     # separately-supplied `repository_root` argument and refuse a mismatch.
     repository_root: str = "."
+    changed_paths: tuple[str, ...] = ("docs/B2A_R3_STAGE_B_QUALIFICATION_AUTHORIZATION_2026-08-01.md",)
+    changed_paths_by_head: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     def current_repository(self) -> str:
         return self.repository
@@ -47,7 +49,7 @@ class FakeGitState:
         return self.commit_sha
 
     def is_ancestor(self, ancestor_sha: str, commit_sha: str) -> bool:
-        return ancestor_sha in self.ancestors and commit_sha == self.commit_sha
+        return ancestor_sha in self.ancestors and (commit_sha == self.commit_sha or commit_sha in self.ancestors)
 
     def rkv_submodule_sha(self) -> str:
         return self.rkv_sha
@@ -80,6 +82,11 @@ class FakeGitState:
         if not self.commit_exists(commit_sha):
             raise ValueError(f"unknown commit {commit_sha}")
         return self.rkv_sha
+
+    def changed_paths_between(self, base_commit_sha: str, head_commit_sha: str) -> tuple[str, ...]:
+        if head_commit_sha in self.changed_paths_by_head:
+            return self.changed_paths_by_head[head_commit_sha]
+        return self.changed_paths
 
 
 def _policy(**overrides) -> AttemptProvenancePolicy:

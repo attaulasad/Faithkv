@@ -46,7 +46,7 @@ def _stage_b_payload(**overrides):
         "authorization_stage": STAGE_FULLKV_QUALIFICATION,
         "authorized_repository": REQUIRED_REPOSITORY,
         "authorized_branch": "research/b2a-r3-runtime-qualified-calibration",
-        "authorized_commit_sha": "b" * 40,
+        "authorized_code_commit_sha": "b" * 40,
         "required_ancestor_shas": ["c" * 40],
         "required_rkv_sha": "45eaa7d69d20b7388321f077020a610d9afb65bd",
         "candidate_manifest_canonical_sha256": "d" * 64,
@@ -182,7 +182,7 @@ def test_unknown_field_fails():
     "field",
     [
         "authorization_document_schema_version", "authorization_id", "authorization_stage",
-        "authorized_repository", "authorized_branch", "authorized_commit_sha",
+        "authorized_repository", "authorized_branch", "authorized_code_commit_sha",
         "required_ancestor_shas", "required_rkv_sha", "candidate_manifest_canonical_sha256",
         "created_at_utc",
     ],
@@ -291,7 +291,7 @@ def test_policy_from_document_never_reads_a_claim():
     doc = parse_authorization_document_text(_document_text(_stage_b_payload()))
     policy = policy_from_authorization_document(doc, authorization_document_sha256="a" * 64)
     assert policy.required_branch == doc.authorized_branch
-    assert policy.required_commit_sha == doc.authorized_commit_sha
+    assert policy.required_commit_sha == doc.authorized_code_commit_sha
     assert policy.required_ancestor_shas == tuple(doc.required_ancestor_shas)
     assert policy.required_rkv_sha == doc.required_rkv_sha
     assert policy.authorization_id == doc.authorization_id

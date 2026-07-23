@@ -38,10 +38,10 @@ def _stage_b_payload(**overrides):
         "authorization_document_sha256": "a" * 64,
         "authorized_repository": REQUIRED_REPOSITORY,
         "authorized_branch": "research/b2a-r3-runtime-qualified-calibration",
-        "authorized_commit_sha": "b" * 40,
+        "authorized_code_commit_sha": "b" * 40,
         "observed_repository": REQUIRED_REPOSITORY,
         "observed_branch": "research/b2a-r3-runtime-qualified-calibration",
-        "observed_commit_sha": "b" * 40,
+        "observed_execution_commit_sha": "d" * 40,
         "required_ancestor_shas": ["c" * 40],
         "required_rkv_sha": "45eaa7d69d20b7388321f077020a610d9afb65bd",
         "observed_rkv_sha": "45eaa7d69d20b7388321f077020a610d9afb65bd",
@@ -68,6 +68,7 @@ def _stage_c_payload(**overrides):
         qualification_artifact_canonical_sha256="e" * 64,
         selected_manifest_sha256="f" * 64,
         selected_manifest_hash_algorithm=SELECTED_MANIFEST_HASH_ALGORITHM,
+        observed_execution_commit_sha="e" * 40,
         global_claim_path=global_claim_path("stage-c-2026-08-05"),
     )
     del base["canonical_sha256"]
@@ -76,7 +77,7 @@ def _stage_c_payload(**overrides):
     return base
 
 
-def _document_payload(*, authorization_id, authorization_stage, authorized_branch, authorized_commit_sha,
+def _document_payload(*, authorization_id, authorization_stage, authorized_branch, authorized_code_commit_sha,
                        required_ancestor_shas, required_rkv_sha, candidate_manifest_canonical_sha256,
                        maximum_candidates=None, phase_wall_time_limit_seconds=None,
                        qualification_artifact_canonical_sha256=None, selected_manifest_sha256=None,
@@ -89,7 +90,7 @@ def _document_payload(*, authorization_id, authorization_stage, authorized_branc
         "authorization_stage": authorization_stage,
         "authorized_repository": REQUIRED_REPOSITORY,
         "authorized_branch": authorized_branch,
-        "authorized_commit_sha": authorized_commit_sha,
+        "authorized_code_commit_sha": authorized_code_commit_sha,
         "required_ancestor_shas": list(required_ancestor_shas),
         "required_rkv_sha": required_rkv_sha,
         "candidate_manifest_canonical_sha256": candidate_manifest_canonical_sha256,
@@ -133,7 +134,7 @@ def _verified_stage_b(tmp_path, *, document_overrides=None, **payload_overrides)
         authorization_id="stage-b-2026-08-01",
         authorization_stage=AUTHORIZATION_STAGE_FULLKV_QUALIFICATION,
         authorized_branch="research/b2a-r3-runtime-qualified-calibration",
-        authorized_commit_sha="b" * 40,
+        authorized_code_commit_sha="b" * 40,
         required_ancestor_shas=("c" * 40,),
         required_rkv_sha="45eaa7d69d20b7388321f077020a610d9afb65bd",
         candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],
@@ -147,7 +148,12 @@ def _verified_stage_b(tmp_path, *, document_overrides=None, **payload_overrides)
         candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],
         **payload_overrides,
     )
-    git_state = FakeGitState(commit_sha="b" * 40, ancestors=frozenset({"c" * 40}), repository_root=str(tmp_path))
+    git_state = FakeGitState(
+        commit_sha="d" * 40,
+        ancestors=frozenset({"b" * 40, "c" * 40}),
+        repository_root=str(tmp_path),
+        changed_paths=(document_rel,),
+    )
     context = verify_authorization_preconditions(
         payload,
         git_state=git_state,
@@ -184,7 +190,7 @@ def _stage_c_inputs(tmp_path, **payload_overrides):
         authorization_id=stage_b_context.claim.authorization_id,
         authorization_stage=AUTHORIZATION_STAGE_FULLKV_QUALIFICATION,
         authorized_branch=stage_b_context.claim.authorized_branch,
-        authorized_commit_sha=stage_b_context.claim.authorized_commit_sha,
+        authorized_code_commit_sha=stage_b_context.claim.authorized_code_commit_sha,
         required_ancestor_shas=stage_b_context.claim.required_ancestor_shas,
         required_rkv_sha=stage_b_context.claim.required_rkv_sha,
         candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],
@@ -199,11 +205,16 @@ def _stage_c_inputs(tmp_path, **payload_overrides):
     stage_b_claim_path.parent.mkdir(parents=True, exist_ok=True)
     import json as _json
     stage_b_claim_path.write_text(_json.dumps(stage_b_claim, indent=2) + "\n", encoding="utf-8")
-    git_state = FakeGitState(commit_sha="b" * 40, ancestors=frozenset({"c" * 40}), repository_root=str(tmp_path))
+    stage_b_git_state = FakeGitState(
+        commit_sha=stage_b_claim["observed_execution_commit_sha"],
+        ancestors=frozenset({"b" * 40, "c" * 40}),
+        repository_root=str(tmp_path),
+        changed_paths=(stage_b_document_rel,),
+    )
     stage_b_binding = verify_persisted_stage_b_authorization_binding(
         authorization_id=stage_b_claim["authorization_id"],
         repository_root=tmp_path,
-        git_state=git_state,
+        git_state=stage_b_git_state,
         candidate_manifest=candidate_manifest,
         expected_config_sha256=CONFIG_SHA,
     )
@@ -223,7 +234,7 @@ def _stage_c_inputs(tmp_path, **payload_overrides):
         authorization_id="stage-c-2026-08-05",
         authorization_stage=AUTHORIZATION_STAGE_B2A_R3_EXECUTION,
         authorized_branch="research/b2a-r3-runtime-qualified-calibration",
-        authorized_commit_sha="b" * 40,
+        authorized_code_commit_sha="b" * 40,
         required_ancestor_shas=("c" * 40,),
         required_rkv_sha="45eaa7d69d20b7388321f077020a610d9afb65bd",
         candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],
@@ -239,6 +250,16 @@ def _stage_c_inputs(tmp_path, **payload_overrides):
     }
     payload_values.update(payload_overrides)
     payload = _stage_c_payload(**payload_values)
+    git_state = FakeGitState(
+        commit_sha=payload["observed_execution_commit_sha"],
+        ancestors=frozenset({"b" * 40, "c" * 40, stage_b_claim["observed_execution_commit_sha"]}),
+        repository_root=str(tmp_path),
+        changed_paths=(document_rel,),
+        changed_paths_by_head={
+            stage_b_claim["observed_execution_commit_sha"]: (stage_b_document_rel,),
+            payload["observed_execution_commit_sha"]: (document_rel,),
+        },
+    )
     return {
         "claim_payload": payload,
         "git_state": git_state,
@@ -419,7 +440,7 @@ def test_preconditions_reject_observed_repository_disagreement(tmp_path):
     "field,value",
     [
         ("observed_branch", "main"),
-        ("observed_commit_sha", "0" * 40),
+        ("observed_execution_commit_sha", "0" * 40),
         ("observed_rkv_sha", "0" * 40),
         ("candidate_manifest_canonical_sha256", "0" * 64),
     ],
@@ -554,17 +575,33 @@ def test_stage_c_selection_provenance_mismatch_is_rejected_after_rehash(tmp_path
 
 
 def test_persisted_stage_b_binding_survives_untracked_outputs_and_head_advance_in_real_git(tmp_path):
+    import itertools
     import subprocess
 
-    from kvcot.discovery.b2a_r3_artifacts import verify_qualification_artifact
-    from kvcot.discovery.b2a_r3_authorization import verify_persisted_stage_b_authorization_binding
+    from kvcot.discovery import b2a_r3_contract as c
+    from kvcot.discovery.b2a_r3_artifacts import verify_qualification_artifact, write_qualification_artifact_atomic
+    from kvcot.discovery.b2a_r3_authorization import (
+        claim_authorization,
+        verify_authorization_preconditions,
+        verify_persisted_stage_b_authorization_binding,
+    )
     from kvcot.discovery.b2a_r3_provenance import SubprocessGitStateProvider
-    from tests.unit.discovery.test_b2a_r3_freeze import CONFIG_SHA, _rehash, _valid_chain
+    from kvcot.discovery.b2a_r3_qualification_coordinator import run_b2a_r3_qualification_coordinator
+    from tests.unit.discovery.test_b2a_r3_worker_adapter import CONFIG_SHA, _candidate_manifest, _valid_worker_result
 
     def git(*args: str) -> str:
         return subprocess.run(
             ["git", *args],
             cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def git_rkv(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args],
+            cwd=tmp_path / "third_party" / "R-KV",
             check=True,
             capture_output=True,
             text=True,
@@ -581,12 +618,19 @@ def test_persisted_stage_b_binding_survives_untracked_outputs_and_head_advance_i
     git("commit", "-m", "root")
     ancestor_sha = git("rev-parse", "HEAD")
 
-    (tmp_path / "third_party").mkdir()
-    git("update-index", "--add", "--cacheinfo", "160000,45eaa7d69d20b7388321f077020a610d9afb65bd,third_party/R-KV")
+    (tmp_path / "third_party" / "R-KV").mkdir(parents=True)
+    git_rkv("init")
+    git_rkv("config", "user.email", "test@example.invalid")
+    git_rkv("config", "user.name", "Test User")
+    (tmp_path / "third_party" / "R-KV" / "README.md").write_text("rkv\n", encoding="utf-8")
+    git_rkv("add", "README.md")
+    git_rkv("commit", "-m", "rkv")
+    rkv_sha = git_rkv("rev-parse", "HEAD")
+    git("update-index", "--add", "--cacheinfo", f"160000,{rkv_sha},third_party/R-KV")
     git("commit", "-m", "authorized historical tree")
     authorized_sha = git("rev-parse", "HEAD")
 
-    candidate_manifest, qualification_artifact = _valid_chain()
+    candidate_manifest = _candidate_manifest()
     stage_b_document_rel = "docs/B2A_R3_STAGE_B_QUALIFICATION_AUTHORIZATION_2026-08-01.md"
     stage_b_document = tmp_path / stage_b_document_rel
     _write_document(
@@ -595,41 +639,65 @@ def test_persisted_stage_b_binding_survives_untracked_outputs_and_head_advance_i
             authorization_id="stage-b-2026-08-01",
             authorization_stage=AUTHORIZATION_STAGE_FULLKV_QUALIFICATION,
             authorized_branch="research/b2a-r3-runtime-qualified-calibration",
-            authorized_commit_sha=authorized_sha,
+            authorized_code_commit_sha=authorized_sha,
             required_ancestor_shas=(ancestor_sha,),
-            required_rkv_sha="45eaa7d69d20b7388321f077020a610d9afb65bd",
+            required_rkv_sha=rkv_sha,
             candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],
-            maximum_candidates=qualification_artifact["authorized_maximum_candidates"],
-            phase_wall_time_limit_seconds=qualification_artifact["authorized_phase_wall_time_limit_seconds"],
+            maximum_candidates=8,
+            phase_wall_time_limit_seconds=3600,
         ),
     )
     git("add", stage_b_document_rel)
     git("commit", "-m", "stage b authorization")
+    stage_b_execution_sha = git("rev-parse", "HEAD")
+    git_state = SubprocessGitStateProvider(str(tmp_path))
 
     claim_payload = _stage_b_payload(
-        authorization_document_sha256=sha256_file(stage_b_document),
-        authorized_commit_sha=authorized_sha,
-        observed_commit_sha=authorized_sha,
+        authorization_document_sha256=git_state.file_sha256_at_commit(stage_b_document_rel, stage_b_execution_sha),
+        authorized_code_commit_sha=authorized_sha,
+        observed_execution_commit_sha=stage_b_execution_sha,
         required_ancestor_shas=[ancestor_sha],
+        required_rkv_sha=rkv_sha,
+        observed_rkv_sha=rkv_sha,
         candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],
     )
-    claim_path = tmp_path / claim_payload["global_claim_path"]
-    claim_path.parent.mkdir(parents=True, exist_ok=True)
-    claim_path.write_text(json.dumps(claim_payload, indent=2, ensure_ascii=True), encoding="utf-8")
+    verified_context = verify_authorization_preconditions(
+        claim_payload,
+        git_state=git_state,
+        authorization_document_path=stage_b_document,
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=CONFIG_SHA,
+        repository_root=tmp_path,
+    )
+    consumed_context = claim_authorization(
+        claim_payload,
+        repository_root=tmp_path,
+        verified_context=verified_context,
+        git_state=git_state,
+    )
 
-    qualification_artifact = dict(qualification_artifact)
-    qualification_artifact["stage_b_authorization_id"] = claim_payload["authorization_id"]
-    qualification_artifact["authorization_document_sha256"] = claim_payload["authorization_document_sha256"]
-    qualification_artifact["authorization_claim_canonical_sha256"] = claim_payload["canonical_sha256"]
-    qualification_artifact = _rehash(qualification_artifact)
+    ticks = (1_800_000_000.0 + index for index in itertools.count())
+    qualification_artifact = run_b2a_r3_qualification_coordinator(
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=CONFIG_SHA,
+        consumed_authorization_context=consumed_context,
+        fullkv_worker_runner=lambda ordinal, _timeout: _valid_worker_result(ordinal),
+        clock=lambda: next(ticks),
+        per_candidate_timeout_seconds=c.PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
+    )
     qualification_path = tmp_path / "results/decisions/b2a_r3_qualification.json"
-    qualification_path.parent.mkdir(parents=True, exist_ok=True)
-    qualification_path.write_text(json.dumps(qualification_artifact, indent=2), encoding="utf-8")
+    write_qualification_artifact_atomic(
+        qualification_artifact,
+        output_path=qualification_path,
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=CONFIG_SHA,
+        stage_b_authorization_context=consumed_context,
+    )
 
     binding = verify_persisted_stage_b_authorization_binding(
         authorization_id=claim_payload["authorization_id"],
         repository_root=tmp_path,
-        git_state=SubprocessGitStateProvider(str(tmp_path)),
+        git_state=git_state,
         candidate_manifest=candidate_manifest,
         expected_config_sha256=CONFIG_SHA,
     )
@@ -650,9 +718,9 @@ def test_persisted_stage_b_binding_survives_untracked_outputs_and_head_advance_i
             authorization_id="stage-c-2026-08-05",
             authorization_stage=AUTHORIZATION_STAGE_B2A_R3_EXECUTION,
             authorized_branch="research/b2a-r3-runtime-qualified-calibration",
-            authorized_commit_sha=git("rev-parse", "HEAD"),
+            authorized_code_commit_sha=authorized_sha,
             required_ancestor_shas=(authorized_sha,),
-            required_rkv_sha="45eaa7d69d20b7388321f077020a610d9afb65bd",
+            required_rkv_sha=rkv_sha,
             candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],
             qualification_artifact_canonical_sha256=qualification_artifact["canonical_sha256"],
             selected_manifest_sha256="f" * 64,

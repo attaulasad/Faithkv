@@ -153,6 +153,7 @@ class GitStateProvider(Protocol):
     def file_sha256_at_commit(self, path: str, commit_sha: str) -> str: ...
     def file_text_at_commit(self, path: str, commit_sha: str) -> str: ...
     def rkv_submodule_sha_at_commit(self, commit_sha: str) -> str: ...
+    def changed_paths_between(self, base_commit_sha: str, head_commit_sha: str) -> tuple[str, ...]: ...
 
 
 class SubprocessGitStateProvider:
@@ -213,6 +214,10 @@ class SubprocessGitStateProvider:
         if len(fields) < 3:
             raise ValueError("third_party/R-KV gitlink is missing at the requested commit")
         return fields[2]
+
+    def changed_paths_between(self, base_commit_sha: str, head_commit_sha: str) -> tuple[str, ...]:
+        output = self._run("diff", "--name-only", f"{base_commit_sha}..{head_commit_sha}").stdout
+        return tuple(line for line in output.splitlines() if line)
 
     def worktree_status(self) -> WorktreeStatus:
         staged: list[str] = []
@@ -287,9 +292,9 @@ def verify_attempt_provenance(
     if observed_branch != policy.required_branch:
         reasons.append(f"observed branch {observed_branch!r} != required {policy.required_branch!r}")
 
-    observed_commit_sha = git_state.current_commit_sha()
-    if observed_commit_sha != policy.required_commit_sha:
-        reasons.append(f"observed commit {observed_commit_sha!r} != required {policy.required_commit_sha!r}")
+    observed_execution_sha = git_state.current_commit_sha()
+    if observed_execution_sha != policy.required_commit_sha:
+        reasons.append(f"observed commit {observed_execution_sha!r} != required {policy.required_commit_sha!r}")
 
     for ancestor_sha in policy.required_ancestor_shas:
         if not git_state.is_ancestor(ancestor_sha, policy.required_commit_sha):

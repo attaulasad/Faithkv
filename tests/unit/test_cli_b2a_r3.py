@@ -104,7 +104,7 @@ def test_verify_b2a_r3_authorization_end_to_end(tmp_path, capsys, monkeypatch):
         "authorization_stage": "fullkv_qualification",
         "authorized_repository": REQUIRED_REPOSITORY,
         "authorized_branch": "research/b2a-r3-runtime-qualified-calibration",
-        "authorized_commit_sha": "b" * 40,
+        "authorized_code_commit_sha": "b" * 40,
         "required_ancestor_shas": ["c" * 40],
         "required_rkv_sha": "45eaa7d69d20b7388321f077020a610d9afb65bd",
         "candidate_manifest_canonical_sha256": candidate_manifest["canonical_sha256"],
@@ -123,7 +123,12 @@ def test_verify_b2a_r3_authorization_end_to_end(tmp_path, capsys, monkeypatch):
     )
     monkeypatch.setattr(
         "kvcot.discovery.b2a_r3_provenance.SubprocessGitStateProvider",
-        lambda _root: FakeGitState(commit_sha="b" * 40, ancestors=frozenset({"c" * 40}), repository_root=_root),
+        lambda _root: FakeGitState(
+            commit_sha="d" * 40,
+            ancestors=frozenset({"b" * 40, "c" * 40}),
+            repository_root=_root,
+            changed_paths=(document_rel,),
+        ),
     )
 
     payload = {
@@ -134,10 +139,10 @@ def test_verify_b2a_r3_authorization_end_to_end(tmp_path, capsys, monkeypatch):
         "authorization_document_sha256": sha256_file(document_path),
         "authorized_repository": REQUIRED_REPOSITORY,
         "authorized_branch": "research/b2a-r3-runtime-qualified-calibration",
-        "authorized_commit_sha": "b" * 40,
+        "authorized_code_commit_sha": "b" * 40,
         "observed_repository": REQUIRED_REPOSITORY,
         "observed_branch": "research/b2a-r3-runtime-qualified-calibration",
-        "observed_commit_sha": "b" * 40,
+        "observed_execution_commit_sha": "d" * 40,
         "required_ancestor_shas": ["c" * 40],
         "required_rkv_sha": "45eaa7d69d20b7388321f077020a610d9afb65bd",
         "observed_rkv_sha": "45eaa7d69d20b7388321f077020a610d9afb65bd",

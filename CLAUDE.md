@@ -536,6 +536,34 @@ REMOTE CI REQUIRED ON FINAL SHA
 - The next required action after this commit is pushing the branch and
   obtaining remote CI evidence for the exact pushed SHA.
 
+An independent re-audit of SHA
+`ebb69d52810c94916ec4955d2c0848f597eadaf8` then found one remaining
+fundamental blocker: the v1 authorization document/claim semantics required
+the committed authorization document to contain the SHA of the commit that
+contained the document itself. That self-reference is impossible in a
+normal Git workflow.
+
+- `AUTHORIZATION_CLAIM_ARTIFACT_SCHEMA_VERSION` is now
+  `faithkv-b2a-r3-authorization-claim-v2`, and
+  `AUTHORIZATION_DOCUMENT_SCHEMA_VERSION` is now
+  `faithkv-b2a-r3-stage-authorization-document-v2`.
+- Authorization now separates `authorized_code_commit_sha` (the audited
+  CPU implementation commit) from `observed_execution_commit_sha` (the
+  later clean commit that contains the dated authorization document).
+- The authorization document names only `authorized_code_commit_sha`; the
+  claim records `observed_execution_commit_sha`.
+- Before claim consumption, the verifier requires clean current `HEAD` to
+  equal `observed_execution_commit_sha`, requires
+  `authorized_code_commit_sha` to be its ancestor, allows only the exact
+  dated authorization document to differ between those commits, retrieves
+  the authorization document bytes from the execution commit, and pins the
+  R-KV gitlink at both commits.
+- Persisted Stage-B verification uses the claim's historical execution
+  commit for authorization-document bytes instead of reading the current
+  checkout.
+- No real B2A-R3 claim exists under the v1 field semantics, so the schema
+  bump reinterprets nothing historical.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

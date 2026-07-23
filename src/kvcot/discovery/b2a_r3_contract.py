@@ -68,7 +68,7 @@ RUNTIME_PREDICTOR_VERSION: Final[str] = "faithkv-b2a-r3-runtime-predictor-v1"
 SELECTION_PROVENANCE_ARTIFACT_SCHEMA_VERSION: Final[str] = "faithkv-b2a-r3-selection-provenance-v1"
 SELECTION_PROTOCOL_VERSION: Final[str] = "faithkv-b2a-r3-selection-v1"
 
-AUTHORIZATION_CLAIM_ARTIFACT_SCHEMA_VERSION: Final[str] = "faithkv-b2a-r3-authorization-claim-v1"
+AUTHORIZATION_CLAIM_ARTIFACT_SCHEMA_VERSION: Final[str] = "faithkv-b2a-r3-authorization-claim-v2"
 
 # A fifth, distinct identity concept (protocol §14.5): versions the
 # IN-MEMORY `AttemptProvenancePolicy` object, never a persisted artifact.

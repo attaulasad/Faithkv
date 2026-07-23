@@ -49,7 +49,7 @@ __all__ = [
     "policy_from_authorization_document",
 ]
 
-AUTHORIZATION_DOCUMENT_SCHEMA_VERSION: Final[str] = "faithkv-b2a-r3-stage-authorization-document-v1"
+AUTHORIZATION_DOCUMENT_SCHEMA_VERSION: Final[str] = "faithkv-b2a-r3-stage-authorization-document-v2"
 AUTHORIZATION_DOCUMENT_BEGIN_MARKER: Final[str] = "<!-- BEGIN B2A-R3 AUTHORIZATION JSON -->"
 AUTHORIZATION_DOCUMENT_END_MARKER: Final[str] = "<!-- END B2A-R3 AUTHORIZATION JSON -->"
 
@@ -139,7 +139,7 @@ class AuthorizationDocumentR3(BaseModel):
     authorization_stage: str
     authorized_repository: str
     authorized_branch: str
-    authorized_commit_sha: str
+    authorized_code_commit_sha: str
     required_ancestor_shas: list[str]
     required_rkv_sha: str
     candidate_manifest_canonical_sha256: str
@@ -167,7 +167,7 @@ class AuthorizationDocumentR3(BaseModel):
             return None
         return require_lowercase_hex64(v, info.field_name)
 
-    @field_validator("authorized_commit_sha", "required_rkv_sha")
+    @field_validator("authorized_code_commit_sha", "required_rkv_sha")
     @classmethod
     def _hex40(cls, v: str, info: Any) -> str:
         if not isinstance(v, str) or not _HEX40_RE.match(v):
@@ -276,7 +276,7 @@ def policy_from_authorization_document(
         provenance_policy_version=PROVENANCE_POLICY_VERSION,
         required_repository=document.authorized_repository,
         required_branch=document.authorized_branch,
-        required_commit_sha=document.authorized_commit_sha,
+        required_commit_sha=document.authorized_code_commit_sha,
         required_ancestor_shas=tuple(document.required_ancestor_shas),
         required_rkv_sha=document.required_rkv_sha,
         authorization_id=document.authorization_id,

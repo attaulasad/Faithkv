@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-07-23 - B2A-R3 authorization self-reference repair (READY FOR INDEPENDENT RE-AUDIT; STAGE B BLOCKED; REMOTE CI REQUIRED)
+
+Repairs the remaining authorization blocker identified against
+`ebb69d52810c94916ec4955d2c0848f597eadaf8`:
+
+- **Two-commit authorization identity** - authorization claim/document v2
+  now separates `authorized_code_commit_sha` from
+  `observed_execution_commit_sha`, so the dated authorization document can
+  name the audited code commit without trying to contain its own commit
+  SHA.
+- **Execution-commit gate** - pre-claim verification requires current
+  clean `HEAD` to equal `observed_execution_commit_sha`, requires the
+  authorized code commit to be its ancestor, permits only the exact dated
+  authorization document in the diff between those commits, retrieves the
+  document bytes from the execution commit, and checks the R-KV gitlink at
+  both commits.
+- **Persisted binding** - downstream Stage-B binding verification now
+  reconstructs the historical authorization document from the claim's
+  execution commit instead of reading the current checkout.
+- **Regression coverage** - the real temporary-Git lifecycle test now
+  executes `verify_authorization_preconditions`, `claim_authorization`, the
+  injected Stage-B coordinator, persisted qualification artifact writing,
+  Stage-C HEAD advancement, and persisted Stage-B chain verification.
+
+```text
+READY FOR INDEPENDENT RE-AUDIT;
+STAGE B FULLKV QUALIFICATION REMAINS BLOCKED;
+REMOTE CI REQUIRED ON FINAL SHA
+```
+
 ## 2026-07-23 — B2A-R3 Stage-B binding repair (READY FOR INDEPENDENT RE-AUDIT; STAGE B BLOCKED; REMOTE CI REQUIRED)
 
 Repairs the blocking findings identified against
