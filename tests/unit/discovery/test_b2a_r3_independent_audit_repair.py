@@ -15,7 +15,10 @@ import pytest
 
 from kvcot.config import config_identity
 from kvcot.analysis.rkv_schedule import predicted_compaction_event_positions
-from kvcot.discovery.b2a_r3_artifacts import SELECTION_STATUS_SELECTED, verify_qualification_artifact
+from kvcot.discovery.b2a_r3_artifacts import (
+    SELECTION_STATUS_SELECTED,
+    verify_qualification_artifact as _verify_qualification_artifact,
+)
 from kvcot.discovery.b2a_r3_candidates import verify_candidate_manifest_structure
 from kvcot.discovery.b2a_r3_contract import (
     BUDGET,
@@ -70,6 +73,19 @@ def _rehash(payload: dict) -> dict:
     payload.pop("canonical_sha256", None)
     payload["canonical_sha256"] = sha256_json(payload)
     return payload
+
+
+def _stage_b_context_for_artifact(artifact: dict | None = None, candidate_manifest: dict | None = None):
+    from tests.unit.discovery.test_b2a_r3_freeze import _stage_b_context
+
+    maximum_candidates = 8 if artifact is None else artifact["authorized_maximum_candidates"]
+    phase_seconds = 3600 if artifact is None else artifact["authorized_phase_wall_time_limit_seconds"]
+    return _stage_b_context(candidate_manifest or _manifest(), maximum_candidates, phase_seconds)
+
+
+def verify_qualification_artifact(artifact: dict, **kwargs):
+    kwargs.setdefault("stage_b_authorization_context", _stage_b_context_for_artifact(artifact))
+    return _verify_qualification_artifact(artifact, **kwargs)
 
 
 def _timing() -> list[dict]:
@@ -262,6 +278,7 @@ def _artifact() -> dict:
     outcome = build_qualification_outcome(
         _evidence(), candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA
     )
+    context = _stage_b_context_for_artifact()
     payload = {
         "artifact_schema_version": QUALIFICATION_ARTIFACT_SCHEMA_VERSION,
         "candidate_order_protocol_version": CANDIDATE_ORDER_PROTOCOL_VERSION,
@@ -290,6 +307,10 @@ def _artifact() -> dict:
         "selection_status": SELECTION_STATUS_SELECTED,
         "qualification_stopped_reason": "first_pass",
         "authorized_maximum_candidates": 8,
+        "authorized_phase_wall_time_limit_seconds": context.verified_context.phase_wall_time_limit_seconds,
+        "stage_b_authorization_id": context.claim.authorization_id,
+        "authorization_document_sha256": context.claim.authorization_document_sha256,
+        "authorization_claim_canonical_sha256": context.claim.canonical_sha256,
         "attempt_started_at_utc": "2026-07-23T00:00:00+00:00",
         "attempt_completed_at_utc": "2026-07-23T00:01:00+00:00",
     }
@@ -383,6 +404,7 @@ def test_renderer_prompt_hash_mismatch_is_rejected():
             candidate_manifest=candidate_manifest,
             qualification_artifact=artifact,
             expected_config_sha256=candidate_manifest["config_sha256"],
+            stage_b_authorization_context=_stage_b_context_for_artifact(artifact, candidate_manifest),
             tokenizer_renderer=bad_renderer,
         )
 
@@ -399,6 +421,7 @@ def test_selection_provenance_semantic_ordinal_mismatch_is_rejected():
         candidate_manifest=candidate_manifest,
         qualification_artifact=artifact,
         expected_config_sha256=candidate_manifest["config_sha256"],
+        stage_b_authorization_context=_stage_b_context_for_artifact(artifact, candidate_manifest),
         tokenizer_renderer=_fake_renderer,
     )
     provenance["selected_ordinal"] = 1
@@ -410,6 +433,7 @@ def test_selection_provenance_semantic_ordinal_mismatch_is_rejected():
             candidate_manifest=candidate_manifest,
             qualification_artifact=artifact,
             expected_config_sha256=candidate_manifest["config_sha256"],
+            stage_b_authorization_context=_stage_b_context_for_artifact(artifact, candidate_manifest),
         )
 
 

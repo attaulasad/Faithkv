@@ -52,6 +52,8 @@ __all__ = [
     "AuthorizationClaimR3",
     "VerifiedAuthorizationContext",
     "ConsumedAuthorizationContext",
+    "StageBAuthorizationBinding",
+    "verify_persisted_stage_b_authorization_binding",
     "verify_authorization_preconditions",
     "claim_authorization",
     "plan_authorization_claim_dry_run",
@@ -175,6 +177,7 @@ class AuthorizationClaimR3(BaseModel):
 
 _VERIFIED_CONTEXT_TOKEN = object()
 _CONSUMED_CONTEXT_TOKEN = object()
+_STAGE_B_BINDING_TOKEN = object()
 
 
 @dataclass(frozen=True)
@@ -208,6 +211,18 @@ class ConsumedAuthorizationContext:
     def __iter__(self):
         yield self.claim
         yield self.claim_path
+
+
+@dataclass(frozen=True)
+class StageBAuthorizationBinding:
+    """Persisted Stage-B authorization chain verified from the global claim
+    file and committed authorization document for downstream processes."""
+
+    claim: AuthorizationClaimR3
+    verified_context: VerifiedAuthorizationContext
+    claim_path: Path
+    authorization_claim_canonical_sha256: str
+    _binding_token: object
 
 
 def verify_authorization_preconditions(
@@ -333,10 +348,18 @@ def verify_authorization_preconditions(
         from kvcot.discovery.b2a_r3_artifacts import verify_qualification_artifact
         from kvcot.discovery.b2a_r3_freeze import verify_selection_provenance
 
+        stage_b_binding = verify_persisted_stage_b_authorization_binding(
+            authorization_id=qualification_artifact["stage_b_authorization_id"],
+            repository_root=repository_root,
+            git_state=git_state,
+            candidate_manifest=candidate_manifest,
+            expected_config_sha256=expected_config_sha256,
+        )
         qualification = verify_qualification_artifact(
             qualification_artifact,
             candidate_manifest=candidate_manifest,
             expected_config_sha256=expected_config_sha256,
+            stage_b_authorization_context=stage_b_binding,
         )
         if claim.qualification_artifact_canonical_sha256 != qualification.canonical_sha256:
             raise AuthorizationClaimRefused("claim qualification-artifact hash does not match")
@@ -346,6 +369,7 @@ def verify_authorization_preconditions(
             candidate_manifest=candidate_manifest,
             qualification_artifact=qualification_artifact,
             expected_config_sha256=expected_config_sha256,
+            stage_b_authorization_context=stage_b_binding,
         )
         if claim.selected_manifest_sha256 != verified_selection.selected_manifest_sha256:
             raise AuthorizationClaimRefused("claim selected-manifest hash does not match")
@@ -383,22 +407,51 @@ def _create_authorization_claim(payload: dict[str, Any], *, claim_path: str | Pa
         raise AuthorizationClaimRefused("payload has no string authorization_id")
     validate_authorization_id(authorization_id)
 
+    import tempfile
+
     claim_path = Path(claim_path)
     claim_path.parent.mkdir(parents=True, exist_ok=True)
 
     text = json.dumps(payload, indent=2, ensure_ascii=True).encode("utf-8") + b"\n"
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(claim_path.parent), prefix=f".{authorization_id}.", suffix=".json.tmp"
+    )
     try:
-        fd = os.open(str(claim_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    except FileExistsError as exc:
-        raise AuthorizationAlreadyConsumed(
-            f"a filesystem entry already exists at {claim_path} -- authorization_id "
-            f"{authorization_id!r} is permanently consumed"
-        ) from exc
+        try:
+            view = memoryview(text)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise AuthorizationClaimRefused("failed to write authorization claim temp file")
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        try:
+            os.link(tmp_name, claim_path)
+        except FileExistsError as exc:
+            raise AuthorizationAlreadyConsumed(
+                f"a filesystem entry already exists at {claim_path} -- authorization_id "
+                f"{authorization_id!r} is permanently consumed"
+            ) from exc
+    except BaseException:
+        if os.path.exists(tmp_name):
+            os.remove(tmp_name)
+        raise
+    else:
+        os.remove(tmp_name)
+    with open(claim_path, "r", encoding="utf-8") as f:
+        written_payload = json.load(f)
+    if written_payload != payload:
+        raise AuthorizationClaimRefused("authorization claim did not round-trip after exclusive publication")
     try:
-        os.write(fd, text)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+        dir_fd = os.open(str(claim_path.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except (OSError, AttributeError):
+        pass
     return claim_path
 
 
@@ -461,6 +514,46 @@ def claim_authorization(
         claim_path=claim_path,
         authorization_claim_canonical_sha256=typed.canonical_sha256,
         _consumption_token=_CONSUMED_CONTEXT_TOKEN,
+    )
+
+
+def verify_persisted_stage_b_authorization_binding(
+    *,
+    authorization_id: str,
+    repository_root: str | Path,
+    git_state: GitStateProvider,
+    candidate_manifest: dict[str, Any],
+    expected_config_sha256: str,
+) -> StageBAuthorizationBinding:
+    """Reconstruct the Stage-B authorization binding from disk for later
+    processes. This verifies the global claim file exists, is canonical,
+    points at the committed Stage-B authorization document, and authorizes
+    the supplied candidate manifest and config identity."""
+    validate_authorization_id(authorization_id)
+    claim_path = Path(repository_root) / global_claim_path(authorization_id)
+    try:
+        with open(claim_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception as exc:
+        raise AuthorizationClaimRefused(f"failed to read persisted Stage-B claim {claim_path}: {exc}") from exc
+    verified = verify_authorization_preconditions(
+        payload,
+        git_state=git_state,
+        authorization_document_path=Path(repository_root) / payload["authorization_document_path"],
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=expected_config_sha256,
+        repository_root=repository_root,
+    )
+    if verified.claim.authorization_stage != AUTHORIZATION_STAGE_FULLKV_QUALIFICATION:
+        raise AuthorizationClaimRefused("persisted authorization binding is not Stage B")
+    if verified.claim.authorization_id != authorization_id:
+        raise AuthorizationClaimRefused("persisted authorization claim id does not match the requested id")
+    return StageBAuthorizationBinding(
+        claim=verified.claim,
+        verified_context=verified,
+        claim_path=claim_path,
+        authorization_claim_canonical_sha256=verified.claim.canonical_sha256,
+        _binding_token=_STAGE_B_BINDING_TOKEN,
     )
 
 

@@ -145,10 +145,10 @@ class QualificationArtifactR3(BaseModel):
     # "all_authorized_candidates_exhausted"` can be independently checked
     # against it rather than trusted as a bare, self-reported string.
     authorized_maximum_candidates: int
-    authorized_phase_wall_time_limit_seconds: int = 1
-    stage_b_authorization_id: str = "unbound-test-fixture"
-    authorization_document_sha256: str = "0" * 64
-    authorization_claim_canonical_sha256: str = "0" * 64
+    authorized_phase_wall_time_limit_seconds: int
+    stage_b_authorization_id: str
+    authorization_document_sha256: str
+    authorization_claim_canonical_sha256: str
     attempt_started_at_utc: str
     attempt_completed_at_utc: str
     canonical_sha256: str
@@ -283,7 +283,7 @@ def verify_qualification_artifact(
     *,
     candidate_manifest: dict[str, Any],
     expected_config_sha256: str,
-    consumed_authorization_context: Any | None = None,
+    stage_b_authorization_context: Any,
 ) -> QualificationArtifactR3:
     """Full strict verification: canonical self-hash, schema/cross-field
     invariants, and cross-artifact hash agreement with the candidate
@@ -292,41 +292,23 @@ def verify_qualification_artifact(
     verify_canonical_sha256(artifact)
     typed = QualificationArtifactR3.model_validate(artifact)
 
-    if consumed_authorization_context is not None:
-        from kvcot.discovery.b2a_r3_authorization import (
-            AUTHORIZATION_STAGE_FULLKV_QUALIFICATION,
-            ConsumedAuthorizationContext,
-            _CONSUMED_CONTEXT_TOKEN,
+    claim, context = _require_stage_b_binding(stage_b_authorization_context)
+    if typed.stage_b_authorization_id != claim.authorization_id:
+        raise ArtifactVerificationRefused("stage_b_authorization_id does not match the Stage-B authorization claim")
+    if typed.authorization_document_sha256 != claim.authorization_document_sha256:
+        raise ArtifactVerificationRefused("authorization_document_sha256 does not match the Stage-B claim")
+    if typed.authorization_claim_canonical_sha256 != claim.canonical_sha256:
+        raise ArtifactVerificationRefused("authorization_claim_canonical_sha256 does not match the Stage-B claim")
+    if typed.authorized_maximum_candidates != context.maximum_candidates:
+        raise ArtifactVerificationRefused("authorized_maximum_candidates does not match the verified document limit")
+    if typed.authorized_phase_wall_time_limit_seconds != context.phase_wall_time_limit_seconds:
+        raise ArtifactVerificationRefused(
+            "authorized_phase_wall_time_limit_seconds does not match the verified document limit"
         )
-
-        if (
-            not isinstance(consumed_authorization_context, ConsumedAuthorizationContext)
-            or consumed_authorization_context._consumption_token is not _CONSUMED_CONTEXT_TOKEN
-        ):
-            raise ArtifactVerificationRefused(
-                "qualification artifact verification requires a ConsumedAuthorizationContext from claim_authorization"
-            )
-        consumed = consumed_authorization_context
-        context = consumed.verified_context
-        claim = consumed.claim
-        if claim.authorization_stage != AUTHORIZATION_STAGE_FULLKV_QUALIFICATION:
-            raise ArtifactVerificationRefused("qualification artifact must be bound to a consumed Stage-B authorization")
-        if typed.stage_b_authorization_id != claim.authorization_id:
-            raise ArtifactVerificationRefused("stage_b_authorization_id does not match the consumed authorization claim")
-        if typed.authorization_document_sha256 != claim.authorization_document_sha256:
-            raise ArtifactVerificationRefused("authorization_document_sha256 does not match the consumed claim")
-        if typed.authorization_claim_canonical_sha256 != claim.canonical_sha256:
-            raise ArtifactVerificationRefused("authorization_claim_canonical_sha256 does not match the consumed claim")
-        if typed.authorized_maximum_candidates != context.maximum_candidates:
-            raise ArtifactVerificationRefused("authorized_maximum_candidates does not match the verified document limit")
-        if typed.authorized_phase_wall_time_limit_seconds != context.phase_wall_time_limit_seconds:
-            raise ArtifactVerificationRefused(
-                "authorized_phase_wall_time_limit_seconds does not match the verified document limit"
-            )
-        if typed.candidate_manifest_canonical_sha256 != claim.candidate_manifest_canonical_sha256:
-            raise ArtifactVerificationRefused(
-                "candidate_manifest_canonical_sha256 does not match the consumed authorization claim"
-            )
+    if typed.candidate_manifest_canonical_sha256 != claim.candidate_manifest_canonical_sha256:
+        raise ArtifactVerificationRefused(
+            "candidate_manifest_canonical_sha256 does not match the Stage-B authorization claim"
+        )
 
     try:
         verify_candidate_manifest_structure(
@@ -377,23 +359,65 @@ class QualificationArtifactWriteRefused(RuntimeError):
     existing (and therefore immutable) artifact file."""
 
 
+def _require_stage_b_binding(stage_b_authorization_context: Any):
+    from kvcot.discovery.b2a_r3_authorization import (
+        AUTHORIZATION_STAGE_FULLKV_QUALIFICATION,
+        ConsumedAuthorizationContext,
+        StageBAuthorizationBinding,
+        _CONSUMED_CONTEXT_TOKEN,
+        _STAGE_B_BINDING_TOKEN,
+    )
+
+    if isinstance(stage_b_authorization_context, ConsumedAuthorizationContext):
+        if stage_b_authorization_context._consumption_token is not _CONSUMED_CONTEXT_TOKEN:
+            raise ArtifactVerificationRefused("authorization context was not returned by claim_authorization")
+        claim = stage_b_authorization_context.claim
+        verified = stage_b_authorization_context.verified_context
+    elif isinstance(stage_b_authorization_context, StageBAuthorizationBinding):
+        if stage_b_authorization_context._binding_token is not _STAGE_B_BINDING_TOKEN:
+            raise ArtifactVerificationRefused("authorization binding was not produced by persisted-chain verification")
+        claim = stage_b_authorization_context.claim
+        verified = stage_b_authorization_context.verified_context
+    else:
+        raise ArtifactVerificationRefused(
+            "stage_b_authorization_context is required and must come from claim_authorization or persisted-chain verification"
+        )
+    if claim.authorization_stage != AUTHORIZATION_STAGE_FULLKV_QUALIFICATION:
+        raise ArtifactVerificationRefused("qualification artifact must be bound to a Stage-B authorization")
+    return claim, verified
+
+
 def _exclusive_write_json(target: Path, payload: dict[str, Any]) -> None:
     import os
+    import tempfile
 
     target.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(payload, indent=2, ensure_ascii=True).encode("utf-8") + b"\n"
+    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=".b2a-r3-qualification-", suffix=".json.tmp")
     try:
-        fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    except FileExistsError as exc:
-        raise QualificationArtifactWriteRefused(
-            f"refusing to overwrite an existing qualification artifact at {target} -- "
-            "this artifact is immutable once written"
-        ) from exc
-    try:
-        os.write(fd, text)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+        try:
+            view = memoryview(text)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise QualificationArtifactWriteRefused("failed to write qualification artifact temp file")
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        try:
+            os.link(tmp_name, target)
+        except FileExistsError as exc:
+            raise QualificationArtifactWriteRefused(
+                f"refusing to overwrite an existing qualification artifact at {target} -- "
+                "this artifact is immutable once written"
+            ) from exc
+    except BaseException:
+        if os.path.exists(tmp_name):
+            os.remove(tmp_name)
+        raise
+    else:
+        os.remove(tmp_name)
 
     try:
         dir_fd = os.open(str(target.parent), os.O_RDONLY)
@@ -417,8 +441,8 @@ def build_qualification_artifact(
     expected_config_sha256: str,
     stopped_reason: str,
     authorized_maximum_candidates: int,
-    authorized_phase_wall_time_limit_seconds: int | None = None,
-    consumed_authorization_context: Any | None = None,
+    authorized_phase_wall_time_limit_seconds: int,
+    stage_b_authorization_context: Any,
     attempt_started_at_utc: str,
     attempt_completed_at_utc: str,
 ) -> dict[str, Any]:
@@ -460,8 +484,6 @@ def build_qualification_artifact(
             f"authorized_maximum_candidates must be an int in 1..{QUALIFICATION_CANDIDATE_LIMIT}, "
             f"got {authorized_maximum_candidates!r}"
         )
-    if authorized_phase_wall_time_limit_seconds is None:
-        authorized_phase_wall_time_limit_seconds = 1
     if (
         isinstance(authorized_phase_wall_time_limit_seconds, bool)
         or not isinstance(authorized_phase_wall_time_limit_seconds, int)
@@ -471,31 +493,16 @@ def build_qualification_artifact(
             "authorized_phase_wall_time_limit_seconds must be a positive int"
         )
 
-    auth_claim = None
-    if consumed_authorization_context is not None:
-        from kvcot.discovery.b2a_r3_authorization import (
-            AUTHORIZATION_STAGE_FULLKV_QUALIFICATION,
-            ConsumedAuthorizationContext,
-            _CONSUMED_CONTEXT_TOKEN,
+    try:
+        auth_claim, auth_verified = _require_stage_b_binding(stage_b_authorization_context)
+    except ArtifactVerificationRefused as exc:
+        raise QualificationArtifactBuildRefused(str(exc)) from exc
+    if authorized_maximum_candidates != auth_verified.maximum_candidates:
+        raise QualificationArtifactBuildRefused("authorized_maximum_candidates does not match the verified document")
+    if authorized_phase_wall_time_limit_seconds != auth_verified.phase_wall_time_limit_seconds:
+        raise QualificationArtifactBuildRefused(
+            "authorized_phase_wall_time_limit_seconds does not match the verified document"
         )
-
-        if (
-            not isinstance(consumed_authorization_context, ConsumedAuthorizationContext)
-            or consumed_authorization_context._consumption_token is not _CONSUMED_CONTEXT_TOKEN
-        ):
-            raise QualificationArtifactBuildRefused(
-                "consumed_authorization_context must be returned by claim_authorization"
-            )
-        auth_claim = consumed_authorization_context.claim
-        auth_verified = consumed_authorization_context.verified_context
-        if auth_claim.authorization_stage != AUTHORIZATION_STAGE_FULLKV_QUALIFICATION:
-            raise QualificationArtifactBuildRefused("qualification artifacts must be bound to a Stage-B authorization")
-        if authorized_maximum_candidates != auth_verified.maximum_candidates:
-            raise QualificationArtifactBuildRefused("authorized_maximum_candidates does not match the verified document")
-        if authorized_phase_wall_time_limit_seconds != auth_verified.phase_wall_time_limit_seconds:
-            raise QualificationArtifactBuildRefused(
-                "authorized_phase_wall_time_limit_seconds does not match the verified document"
-            )
     if len(attempted_outcomes) > authorized_maximum_candidates:
         raise QualificationArtifactBuildRefused(
             f"attempted {len(attempted_outcomes)} candidates, exceeding the authorized limit of "
@@ -514,7 +521,7 @@ def build_qualification_artifact(
     manifest = verify_candidate_manifest_structure(
         candidate_manifest, expected_config_sha256=expected_config_sha256
     )
-    if auth_claim is not None and manifest.canonical_sha256 != auth_claim.candidate_manifest_canonical_sha256:
+    if manifest.canonical_sha256 != auth_claim.candidate_manifest_canonical_sha256:
         raise QualificationArtifactBuildRefused(
             "candidate_manifest does not match the consumed authorization claim"
         )
@@ -591,15 +598,9 @@ def build_qualification_artifact(
         "qualification_stopped_reason": stopped_reason,
         "authorized_maximum_candidates": authorized_maximum_candidates,
         "authorized_phase_wall_time_limit_seconds": authorized_phase_wall_time_limit_seconds,
-        "stage_b_authorization_id": (
-            auth_claim.authorization_id if auth_claim is not None else "unbound-test-fixture"
-        ),
-        "authorization_document_sha256": (
-            auth_claim.authorization_document_sha256 if auth_claim is not None else "0" * 64
-        ),
-        "authorization_claim_canonical_sha256": (
-            auth_claim.canonical_sha256 if auth_claim is not None else "0" * 64
-        ),
+        "stage_b_authorization_id": auth_claim.authorization_id,
+        "authorization_document_sha256": auth_claim.authorization_document_sha256,
+        "authorization_claim_canonical_sha256": auth_claim.canonical_sha256,
         "attempt_started_at_utc": attempt_started_at_utc,
         "attempt_completed_at_utc": attempt_completed_at_utc,
     }
@@ -614,7 +615,7 @@ def write_qualification_artifact_atomic(
     output_path: str | Path,
     candidate_manifest: dict[str, Any],
     expected_config_sha256: str,
-    consumed_authorization_context: Any | None = None,
+    stage_b_authorization_context: Any,
 ) -> None:
     """Atomic write, following the same discipline as
     `kvcot.discovery.b2a_r3_candidates.atomic_write_json`, plus three
@@ -648,7 +649,7 @@ def write_qualification_artifact_atomic(
         artifact,
         candidate_manifest=candidate_manifest,
         expected_config_sha256=expected_config_sha256,
-        consumed_authorization_context=consumed_authorization_context,
+        stage_b_authorization_context=stage_b_authorization_context,
     )
 
     target = Path(output_path)
@@ -665,5 +666,5 @@ def write_qualification_artifact_atomic(
         written,
         candidate_manifest=candidate_manifest,
         expected_config_sha256=expected_config_sha256,
-        consumed_authorization_context=consumed_authorization_context,
+        stage_b_authorization_context=stage_b_authorization_context,
     )

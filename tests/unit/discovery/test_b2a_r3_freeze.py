@@ -11,9 +11,9 @@ from kvcot.discovery.b2a_r3_contract import PROMPT_SPECIAL_TOKENS_NOTE, SELECTED
 from kvcot.discovery.b2a_r3_freeze import (
     PromptRenderingResult,
     RowFreezeRefusedR3,
-    construct_selected_manifest_and_provenance,
-    plan_freeze_dry_run,
-    verify_selection_provenance,
+    construct_selected_manifest_and_provenance as _construct_selected_manifest_and_provenance,
+    plan_freeze_dry_run as _plan_freeze_dry_run,
+    verify_selection_provenance as _verify_selection_provenance,
     write_selected_manifest_and_provenance,
 )
 from kvcot.discovery.b2a_r3_qualification import build_qualification_outcome
@@ -29,6 +29,98 @@ MODEL_NAME = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 MODEL_REVISION = "6a6f4aa4197940add57724a7707d069478df56b1"
 BUDGET = 1024
 CONFIG_SHA = "c" * 64
+
+
+def _stage_b_context(candidate_manifest, maximum_candidates=8, phase_seconds=3600):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from kvcot.discovery.b2a_r3_authorization import (
+        AUTHORIZATION_CLAIM_ARTIFACT_SCHEMA_VERSION,
+        AUTHORIZATION_STAGE_FULLKV_QUALIFICATION,
+        AuthorizationClaimR3,
+        ConsumedAuthorizationContext,
+        _CONSUMED_CONTEXT_TOKEN,
+    )
+    from kvcot.discovery.b2a_r3_contract import REQUIRED_REPOSITORY, global_claim_path
+
+    auth_id = "stage-b-2026-08-01"
+    payload = {
+        "artifact_schema_version": AUTHORIZATION_CLAIM_ARTIFACT_SCHEMA_VERSION,
+        "authorization_id": auth_id,
+        "authorization_stage": AUTHORIZATION_STAGE_FULLKV_QUALIFICATION,
+        "authorization_document_path": "docs/B2A_R3_STAGE_B_QUALIFICATION_AUTHORIZATION_2026-08-01.md",
+        "authorization_document_sha256": "a" * 64,
+        "authorized_repository": REQUIRED_REPOSITORY,
+        "authorized_branch": "research/b2a-r3-runtime-qualified-calibration",
+        "authorized_commit_sha": "b" * 40,
+        "observed_repository": REQUIRED_REPOSITORY,
+        "observed_branch": "research/b2a-r3-runtime-qualified-calibration",
+        "observed_commit_sha": "b" * 40,
+        "required_ancestor_shas": ["c" * 40],
+        "required_rkv_sha": "45eaa7d69d20b7388321f077020a610d9afb65bd",
+        "observed_rkv_sha": "45eaa7d69d20b7388321f077020a610d9afb65bd",
+        "candidate_manifest_canonical_sha256": candidate_manifest["canonical_sha256"],
+        "qualification_artifact_canonical_sha256": None,
+        "selected_manifest_sha256": None,
+        "selected_manifest_hash_algorithm": None,
+        "attempt_id": "deadbeef",
+        "global_claim_path": global_claim_path(auth_id),
+        "attempt_directory_path": "results/decisions/b2a_r3_attempt_20260801T000000000000Z_deadbeef",
+        "claimed_at_utc": "2026-08-01T00:00:00+00:00",
+    }
+    payload["canonical_sha256"] = sha256_json(payload)
+    claim = AuthorizationClaimR3.model_validate(payload)
+    verified = SimpleNamespace(maximum_candidates=maximum_candidates, phase_wall_time_limit_seconds=phase_seconds)
+    return ConsumedAuthorizationContext(
+        claim=claim,
+        verified_context=verified,
+        claim_path=Path(claim.global_claim_path),
+        authorization_claim_canonical_sha256=claim.canonical_sha256,
+        _consumption_token=_CONSUMED_CONTEXT_TOKEN,
+    )
+
+
+def construct_selected_manifest_and_provenance(*, candidate_manifest, qualification_artifact, expected_config_sha256, tokenizer_renderer):
+    return _construct_selected_manifest_and_provenance(
+        candidate_manifest=candidate_manifest,
+        qualification_artifact=qualification_artifact,
+        expected_config_sha256=expected_config_sha256,
+        stage_b_authorization_context=_stage_b_context(
+            candidate_manifest,
+            qualification_artifact["authorized_maximum_candidates"],
+            qualification_artifact["authorized_phase_wall_time_limit_seconds"],
+        ),
+        tokenizer_renderer=tokenizer_renderer,
+    )
+
+
+def verify_selection_provenance(provenance, *, selected_manifest, candidate_manifest, qualification_artifact, expected_config_sha256):
+    return _verify_selection_provenance(
+        provenance,
+        selected_manifest=selected_manifest,
+        candidate_manifest=candidate_manifest,
+        qualification_artifact=qualification_artifact,
+        expected_config_sha256=expected_config_sha256,
+        stage_b_authorization_context=_stage_b_context(
+            candidate_manifest,
+            qualification_artifact["authorized_maximum_candidates"],
+            qualification_artifact["authorized_phase_wall_time_limit_seconds"],
+        ),
+    )
+
+
+def plan_freeze_dry_run(*, candidate_manifest, qualification_artifact, expected_config_sha256):
+    return _plan_freeze_dry_run(
+        candidate_manifest=candidate_manifest,
+        qualification_artifact=qualification_artifact,
+        expected_config_sha256=expected_config_sha256,
+        stage_b_authorization_context=_stage_b_context(
+            candidate_manifest,
+            qualification_artifact["authorized_maximum_candidates"],
+            qualification_artifact["authorized_phase_wall_time_limit_seconds"],
+        ),
+    )
 
 
 def _row(unique_id: str, level: str) -> dict:
@@ -124,6 +216,8 @@ def _qualification_artifact(candidate_manifest, attempted, *, selection_status, 
         TOKENIZER_REVISION,
     )
 
+    authorized_maximum = QUALIFICATION_CANDIDATE_LIMIT if first_ordinal is not None else len(attempted)
+    context = _stage_b_context(candidate_manifest, authorized_maximum)
     payload = {
         "artifact_schema_version": QUALIFICATION_ARTIFACT_SCHEMA_VERSION,
         "candidate_order_protocol_version": CANDIDATE_ORDER_PROTOCOL_VERSION,
@@ -153,9 +247,11 @@ def _qualification_artifact(candidate_manifest, attempted, *, selection_status, 
         "qualification_stopped_reason": (
             STOPPED_REASON_FIRST_PASS if first_ordinal is not None else STOPPED_REASON_ALL_CANDIDATES_EXHAUSTED
         ),
-        "authorized_maximum_candidates": (
-            QUALIFICATION_CANDIDATE_LIMIT if first_ordinal is not None else len(attempted)
-        ),
+        "authorized_maximum_candidates": authorized_maximum,
+        "authorized_phase_wall_time_limit_seconds": context.verified_context.phase_wall_time_limit_seconds,
+        "stage_b_authorization_id": context.claim.authorization_id,
+        "authorization_document_sha256": context.claim.authorization_document_sha256,
+        "authorization_claim_canonical_sha256": context.claim.canonical_sha256,
         "attempt_started_at_utc": "2026-07-23T00:00:00+00:00",
         "attempt_completed_at_utc": "2026-07-23T00:10:00+00:00",
     }

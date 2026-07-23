@@ -162,18 +162,60 @@ def _stage_c_inputs(tmp_path, **payload_overrides):
     from tests.unit.discovery.test_b2a_r3_freeze import (
         CONFIG_SHA,
         _fake_renderer,
+        _stage_b_context,
         _valid_chain,
     )
     from tests.unit.discovery.test_b2a_r3_provenance import FakeGitState
+    from kvcot.discovery.b2a_r3_authorization import verify_persisted_stage_b_authorization_binding
     from kvcot.discovery.b2a_r3_freeze import construct_selected_manifest_and_provenance
 
     document_rel = "docs/B2A_R3_STAGE_C_EXECUTION_AUTHORIZATION_2026-08-05.md"
     document = tmp_path / document_rel
     candidate_manifest, qualification_artifact = _valid_chain()
+    stage_b_context = _stage_b_context(
+        candidate_manifest,
+        qualification_artifact["authorized_maximum_candidates"],
+        qualification_artifact["authorized_phase_wall_time_limit_seconds"],
+    )
+    stage_b_document_rel = stage_b_context.claim.authorization_document_path
+    stage_b_document = tmp_path / stage_b_document_rel
+    _write_document(stage_b_document, _document_payload(
+        authorization_id=stage_b_context.claim.authorization_id,
+        authorization_stage=AUTHORIZATION_STAGE_FULLKV_QUALIFICATION,
+        authorized_branch=stage_b_context.claim.authorized_branch,
+        authorized_commit_sha=stage_b_context.claim.authorized_commit_sha,
+        required_ancestor_shas=stage_b_context.claim.required_ancestor_shas,
+        required_rkv_sha=stage_b_context.claim.required_rkv_sha,
+        candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],
+        maximum_candidates=qualification_artifact["authorized_maximum_candidates"],
+        phase_wall_time_limit_seconds=qualification_artifact["authorized_phase_wall_time_limit_seconds"],
+    ))
+    stage_b_claim = stage_b_context.claim.model_dump(mode="json")
+    stage_b_claim["authorization_document_sha256"] = sha256_file(stage_b_document)
+    stage_b_claim.pop("canonical_sha256")
+    stage_b_claim["canonical_sha256"] = sha256_json(stage_b_claim)
+    stage_b_claim_path = tmp_path / stage_b_claim["global_claim_path"]
+    stage_b_claim_path.parent.mkdir(parents=True, exist_ok=True)
+    import json as _json
+    stage_b_claim_path.write_text(_json.dumps(stage_b_claim, indent=2) + "\n", encoding="utf-8")
+    git_state = FakeGitState(commit_sha="b" * 40, ancestors=frozenset({"c" * 40}), repository_root=str(tmp_path))
+    stage_b_binding = verify_persisted_stage_b_authorization_binding(
+        authorization_id=stage_b_claim["authorization_id"],
+        repository_root=tmp_path,
+        git_state=git_state,
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=CONFIG_SHA,
+    )
+    qualification_artifact = dict(qualification_artifact)
+    qualification_artifact["authorization_document_sha256"] = stage_b_claim["authorization_document_sha256"]
+    qualification_artifact["authorization_claim_canonical_sha256"] = stage_b_claim["canonical_sha256"]
+    qualification_artifact.pop("canonical_sha256")
+    qualification_artifact["canonical_sha256"] = sha256_json(qualification_artifact)
     selected_manifest, selection_provenance = construct_selected_manifest_and_provenance(
         candidate_manifest=candidate_manifest,
         qualification_artifact=qualification_artifact,
         expected_config_sha256=CONFIG_SHA,
+        stage_b_authorization_context=stage_b_binding,
         tokenizer_renderer=_fake_renderer,
     )
     _write_document(document, _document_payload(
@@ -196,7 +238,6 @@ def _stage_c_inputs(tmp_path, **payload_overrides):
     }
     payload_values.update(payload_overrides)
     payload = _stage_c_payload(**payload_values)
-    git_state = FakeGitState(commit_sha="b" * 40, ancestors=frozenset({"c" * 40}), repository_root=str(tmp_path))
     return {
         "claim_payload": payload,
         "git_state": git_state,

@@ -2851,12 +2851,34 @@ def cmd_plan_b2a_r3_qualification(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run_b2a_r3_stage_b_qualification(args: argparse.Namespace) -> int:
+    import json
+
+    from kvcot.discovery.b2a_r3_stage_b import run_b2a_r3_stage_b_qualification
+
+    with open(args.claim, "r", encoding="utf-8") as f:
+        claim_payload = json.load(f)
+    try:
+        result = run_b2a_r3_stage_b_qualification(claim_payload=claim_payload)
+    except Exception as e:  # noqa: BLE001
+        print(f"run-b2a-r3-stage-b-qualification: EXECUTION FAILED: {e}")
+        return 1
+    print("run-b2a-r3-stage-b-qualification: execution PASSED")
+    print(f"  authorization_claim_path={result.authorization_claim_path}")
+    print(f"  qualification_artifact_path={result.qualification_artifact_path}")
+    print(f"  selection_status={result.artifact['selection_status']}")
+    print(f"  selected_unique_id={result.artifact['selected_unique_id']}")
+    return 0
+
+
 def cmd_verify_b2a_r3_qualification(args: argparse.Namespace) -> int:
     import json
 
     from kvcot.config import config_identity
     from kvcot.discovery import b2a_r3_contract as c
     from kvcot.discovery.b2a_r3_artifacts import verify_qualification_artifact
+    from kvcot.discovery.b2a_r3_authorization import verify_persisted_stage_b_authorization_binding
+    from kvcot.discovery.b2a_r3_provenance import SubprocessGitStateProvider
 
     artifact_path = args.artifact or c.QUALIFICATION_ARTIFACT_PATH
     candidates_path = args.candidates or c.CANDIDATE_MANIFEST_PATH
@@ -2872,8 +2894,16 @@ def cmd_verify_b2a_r3_qualification(args: argparse.Namespace) -> int:
     expected_config_sha256 = config_identity(config_path)
 
     try:
+        stage_b_binding = verify_persisted_stage_b_authorization_binding(
+            authorization_id=artifact["stage_b_authorization_id"],
+            repository_root=".",
+            git_state=SubprocessGitStateProvider("."),
+            candidate_manifest=candidate_manifest,
+            expected_config_sha256=expected_config_sha256,
+        )
         typed = verify_qualification_artifact(
             artifact, candidate_manifest=candidate_manifest, expected_config_sha256=expected_config_sha256,
+            stage_b_authorization_context=stage_b_binding,
         )
     except Exception as e:  # noqa: BLE001
         print(f"verify-b2a-r3-qualification: VERIFICATION FAILED: {e}")
@@ -2889,7 +2919,9 @@ def cmd_freeze_b2a_r3_selected_row(args: argparse.Namespace) -> int:
 
     from kvcot.config import config_identity
     from kvcot.discovery import b2a_r3_contract as c
+    from kvcot.discovery.b2a_r3_authorization import verify_persisted_stage_b_authorization_binding
     from kvcot.discovery.b2a_r3_freeze import plan_freeze_dry_run
+    from kvcot.discovery.b2a_r3_provenance import SubprocessGitStateProvider
 
     if not args.dry_run:
         raise SystemExit("freeze-b2a-r3-selected-row only supports --dry-run -- no production freezer is exposed.")
@@ -2905,10 +2937,18 @@ def cmd_freeze_b2a_r3_selected_row(args: argparse.Namespace) -> int:
     with open(artifact_path, "r", encoding="utf-8") as f:
         qualification_artifact = json.load(f)
     expected_config_sha256 = config_identity(config_path)
+    stage_b_binding = verify_persisted_stage_b_authorization_binding(
+        authorization_id=qualification_artifact["stage_b_authorization_id"],
+        repository_root=".",
+        git_state=SubprocessGitStateProvider("."),
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=expected_config_sha256,
+    )
 
     plan = plan_freeze_dry_run(
         candidate_manifest=candidate_manifest, qualification_artifact=qualification_artifact,
         expected_config_sha256=expected_config_sha256,
+        stage_b_authorization_context=stage_b_binding,
     )
     print("freeze-b2a-r3-selected-row dry-run plan:")
     for key, value in plan.items():
@@ -2921,7 +2961,9 @@ def cmd_verify_b2a_r3_selection(args: argparse.Namespace) -> int:
 
     from kvcot.config import config_identity
     from kvcot.discovery import b2a_r3_contract as c
+    from kvcot.discovery.b2a_r3_authorization import verify_persisted_stage_b_authorization_binding
     from kvcot.discovery.b2a_r3_freeze import verify_selection_provenance
+    from kvcot.discovery.b2a_r3_provenance import SubprocessGitStateProvider
     from kvcot.discovery.manifest import B2AOneExampleManifest
 
     provenance_path = args.provenance or c.SELECTION_PROVENANCE_PATH
@@ -2939,10 +2981,19 @@ def cmd_verify_b2a_r3_selection(args: argparse.Namespace) -> int:
         qualification_artifact = json.load(f)
 
     try:
+        expected_config_sha256 = config_identity(c.CONFIG_PATH)
+        stage_b_binding = verify_persisted_stage_b_authorization_binding(
+            authorization_id=qualification_artifact["stage_b_authorization_id"],
+            repository_root=".",
+            git_state=SubprocessGitStateProvider("."),
+            candidate_manifest=candidate_manifest,
+            expected_config_sha256=expected_config_sha256,
+        )
         typed = verify_selection_provenance(
             provenance, selected_manifest=selected_manifest, candidate_manifest=candidate_manifest,
             qualification_artifact=qualification_artifact,
-            expected_config_sha256=config_identity(c.CONFIG_PATH),
+            expected_config_sha256=expected_config_sha256,
+            stage_b_authorization_context=stage_b_binding,
         )
     except Exception as e:  # noqa: BLE001
         print(f"verify-b2a-r3-selection: VERIFICATION FAILED: {e}")
@@ -3159,6 +3210,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--candidates", default=None)
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_plan_b2a_r3_qualification)
+
+    p = sub.add_parser(
+        "run-b2a-r3-stage-b-qualification",
+        help="B2A-R3: consume a Stage-B authorization claim and run fixed-path FullKV qualification.",
+    )
+    p.add_argument("--claim", required=True)
+    p.set_defaults(func=cmd_run_b2a_r3_stage_b_qualification)
 
     p = sub.add_parser("verify-b2a-r3-qualification", help="B2A-R3: verify a qualification artifact.")
     p.add_argument("--artifact", default=None)

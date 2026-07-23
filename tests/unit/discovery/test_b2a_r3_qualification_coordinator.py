@@ -19,9 +19,9 @@ from kvcot.discovery.b2a_r3_artifacts import (
     STOPPED_REASON_PHASE_WALL_TIME_EXHAUSTED,
     QualificationArtifactBuildRefused,
     QualificationArtifactWriteRefused,
-    build_qualification_artifact,
-    verify_qualification_artifact,
-    write_qualification_artifact_atomic,
+    build_qualification_artifact as _build_qualification_artifact,
+    verify_qualification_artifact as _verify_qualification_artifact,
+    write_qualification_artifact_atomic as _write_qualification_artifact_atomic,
 )
 from kvcot.discovery.b2a_r3_contract import (
     CANDIDATE_MANIFEST_PATH,
@@ -51,6 +51,52 @@ def _verified_stage_b(*args, **kwargs):
         git_state=git_state,
     )
     return payload, consumed, document, candidate_manifest, git_state
+
+
+def _context_for_limit(maximum_candidates=QUALIFICATION_CANDIDATE_LIMIT, phase_seconds=3600):
+    import tempfile
+
+    _payload, context, _document, _candidate_manifest, _git_state = _verified_stage_b(
+        Path(tempfile.mkdtemp()),
+        document_overrides={
+            "maximum_candidates": maximum_candidates,
+            "phase_wall_time_limit_seconds": phase_seconds,
+        },
+    )
+    return context
+
+
+def build_qualification_artifact(*args, **kwargs):
+    kwargs.setdefault("authorized_phase_wall_time_limit_seconds", 3600)
+    requested_limit = kwargs.get("authorized_maximum_candidates", QUALIFICATION_CANDIDATE_LIMIT)
+    context_limit = requested_limit if isinstance(requested_limit, int) and not isinstance(requested_limit, bool) and 1 <= requested_limit <= QUALIFICATION_CANDIDATE_LIMIT else QUALIFICATION_CANDIDATE_LIMIT
+    kwargs.setdefault(
+        "stage_b_authorization_context",
+        _context_for_limit(context_limit),
+    )
+    return _build_qualification_artifact(*args, **kwargs)
+
+
+def verify_qualification_artifact(artifact, **kwargs):
+    kwargs.setdefault(
+        "stage_b_authorization_context",
+        _context_for_limit(
+            artifact.get("authorized_maximum_candidates", QUALIFICATION_CANDIDATE_LIMIT),
+            artifact.get("authorized_phase_wall_time_limit_seconds", 3600),
+        ),
+    )
+    return _verify_qualification_artifact(artifact, **kwargs)
+
+
+def write_qualification_artifact_atomic(artifact, **kwargs):
+    kwargs.setdefault(
+        "stage_b_authorization_context",
+        _context_for_limit(
+            artifact.get("authorized_maximum_candidates", QUALIFICATION_CANDIDATE_LIMIT),
+            artifact.get("authorized_phase_wall_time_limit_seconds", 3600),
+        ),
+    )
+    return _write_qualification_artifact_atomic(artifact, **kwargs)
 
 
 class _FakeClock:
@@ -410,7 +456,7 @@ def test_final_artifact_passes_full_semantic_verification_every_scenario(tmp_pat
             artifact,
             candidate_manifest=candidate_manifest,
             expected_config_sha256=candidate_manifest["config_sha256"],
-            consumed_authorization_context=context,
+            stage_b_authorization_context=context,
         )
 
 
@@ -459,7 +505,7 @@ def test_artifact_is_bound_to_consumed_stage_b_authorization(tmp_path):
         artifact,
         candidate_manifest=candidate_manifest,
         expected_config_sha256=candidate_manifest["config_sha256"],
-        consumed_authorization_context=context,
+        stage_b_authorization_context=context,
     )
 
 
@@ -681,10 +727,11 @@ def test_atomic_writer_refuses_semantically_fabricated_but_canonically_rehashed_
 def test_atomic_writer_never_defaults_to_production_path():
     import inspect
 
-    signature = inspect.signature(write_qualification_artifact_atomic)
+    signature = inspect.signature(_write_qualification_artifact_atomic)
     assert signature.parameters["output_path"].default is inspect.Parameter.empty
     assert signature.parameters["candidate_manifest"].default is inspect.Parameter.empty
     assert signature.parameters["expected_config_sha256"].default is inspect.Parameter.empty
+    assert signature.parameters["stage_b_authorization_context"].default is inspect.Parameter.empty
 
 
 def test_coordinator_module_import_never_touches_rkv_torch_or_transformers():

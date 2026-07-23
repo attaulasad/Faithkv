@@ -39,8 +39,41 @@ from kvcot.discovery.b2a_r3_runtime import predict_runtime
 from kvcot.utils.hashing import sha256_int_ids, sha256_json, sha256_text
 
 from tests.unit.discovery.test_b2a_r3_qualification import _valid_evidence
+from tests.unit.discovery.test_b2a_r3_authorization import _verified_stage_b as _build_verified_stage_b
+from kvcot.discovery.b2a_r3_authorization import claim_authorization
 
 CONFIG_SHA = "de8ac65a348c307c4f00089da07914666332935981bcaa7c98a150a9e7e778b3"
+
+
+def _stage_b_context(maximum_candidates=QUALIFICATION_CANDIDATE_LIMIT, phase_seconds=3600):
+    import tempfile
+    from pathlib import Path
+
+    payload, verified, document, _candidate_manifest, git_state = _build_verified_stage_b(
+        Path(tempfile.mkdtemp()),
+        document_overrides={
+            "maximum_candidates": maximum_candidates,
+            "phase_wall_time_limit_seconds": phase_seconds,
+        },
+    )
+    return claim_authorization(
+        payload,
+        repository_root=Path(document).parents[1],
+        verified_context=verified,
+        git_state=git_state,
+    )
+
+
+def _verify(artifact, *, candidate_manifest, expected_config_sha256):
+    return verify_qualification_artifact(
+        artifact,
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=expected_config_sha256,
+        stage_b_authorization_context=_stage_b_context(
+            artifact.get("authorized_maximum_candidates", QUALIFICATION_CANDIDATE_LIMIT),
+            artifact.get("authorized_phase_wall_time_limit_seconds", 3600),
+        ),
+    )
 
 
 def _uid(ordinal: int) -> str:
@@ -67,6 +100,8 @@ def _outcome(ordinal: int, *, qualified: bool):
 
 def _artifact(attempted, *, selection_status, first_ordinal, selected_unique_id):
     manifest = _candidate_manifest()
+    authorized_maximum = QUALIFICATION_CANDIDATE_LIMIT if first_ordinal is not None else len(attempted)
+    context = _stage_b_context(authorized_maximum)
     payload = {
         "artifact_schema_version": QUALIFICATION_ARTIFACT_SCHEMA_VERSION,
         "candidate_order_protocol_version": CANDIDATE_ORDER_PROTOCOL_VERSION,
@@ -96,9 +131,11 @@ def _artifact(attempted, *, selection_status, first_ordinal, selected_unique_id)
         "qualification_stopped_reason": (
             STOPPED_REASON_FIRST_PASS if first_ordinal is not None else STOPPED_REASON_ALL_CANDIDATES_EXHAUSTED
         ),
-        "authorized_maximum_candidates": (
-            QUALIFICATION_CANDIDATE_LIMIT if first_ordinal is not None else len(attempted)
-        ),
+        "authorized_maximum_candidates": authorized_maximum,
+        "authorized_phase_wall_time_limit_seconds": context.verified_context.phase_wall_time_limit_seconds,
+        "stage_b_authorization_id": context.claim.authorization_id,
+        "authorization_document_sha256": context.claim.authorization_document_sha256,
+        "authorization_claim_canonical_sha256": context.claim.canonical_sha256,
         "attempt_started_at_utc": "2026-07-23T00:00:00+00:00",
         "attempt_completed_at_utc": "2026-07-23T00:10:00+00:00",
     }
@@ -112,7 +149,7 @@ def test_valid_artifact_with_selected_row_verifies():
         attempted, selection_status=SELECTION_STATUS_SELECTED, first_ordinal=1,
         selected_unique_id=_uid(1),
     )
-    typed = verify_qualification_artifact(artifact, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA)
+    typed = _verify(artifact, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA)
     assert isinstance(typed, QualificationArtifactR3)
     assert typed.selected_unique_id == _uid(1)
 
@@ -122,7 +159,7 @@ def test_valid_artifact_with_no_candidate_qualified_verifies():
     artifact, manifest = _artifact(
         attempted, selection_status=SELECTION_STATUS_NONE_QUALIFIED, first_ordinal=None, selected_unique_id=None,
     )
-    typed = verify_qualification_artifact(artifact, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA)
+    typed = _verify(artifact, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA)
     assert typed.selection_status == SELECTION_STATUS_NONE_QUALIFIED
 
 
@@ -135,7 +172,7 @@ def test_rejects_unknown_field():
     artifact = dict(artifact)
     artifact["extra"] = 1
     with pytest.raises(Exception):
-        verify_qualification_artifact(artifact, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA)
+        _verify(artifact, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA)
 
 
 def test_rejects_wrong_candidate_manifest_hash():
@@ -147,7 +184,7 @@ def test_rejects_wrong_candidate_manifest_hash():
     wrong_manifest = dict(manifest, x=999)
     wrong_manifest["canonical_sha256"] = sha256_json({k: v for k, v in wrong_manifest.items() if k != "canonical_sha256"})
     with pytest.raises(ArtifactVerificationRefused):
-        verify_qualification_artifact(artifact, candidate_manifest=wrong_manifest, expected_config_sha256=CONFIG_SHA)
+        _verify(artifact, candidate_manifest=wrong_manifest, expected_config_sha256=CONFIG_SHA)
 
 
 def test_rejects_wrong_config_hash():
@@ -157,7 +194,7 @@ def test_rejects_wrong_config_hash():
         selected_unique_id=_uid(0),
     )
     with pytest.raises(ArtifactVerificationRefused):
-        verify_qualification_artifact(artifact, candidate_manifest=manifest, expected_config_sha256="0" * 64)
+        _verify(artifact, candidate_manifest=manifest, expected_config_sha256="0" * 64)
 
 
 def test_rejects_tampered_canonical_hash():
@@ -168,7 +205,7 @@ def test_rejects_tampered_canonical_hash():
     )
     artifact = dict(artifact, canonical_sha256="0" * 64)
     with pytest.raises(Exception):
-        verify_qualification_artifact(artifact, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA)
+        _verify(artifact, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA)
 
 
 def test_rejects_inconsistent_selected_ordinal():
@@ -179,7 +216,7 @@ def test_rejects_inconsistent_selected_ordinal():
     )
     artifact["canonical_sha256"] = sha256_json({k: v for k, v in artifact.items() if k != "canonical_sha256"})
     with pytest.raises(Exception):
-        verify_qualification_artifact(artifact, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA)
+        _verify(artifact, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA)
 
 
 def test_rejects_attempted_count_mismatch():
@@ -192,7 +229,7 @@ def test_rejects_attempted_count_mismatch():
     artifact["attempted_candidate_count"] = 5
     artifact["canonical_sha256"] = sha256_json({k: v for k, v in artifact.items() if k != "canonical_sha256"})
     with pytest.raises(Exception):
-        verify_qualification_artifact(artifact, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA)
+        _verify(artifact, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA)
 
 
 def test_rejects_bad_timestamp_order():
@@ -207,4 +244,4 @@ def test_rejects_bad_timestamp_order():
     )
     artifact["canonical_sha256"] = sha256_json({k: v for k, v in artifact.items() if k != "canonical_sha256"})
     with pytest.raises(Exception):
-        verify_qualification_artifact(artifact, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA)
+        _verify(artifact, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA)

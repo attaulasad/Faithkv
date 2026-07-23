@@ -124,6 +124,7 @@ def run_fullkv_r3_qualification_worker(
     _device: str = "cuda:0",
     _clock: Callable[[], float] | None = None,
     _progress: Callable[[str, str, dict[str, Any] | None], None] | None = None,
+    config_path: str | None = None,
 ) -> Any:
     """Runs ONE R3 candidate through the canonical FullKV natural-run loop
     and returns a typed object validated against
@@ -149,12 +150,13 @@ def run_fullkv_r3_qualification_worker(
         DATASET_REPO,
         DATASET_REVISION,
         DATASET_SPLIT,
+        CONFIG_PATH,
     )
     from kvcot.discovery.b2a_r3_worker_adapter import (
         FULLKV_WORKER_RESULT_R3_SCHEMA_VERSION,
         FullKVWorkerResultR3,
     )
-    from kvcot.discovery.discovery_config import canonical_config_hash
+    from kvcot.config import config_identity
     from kvcot.discovery.b2a_workers import run_fullkv_worker
     from kvcot.discovery.manifest_prepare import _render_and_tokenize, render_with_loaded_tokenizer
     from kvcot.probes.early_answering import find_think_span
@@ -264,7 +266,7 @@ def run_fullkv_r3_qualification_worker(
         "wall_seconds": result["wall_seconds"],
         "runtime_generation_config": runtime_generation_config,
         "worker_generation_config_sha256": sha256_json(runtime_generation_config),
-        "worker_config_sha256": canonical_config_hash(config),
+        "worker_config_sha256": config_identity(config_path or CONFIG_PATH),
         "software_versions": result["software_versions"],
     }
 

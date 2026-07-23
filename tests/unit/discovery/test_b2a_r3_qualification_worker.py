@@ -34,7 +34,7 @@ from kvcot.discovery.b2a_r3_contract import (
     TOKENIZER_NAME,
     TOKENIZER_REVISION,
 )
-from kvcot.discovery.b2a_r3_qualification import B2AR3FullKVQualificationEvidence
+from kvcot.discovery.b2a_r3_qualification import B2AR3FullKVQualificationEvidence, build_qualification_outcome
 from kvcot.discovery.b2a_r3_qualification_worker import run_fullkv_r3_qualification_worker
 from kvcot.discovery.b2a_r3_worker_adapter import (
     FullKVWorkerResultR3,
@@ -175,6 +175,23 @@ def test_real_worker_output_adapts_into_qualification_evidence():
     assert isinstance(evidence, B2AR3FullKVQualificationEvidence)
     assert evidence.candidate_ordinal == 0
     assert evidence.fullkv_wall_seconds >= 0.0
+
+
+def test_real_worker_config_hash_passes_frozen_gate():
+    candidate_manifest = _candidate_manifest()
+    worker_result = _run_worker()
+    evidence = adapt_fullkv_worker_result_to_r3_evidence(
+        worker_result=worker_result,
+        candidate_manifest=candidate_manifest,
+        candidate_ordinal=0,
+        expected_config_sha256=CONFIG_SHA,
+    )
+    outcome = build_qualification_outcome(
+        evidence,
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=CONFIG_SHA,
+    )
+    assert outcome["conditions"]["config_hash_match"] is True
 
 
 def test_no_hand_built_worker_result_used():

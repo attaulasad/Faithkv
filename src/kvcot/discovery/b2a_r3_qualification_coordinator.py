@@ -234,7 +234,7 @@ def run_b2a_r3_qualification_coordinator(
         stopped_reason=stopped_reason,
         authorized_maximum_candidates=maximum_candidates,
         authorized_phase_wall_time_limit_seconds=phase_wall_time_limit_seconds,
-        consumed_authorization_context=consumed_authorization_context,
+        stage_b_authorization_context=consumed_authorization_context,
         attempt_started_at_utc=_iso8601(started_at),
         attempt_completed_at_utc=_iso8601(completed_at),
     )

@@ -172,14 +172,21 @@ class SelectionProvenanceR3(BaseModel):
 
 
 def verify_freeze_chain(
-    *, candidate_manifest: dict[str, Any], qualification_artifact: dict[str, Any], expected_config_sha256: str
+    *,
+    candidate_manifest: dict[str, Any],
+    qualification_artifact: dict[str, Any],
+    expected_config_sha256: str,
+    stage_b_authorization_context: Any,
 ) -> tuple[Any, Any]:
     """Every check protocol §13 requires BEFORE any freeze proceeds.
     Returns `(candidate_row, qualification_outcome)` -- both already
     strictly typed -- only when every check passes."""
     candidate_typed = verify_candidate_manifest_structure(candidate_manifest)
     qualification_typed = verify_qualification_artifact(
-        qualification_artifact, candidate_manifest=candidate_manifest, expected_config_sha256=expected_config_sha256
+        qualification_artifact,
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=expected_config_sha256,
+        stage_b_authorization_context=stage_b_authorization_context,
     )
 
     if qualification_typed.selection_status != SELECTION_STATUS_SELECTED:
@@ -226,6 +233,7 @@ def construct_selected_manifest_and_provenance(
     candidate_manifest: dict[str, Any],
     qualification_artifact: dict[str, Any],
     expected_config_sha256: str,
+    stage_b_authorization_context: Any,
     tokenizer_renderer: TokenizerRenderer,
 ) -> tuple[B2AOneExampleManifest, dict[str, Any]]:
     """Pure construction only -- no filesystem I/O. Reads the selected
@@ -235,6 +243,7 @@ def construct_selected_manifest_and_provenance(
     candidate_row, _outcome = verify_freeze_chain(
         candidate_manifest=candidate_manifest, qualification_artifact=qualification_artifact,
         expected_config_sha256=expected_config_sha256,
+        stage_b_authorization_context=stage_b_authorization_context,
     )
 
     row = candidate_row.row
@@ -315,6 +324,7 @@ def verify_selection_provenance(
     candidate_manifest: dict[str, Any],
     qualification_artifact: dict[str, Any],
     expected_config_sha256: str,
+    stage_b_authorization_context: Any,
 ) -> SelectionProvenanceR3:
     """Full strict verification against the selected manifest's own
     EXTERNAL hash (`B2AOneExampleManifest.manifest_hash()`, never a
@@ -326,6 +336,7 @@ def verify_selection_provenance(
         candidate_manifest=candidate_manifest,
         qualification_artifact=qualification_artifact,
         expected_config_sha256=expected_config_sha256,
+        stage_b_authorization_context=stage_b_authorization_context,
     )
     if typed.selected_ordinal != candidate_row.candidate_ordinal:
         raise RowFreezeRefusedR3("selection provenance ordinal does not match the replayed freeze chain")
@@ -403,7 +414,11 @@ def verify_selection_provenance(
 
 
 def plan_freeze_dry_run(
-    *, candidate_manifest: dict[str, Any], qualification_artifact: dict[str, Any], expected_config_sha256: str
+    *,
+    candidate_manifest: dict[str, Any],
+    qualification_artifact: dict[str, Any],
+    expected_config_sha256: str,
+    stage_b_authorization_context: Any,
 ) -> dict[str, Any]:
     """CPU-only planning: verifies the complete freeze chain and reports
     what a real freeze WOULD do -- never touches a tokenizer, never writes
@@ -413,6 +428,7 @@ def plan_freeze_dry_run(
         candidate_row, _outcome = verify_freeze_chain(
             candidate_manifest=candidate_manifest, qualification_artifact=qualification_artifact,
             expected_config_sha256=expected_config_sha256,
+            stage_b_authorization_context=stage_b_authorization_context,
         )
     except RowFreezeRefusedR3 as exc:
         return {
