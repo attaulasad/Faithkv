@@ -1,5 +1,36 @@
 # Changelog
 
+## 2026-07-23 — B2A-R3 Step 3 Stage-A independent-audit repairs implemented (READY FOR INDEPENDENT RE-AUDIT; STAGE B BLOCKED)
+
+Repairs every blocking independent-audit finding against
+`6778fd119c33f5025f328321a33eb7c62ad86d20`: all 27 qualification gates
+are independently rederived from persisted strict evidence; compaction
+schedule and eligible events use the authoritative algorithms; complete
+FullKV timing semantics are verified; candidate/config/generated-token
+identities are frozen and reproduced; authorization consumption requires
+a verified document/Git/artifact context; active post-claim paths are
+derived from that context; the verification CLI performs the same full
+semantic checks; atomic exclusivity is tested with spawned processes;
+prompt-renderer output is strict; and selection provenance replays the
+complete freeze chain.
+
+The committed candidate manifest is unchanged and passes the repaired
+strict verifier. Historical B2A-R1/R2 timing/provenance behavior is
+unchanged. All work and tests are CPU-only and use synthetic fixtures for
+qualification, freezing and claims. Full detail is recorded in
+`docs/B2A_R3_STEP3_STAGE_A_INDEPENDENT_AUDIT_REPAIR_2026-07-23.md`.
+
+```text
+STEP 3 STAGE-A AUDIT REPAIRS IMPLEMENTED —
+READY FOR INDEPENDENT RE-AUDIT;
+STAGE B FULLKV QUALIFICATION REMAINS BLOCKED
+```
+
+No GPU used, no CUDA initialized, no model/tokenizer loaded for execution,
+no FullKV or R-KV run, no real qualification or freeze artifact written,
+no real authorization claim or attempt directory created, no B2A-R3 or
+B2B execution, and no FaithKV method implementation.
+
 ## 2026-07-23 — B2A-R3 Step 3 Stage-A CPU implementation complete (READY FOR INDEPENDENT CODE AUDIT; GPU REMAINS PROHIBITED)
 
 Implements every CPU-only Stage-A deliverable authorized by `CLAUDE.md`

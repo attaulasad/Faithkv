@@ -368,6 +368,36 @@ CUDA, and no GPU.
   historical `REQUIRED_BRANCH` constant, and does not weaken any
   historical B2A-R1/R2 verification.
 
+### Section 1i — B2A-R3 Step 3 Stage-A independent-audit repair round (dated 2026-07-23)
+
+Added by
+`docs/B2A_R3_STEP3_STAGE_A_INDEPENDENT_AUDIT_REPAIR_2026-07-23.md`,
+superseding no frozen scientific setting or authorization boundary. The
+independent audit of Stage-A implementation SHA
+`6778fd119c33f5025f328321a33eb7c62ad86d20` identified twelve blocking
+verification defects (P0-1 through P0-9 and P1-1 through P1-3). The
+bounded repair round added strict independent replay for qualification,
+schedule, timing, candidate/token/prompt identities, authorization
+preconditions, exact post-claim paths, multiprocess claim races, and the
+complete selection provenance chain.
+
+```text
+STEP 3 STAGE-A AUDIT REPAIRS IMPLEMENTED —
+READY FOR INDEPENDENT RE-AUDIT;
+STAGE B FULLKV QUALIFICATION REMAINS BLOCKED
+```
+
+- This is a CPU-only repair and verification round. It does not
+  self-certify Stage A and does not authorize Stage B or Stage C.
+- No GPU/CUDA initialization, model or tokenizer execution, FullKV or
+  R-KV run, real qualification/freeze/claim/attempt, B2B execution, or
+  FaithKV method implementation is authorized or performed.
+- Historical B2A-R1/R2 artifacts and verification semantics, the committed
+  B2A-R3 candidate-manifest content, `configs/lock.yaml`, and the R-KV
+  gitlink remain unchanged.
+- The next required action is an independent re-audit of the final repair
+  SHA.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

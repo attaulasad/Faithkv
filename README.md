@@ -2,25 +2,22 @@
 
 ## Current status (read this first)
 
-**B2A-R3 STEP 3 STAGE-A CPU IMPLEMENTATION COMPLETE — READY FOR
-INDEPENDENT CODE AUDIT (2026-07-23).** Following the independent Step 2B
-re-audit (below), every Stage-A CPU deliverable is implemented and
-CPU-tested: strict contracts/schemas, the deterministic candidate
-generator (plus the one real, committed candidate manifest,
-`configs/discovery/b2a_r3_candidate_manifest.json`, reproduced
-byte-identically across two independent fetches), the exact runtime
-predictor, the pure 27-condition qualification evaluator, qualification-
-artifact verification, a synthetic-only selected-row freezer, the atomic
-authorization-claim mechanism (creation IS consumption, proven via a
-20-trial threaded concurrency test), a separately-constructed
-`AttemptProvenancePolicy`, and seven new CPU-only planning/verification
-CLI commands. See `docs/B2A_R3_STEP2B_INDEPENDENT_REAUDIT_2026-07-23.md`
-and `CLAUDE.md` §1h for the authorization boundary this implementation
-stayed inside.
+**B2A-R3 STEP 3 STAGE-A AUDIT REPAIRS IMPLEMENTED — READY FOR
+INDEPENDENT RE-AUDIT (2026-07-23).** The blocking findings against
+`6778fd119c33f5025f328321a33eb7c62ad86d20` have been repaired with
+CPU-only code and adversarial tests. Qualification verification now
+rederives all 27 gates, schedule/eligibility and complete timing evidence;
+candidate, generated-token and prompt identities are frozen and replayed;
+authorization consumption requires a verified document/Git/artifact
+context; post-claim paths are internally derived; and selection
+provenance is semantically replayed. Atomic claim creation is covered by
+real spawned-process races as well as thread tests. See
+`docs/B2A_R3_STEP3_STAGE_A_INDEPENDENT_AUDIT_REPAIR_2026-07-23.md` and
+`CLAUDE.md` §1i.
 
 ```text
-STEP 3 STAGE-A CPU IMPLEMENTATION COMPLETE —
-READY FOR INDEPENDENT CODE AUDIT;
+STEP 3 STAGE-A AUDIT REPAIRS IMPLEMENTED —
+READY FOR INDEPENDENT RE-AUDIT;
 STAGE B FULLKV QUALIFICATION REMAINS BLOCKED
 ```
 
