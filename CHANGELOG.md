@@ -1,5 +1,36 @@
 # Changelog
 
+## 2026-07-23 — B2A-R3 Stage-B binding repair (READY FOR INDEPENDENT RE-AUDIT; STAGE B BLOCKED; REMOTE CI REQUIRED)
+
+Repairs the blocking findings identified against
+`6828e2f263da64bf552e605fb39a140af5be0c07`:
+
+- **Persisted Stage-B binding lifecycle** — `verify_persisted_stage_b_authorization_binding()`
+  no longer reuses the pre-claim/current-HEAD clean-worktree verifier.
+  It verifies the persisted claim path/hash, committed Stage-B
+  authorization document, historical authorized commit existence,
+  required ancestors, historical R-KV gitlink, and candidate/config
+  identity without rejecting legitimate Stage-B outputs or later HEAD
+  advancement.
+- **Subprocess determinism** — the R3 Stage-B worker subprocess now reuses
+  `_worker_subprocess_env(CONFIG_PATH)`, fixing `PYTHONHASHSEED=13` and
+  `TOKENIZERS_PARALLELISM=false` before child interpreter startup.
+- **Governance** — `CLAUDE.md` and
+  `docs/B2A_R3_STAGE_B_BINDING_REPAIR_2026-07-23.md` record the schema-v4
+  transition, the fixed production Stage-B command contract, and the
+  explicit rule that Stage B remains blocked until independent re-audit
+  acceptance and green remote CI on the exact final SHA.
+- **Regression coverage** — added a real temporary-Git lifecycle test that
+  verifies persisted Stage-B binding while Stage-B outputs are untracked
+  and again after Stage-B outputs plus a Stage-C authorization document
+  advance HEAD.
+
+```text
+READY FOR INDEPENDENT RE-AUDIT;
+STAGE B FULLKV QUALIFICATION REMAINS BLOCKED;
+REMOTE CI REQUIRED ON FINAL SHA
+```
+
 ## 2026-07-23 — B2A-R3 Step 3R4 independent re-audit repair, round 2 (READY FOR INDEPENDENT RE-AUDIT; STAGE B BLOCKED)
 
 Repairs seven blocking findings plus one report inconsistency identified by

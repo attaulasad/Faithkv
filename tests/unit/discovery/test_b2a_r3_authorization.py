@@ -3,6 +3,7 @@ written under `tmp_path` -- no real claim is ever created at
 `results/decisions/b2a_r3_authorization_claims/`. No torch, no CUDA."""
 from __future__ import annotations
 
+import json
 import threading
 import multiprocessing
 
@@ -550,6 +551,125 @@ def test_stage_c_selection_provenance_mismatch_is_rejected_after_rehash(tmp_path
     inputs["selection_provenance"] = provenance
     with pytest.raises(Exception):
         verify_authorization_preconditions(**inputs)
+
+
+def test_persisted_stage_b_binding_survives_untracked_outputs_and_head_advance_in_real_git(tmp_path):
+    import subprocess
+
+    from kvcot.discovery.b2a_r3_artifacts import verify_qualification_artifact
+    from kvcot.discovery.b2a_r3_authorization import verify_persisted_stage_b_authorization_binding
+    from kvcot.discovery.b2a_r3_provenance import SubprocessGitStateProvider
+    from tests.unit.discovery.test_b2a_r3_freeze import CONFIG_SHA, _rehash, _valid_chain
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    git("init")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Test User")
+    git("checkout", "-b", "research/b2a-r3-runtime-qualified-calibration")
+    git("remote", "add", "origin", "git@github.com:asad073-ui/Faithkv.git")
+
+    (tmp_path / "README.md").write_text("root\n", encoding="utf-8")
+    git("add", "README.md")
+    git("commit", "-m", "root")
+    ancestor_sha = git("rev-parse", "HEAD")
+
+    (tmp_path / "third_party").mkdir()
+    git("update-index", "--add", "--cacheinfo", "160000,45eaa7d69d20b7388321f077020a610d9afb65bd,third_party/R-KV")
+    git("commit", "-m", "authorized historical tree")
+    authorized_sha = git("rev-parse", "HEAD")
+
+    candidate_manifest, qualification_artifact = _valid_chain()
+    stage_b_document_rel = "docs/B2A_R3_STAGE_B_QUALIFICATION_AUTHORIZATION_2026-08-01.md"
+    stage_b_document = tmp_path / stage_b_document_rel
+    _write_document(
+        stage_b_document,
+        _document_payload(
+            authorization_id="stage-b-2026-08-01",
+            authorization_stage=AUTHORIZATION_STAGE_FULLKV_QUALIFICATION,
+            authorized_branch="research/b2a-r3-runtime-qualified-calibration",
+            authorized_commit_sha=authorized_sha,
+            required_ancestor_shas=(ancestor_sha,),
+            required_rkv_sha="45eaa7d69d20b7388321f077020a610d9afb65bd",
+            candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],
+            maximum_candidates=qualification_artifact["authorized_maximum_candidates"],
+            phase_wall_time_limit_seconds=qualification_artifact["authorized_phase_wall_time_limit_seconds"],
+        ),
+    )
+    git("add", stage_b_document_rel)
+    git("commit", "-m", "stage b authorization")
+
+    claim_payload = _stage_b_payload(
+        authorization_document_sha256=sha256_file(stage_b_document),
+        authorized_commit_sha=authorized_sha,
+        observed_commit_sha=authorized_sha,
+        required_ancestor_shas=[ancestor_sha],
+        candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],
+    )
+    claim_path = tmp_path / claim_payload["global_claim_path"]
+    claim_path.parent.mkdir(parents=True, exist_ok=True)
+    claim_path.write_text(json.dumps(claim_payload, indent=2, ensure_ascii=True), encoding="utf-8")
+
+    qualification_artifact = dict(qualification_artifact)
+    qualification_artifact["stage_b_authorization_id"] = claim_payload["authorization_id"]
+    qualification_artifact["authorization_document_sha256"] = claim_payload["authorization_document_sha256"]
+    qualification_artifact["authorization_claim_canonical_sha256"] = claim_payload["canonical_sha256"]
+    qualification_artifact = _rehash(qualification_artifact)
+    qualification_path = tmp_path / "results/decisions/b2a_r3_qualification.json"
+    qualification_path.parent.mkdir(parents=True, exist_ok=True)
+    qualification_path.write_text(json.dumps(qualification_artifact, indent=2), encoding="utf-8")
+
+    binding = verify_persisted_stage_b_authorization_binding(
+        authorization_id=claim_payload["authorization_id"],
+        repository_root=tmp_path,
+        git_state=SubprocessGitStateProvider(str(tmp_path)),
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=CONFIG_SHA,
+    )
+    verify_qualification_artifact(
+        qualification_artifact,
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=CONFIG_SHA,
+        stage_b_authorization_context=binding,
+    )
+
+    git("add", claim_payload["global_claim_path"], "results/decisions/b2a_r3_qualification.json")
+    git("commit", "-m", "stage b outputs")
+
+    stage_c_document_rel = "docs/B2A_R3_STAGE_C_EXECUTION_AUTHORIZATION_2026-08-05.md"
+    _write_document(
+        tmp_path / stage_c_document_rel,
+        _document_payload(
+            authorization_id="stage-c-2026-08-05",
+            authorization_stage=AUTHORIZATION_STAGE_B2A_R3_EXECUTION,
+            authorized_branch="research/b2a-r3-runtime-qualified-calibration",
+            authorized_commit_sha=git("rev-parse", "HEAD"),
+            required_ancestor_shas=(authorized_sha,),
+            required_rkv_sha="45eaa7d69d20b7388321f077020a610d9afb65bd",
+            candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],
+            qualification_artifact_canonical_sha256=qualification_artifact["canonical_sha256"],
+            selected_manifest_sha256="f" * 64,
+            selected_manifest_hash_algorithm=SELECTED_MANIFEST_HASH_ALGORITHM,
+        ),
+    )
+    git("add", stage_c_document_rel)
+    git("commit", "-m", "stage c authorization")
+
+    advanced_binding = verify_persisted_stage_b_authorization_binding(
+        authorization_id=claim_payload["authorization_id"],
+        repository_root=tmp_path,
+        git_state=SubprocessGitStateProvider(str(tmp_path)),
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=CONFIG_SHA,
+    )
+    assert advanced_binding.claim.canonical_sha256 == claim_payload["canonical_sha256"]
 
 
 def test_empty_partial_or_corrupt_claim_remains_consumed(tmp_path):

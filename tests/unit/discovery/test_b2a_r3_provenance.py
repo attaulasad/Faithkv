@@ -58,6 +58,29 @@ class FakeGitState:
     def is_path_committed(self, path: str) -> bool:
         return True
 
+    def commit_exists(self, commit_sha: str) -> bool:
+        return commit_sha == self.commit_sha or commit_sha in self.ancestors
+
+    def is_path_committed_at_commit(self, path: str, commit_sha: str) -> bool:
+        return self.commit_exists(commit_sha)
+
+    def file_sha256_at_commit(self, path: str, commit_sha: str) -> str:
+        from pathlib import Path
+
+        from kvcot.utils.hashing import sha256_file
+
+        return sha256_file(Path(self.repository_root) / path)
+
+    def file_text_at_commit(self, path: str, commit_sha: str) -> str:
+        from pathlib import Path
+
+        return (Path(self.repository_root) / path).read_text(encoding="utf-8")
+
+    def rkv_submodule_sha_at_commit(self, commit_sha: str) -> str:
+        if not self.commit_exists(commit_sha):
+            raise ValueError(f"unknown commit {commit_sha}")
+        return self.rkv_sha
+
 
 def _policy(**overrides) -> AttemptProvenancePolicy:
     fields = dict(

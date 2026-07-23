@@ -148,6 +148,11 @@ class GitStateProvider(Protocol):
     def rkv_submodule_sha(self) -> str: ...
     def worktree_status(self) -> WorktreeStatus: ...
     def is_path_committed(self, path: str) -> bool: ...
+    def commit_exists(self, commit_sha: str) -> bool: ...
+    def is_path_committed_at_commit(self, path: str, commit_sha: str) -> bool: ...
+    def file_sha256_at_commit(self, path: str, commit_sha: str) -> str: ...
+    def file_text_at_commit(self, path: str, commit_sha: str) -> str: ...
+    def rkv_submodule_sha_at_commit(self, commit_sha: str) -> str: ...
 
 
 class SubprocessGitStateProvider:
@@ -160,6 +165,9 @@ class SubprocessGitStateProvider:
         return subprocess.run(
             ["git", *args], cwd=self.repository_root, text=True, capture_output=True, check=check
         )
+
+    def _run_bytes(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(["git", *args], cwd=self.repository_root, capture_output=True, check=check)
 
     def current_repository(self) -> str:
         remote = self._run("config", "--get", "remote.origin.url").stdout.strip()
@@ -184,6 +192,26 @@ class SubprocessGitStateProvider:
         fields = self._run("ls-tree", "HEAD", "third_party/R-KV").stdout.split()
         if len(fields) < 3:
             raise ValueError("third_party/R-KV gitlink is missing")
+        return fields[2]
+
+    def commit_exists(self, commit_sha: str) -> bool:
+        return self._run("cat-file", "-e", f"{commit_sha}^{{commit}}", check=False).returncode == 0
+
+    def is_path_committed_at_commit(self, path: str, commit_sha: str) -> bool:
+        return self._run("cat-file", "-e", f"{commit_sha}:{path}", check=False).returncode == 0
+
+    def file_sha256_at_commit(self, path: str, commit_sha: str) -> str:
+        from kvcot.utils.hashing import sha256_bytes
+
+        return sha256_bytes(self._run_bytes("show", f"{commit_sha}:{path}").stdout)
+
+    def file_text_at_commit(self, path: str, commit_sha: str) -> str:
+        return self._run_bytes("show", f"{commit_sha}:{path}").stdout.decode("utf-8")
+
+    def rkv_submodule_sha_at_commit(self, commit_sha: str) -> str:
+        fields = self._run("ls-tree", commit_sha, "third_party/R-KV").stdout.split()
+        if len(fields) < 3:
+            raise ValueError("third_party/R-KV gitlink is missing at the requested commit")
         return fields[2]
 
     def worktree_status(self) -> WorktreeStatus:

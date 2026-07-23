@@ -494,6 +494,48 @@ STAGE B FULLKV QUALIFICATION REMAINS BLOCKED
 - The next required action is an independent re-audit of the final
   repair SHA from this round.
 
+### Section 1l -- B2A-R3 Stage-B binding repair (dated 2026-07-23)
+
+Added by `docs/B2A_R3_STAGE_B_BINDING_REPAIR_2026-07-23.md`, superseding
+nothing above except the narrow persisted Stage-B authorization-binding
+and qualification-artifact schema details named here. An independent
+re-audit of SHA `6828e2f263da64bf552e605fb39a140af5be0c07` found that the
+new v4 authorization fields and fixed Stage-B runner were substantive,
+but that persisted Stage-B binding verification still incorrectly reused
+the pre-claim/current-HEAD clean-worktree gate, the new subprocess wrapper
+did not pass the frozen child environment, governance still recorded v3,
+and remote CI had not yet run for the repair SHA.
+
+```text
+B2A-R3 STAGE-B BINDING REPAIR IMPLEMENTED --
+READY FOR INDEPENDENT RE-AUDIT;
+STAGE B FULLKV QUALIFICATION REMAINS BLOCKED;
+REMOTE CI REQUIRED ON FINAL SHA
+```
+
+- This is a CPU-only repair round. It does not self-certify its own work
+  and does not authorize Stage B or Stage C.
+- No GPU/CUDA initialization, real model or tokenizer weights, real
+  FullKV or R-KV run, real B2A-R3 attempt, B2B execution, or FaithKV method
+  implementation is authorized by this section.
+- `QUALIFICATION_ARTIFACT_SCHEMA_VERSION` is now
+  `faithkv-b2a-r3-qualification-artifact-v4`. Schema v4 requires the
+  persisted Stage-B authorization fields:
+  `authorized_phase_wall_time_limit_seconds`,
+  `stage_b_authorization_id`, `authorization_document_sha256`, and
+  `authorization_claim_canonical_sha256`.
+- The fixed-path Stage-B command contract is
+  `kvcot run-b2a-r3-stage-b-qualification --claim <claim-json>`. The
+  command does not expose candidate order, maximum candidates,
+  phase-wall-time limit, per-candidate timeout, output path, claims root,
+  config path, candidate-manifest path, or repository root as operator
+  overrides.
+- The command contract exists for auditability only. Stage B remains
+  blocked until a genuinely independent re-audit accepts the final repair
+  SHA and remote CI is green for that exact SHA.
+- The next required action after this commit is pushing the branch and
+  obtaining remote CI evidence for the exact pushed SHA.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

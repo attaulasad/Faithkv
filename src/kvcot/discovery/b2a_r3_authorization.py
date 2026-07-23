@@ -6,9 +6,10 @@ WITHOUT ever creating a real claim: `claim_authorization` (Step 3R4
 Finding 4) takes `repository_root` only, always deriving the exact claim
 path internally via `global_claim_path` -- there is no `claims_root`
 parameter a caller could point at an arbitrary directory. No CLI command
-in this repository calls `_create_authorization_claim` or
-`claim_authorization` at all -- Stage A exercises this module only against
-synthetic fixtures under `tmp_path`.
+in this repository calls `_create_authorization_claim` directly. The
+fixed-path Stage-B command may call `claim_authorization` only after
+semantic precondition verification; Stage B remains governance-blocked
+until an independent re-audit and green remote CI authorize use.
 
 Creation of the exclusively-created filesystem entry IS the consumption
 event (protocol §14.4.2) -- never a subsequent successful write, never a
@@ -526,9 +527,25 @@ def verify_persisted_stage_b_authorization_binding(
     expected_config_sha256: str,
 ) -> StageBAuthorizationBinding:
     """Reconstruct the Stage-B authorization binding from disk for later
-    processes. This verifies the global claim file exists, is canonical,
-    points at the committed Stage-B authorization document, and authorizes
-    the supplied candidate manifest and config identity."""
+    processes.
+
+    This is deliberately NOT the same check as the original pre-claim
+    verifier. After Stage B, the current checkout may contain the newly
+    created claim and qualification artifact; after those outputs are
+    committed, HEAD may advance again for Stage C. A persisted binding
+    therefore verifies the Stage-B authorization historically at the
+    claim's authorized commit, while leaving the caller's current Stage-C
+    checkout verification to `verify_authorization_preconditions` for the
+    Stage-C claim itself.
+    """
+    from kvcot.discovery.b2a_r3_authorization_document import (
+        parse_authorization_document_text,
+        policy_from_authorization_document,
+    )
+
+    import re
+
+    verify_git_state_bound_to_repository_root(git_state, repository_root)
     validate_authorization_id(authorization_id)
     claim_path = Path(repository_root) / global_claim_path(authorization_id)
     try:
@@ -536,23 +553,101 @@ def verify_persisted_stage_b_authorization_binding(
             payload = json.load(f)
     except Exception as exc:
         raise AuthorizationClaimRefused(f"failed to read persisted Stage-B claim {claim_path}: {exc}") from exc
-    verified = verify_authorization_preconditions(
-        payload,
-        git_state=git_state,
-        authorization_document_path=Path(repository_root) / payload["authorization_document_path"],
-        candidate_manifest=candidate_manifest,
-        expected_config_sha256=expected_config_sha256,
-        repository_root=repository_root,
-    )
-    if verified.claim.authorization_stage != AUTHORIZATION_STAGE_FULLKV_QUALIFICATION:
+
+    verify_canonical_sha256(payload)
+    claim = AuthorizationClaimR3.model_validate(payload)
+    if claim.authorization_stage != AUTHORIZATION_STAGE_FULLKV_QUALIFICATION:
         raise AuthorizationClaimRefused("persisted authorization binding is not Stage B")
-    if verified.claim.authorization_id != authorization_id:
+    if claim.authorization_id != authorization_id:
         raise AuthorizationClaimRefused("persisted authorization claim id does not match the requested id")
+    if claim.global_claim_path != global_claim_path(authorization_id):
+        raise AuthorizationClaimRefused("persisted Stage-B claim is not at its deterministic global path")
+    if re.fullmatch(
+        r"docs/B2A_R3_STAGE_B_QUALIFICATION_AUTHORIZATION_[0-9]{4}-[0-9]{2}-[0-9]{2}\.md",
+        claim.authorization_document_path,
+    ) is None:
+        raise AuthorizationClaimRefused("Stage-B authorization document path does not match the exact date pattern")
+
+    candidate = verify_candidate_manifest_structure(
+        candidate_manifest, expected_config_sha256=expected_config_sha256
+    )
+    if claim.candidate_manifest_canonical_sha256 != candidate.canonical_sha256:
+        raise AuthorizationClaimRefused("persisted Stage-B claim does not authorize the supplied candidate manifest")
+
+    document_path = Path(repository_root) / claim.authorization_document_path
+    if not document_path.is_file():
+        raise AuthorizationClaimRefused("Stage-B authorization document is missing from the current checkout")
+    if not git_state.is_path_committed(claim.authorization_document_path):
+        raise AuthorizationClaimRefused("Stage-B authorization document is not tracked in the current checkout")
+    observed_document_hash = sha256_file(document_path)
+    if observed_document_hash != claim.authorization_document_sha256:
+        raise AuthorizationClaimRefused("Stage-B authorization document hash does not match the claim")
+    try:
+        document = parse_authorization_document_text(document_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise AuthorizationClaimRefused(
+            f"Stage-B authorization document is not machine-readable: {exc}"
+        ) from exc
+
+    if not git_state.commit_exists(claim.authorized_commit_sha):
+        raise AuthorizationClaimRefused("persisted Stage-B authorized commit does not exist")
+    if document.authorization_id != claim.authorization_id:
+        raise AuthorizationClaimRefused("historical document authorization_id does not match the claim")
+    if document.authorization_stage != claim.authorization_stage:
+        raise AuthorizationClaimRefused("historical document authorization_stage does not match the claim")
+    if document.authorized_branch != claim.authorized_branch:
+        raise AuthorizationClaimRefused("historical document authorized_branch does not match the claim")
+    if document.authorized_commit_sha != claim.authorized_commit_sha:
+        raise AuthorizationClaimRefused("historical document authorized_commit_sha does not match the claim")
+    if tuple(document.required_ancestor_shas) != tuple(claim.required_ancestor_shas):
+        raise AuthorizationClaimRefused("historical document required_ancestor_shas does not match the claim")
+    if document.required_rkv_sha != claim.required_rkv_sha:
+        raise AuthorizationClaimRefused("historical document required_rkv_sha does not match the claim")
+    if document.candidate_manifest_canonical_sha256 != claim.candidate_manifest_canonical_sha256:
+        raise AuthorizationClaimRefused(
+            "historical document candidate_manifest_canonical_sha256 does not match the claim"
+        )
+    if any(
+        value is not None
+        for value in (
+            claim.qualification_artifact_canonical_sha256,
+            claim.selected_manifest_sha256,
+            claim.selected_manifest_hash_algorithm,
+        )
+    ):
+        raise AuthorizationClaimRefused("persisted Stage-B claim must not contain Stage-C artifact hashes")
+
+    policy = policy_from_authorization_document(document, authorization_document_sha256=observed_document_hash)
+    if not (
+        claim.observed_repository == claim.authorized_repository == policy.required_repository == REQUIRED_REPOSITORY
+    ):
+        raise AuthorizationClaimRefused("persisted Stage-B repository identities disagree")
+    if not (claim.observed_branch == claim.authorized_branch == policy.required_branch):
+        raise AuthorizationClaimRefused("persisted Stage-B branch identities disagree")
+    if not (claim.observed_commit_sha == claim.authorized_commit_sha == policy.required_commit_sha):
+        raise AuthorizationClaimRefused("persisted Stage-B commit identities disagree")
+    for ancestor_sha in policy.required_ancestor_shas:
+        if not git_state.is_ancestor(ancestor_sha, policy.required_commit_sha):
+            raise AuthorizationClaimRefused(
+                f"historical Stage-B required ancestor {ancestor_sha!r} does not verify"
+            )
+    observed_rkv_sha = git_state.rkv_submodule_sha_at_commit(policy.required_commit_sha)
+    if not (claim.observed_rkv_sha == claim.required_rkv_sha == policy.required_rkv_sha == observed_rkv_sha):
+        raise AuthorizationClaimRefused("historical Stage-B R-KV gitlink does not match the claim/document")
+
+    verified = VerifiedAuthorizationContext(
+        claim=claim,
+        policy=policy,
+        active_paths=ActiveAuthorizationPaths.from_verified_claim(claim),
+        maximum_candidates=document.maximum_candidates,
+        phase_wall_time_limit_seconds=document.phase_wall_time_limit_seconds,
+        _verification_token=_VERIFIED_CONTEXT_TOKEN,
+    )
     return StageBAuthorizationBinding(
-        claim=verified.claim,
+        claim=claim,
         verified_context=verified,
         claim_path=claim_path,
-        authorization_claim_canonical_sha256=verified.claim.canonical_sha256,
+        authorization_claim_canonical_sha256=claim.canonical_sha256,
         _binding_token=_STAGE_B_BINDING_TOKEN,
     )
 

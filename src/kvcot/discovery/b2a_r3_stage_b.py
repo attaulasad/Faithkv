@@ -31,6 +31,7 @@ from kvcot.discovery.b2a_r3_qualification_coordinator import (
     run_b2a_r3_qualification_coordinator,
 )
 from kvcot.discovery.b2a_r3_worker_adapter import FullKVWorkerResultR3
+from kvcot.discovery.b2a_workers import _worker_subprocess_env
 from kvcot.discovery.discovery_config import load_discovery_config
 
 __all__ = [
@@ -134,6 +135,7 @@ def run_fullkv_r3_worker_subprocess(
                 capture_output=True,
                 timeout=timeout_seconds,
                 check=False,
+                env=_worker_subprocess_env(c.CONFIG_PATH),
             )
         except subprocess.TimeoutExpired as exc:
             raise CandidateWorkerTimeout(f"candidate ordinal={candidate_ordinal} worker timed out") from exc

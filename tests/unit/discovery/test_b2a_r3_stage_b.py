@@ -103,4 +103,6 @@ def test_subprocess_worker_wrapper_uses_internal_temp_output(tmp_path):
     assert cmd[:2] == [sys.executable, "-c"]
     assert kwargs["cwd"] == str(tmp_path)
     assert kwargs["timeout"] == c.PER_CANDIDATE_WORKER_TIMEOUT_SECONDS
+    assert kwargs["env"]["PYTHONHASHSEED"] == "13"
+    assert kwargs["env"]["TOKENIZERS_PARALLELISM"] == "false"
     assert not Path(cmd[-1]).exists()
