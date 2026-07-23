@@ -164,11 +164,11 @@ def test_ordering_ignores_problem_text_content():
     assert ids_a == ids_b
 
 
-def test_ordering_changes_with_budget():
+def test_non_frozen_budget_is_rejected():
     rows = _population(10)
-    ids_1024 = [c["unique_id"] for c in _build(rows, budget=1024)["candidates"]]
-    ids_2048 = [c["unique_id"] for c in _build(rows, budget=2048)["candidates"]]
-    assert ids_1024 != ids_2048
+    _build(rows, budget=1024)
+    with pytest.raises(Exception):
+        _build(rows, budget=2048)
 
 
 def test_canonical_hash_stable_and_excludes_itself():

@@ -44,7 +44,12 @@ from kvcot.discovery.b2a_r3_contract import (
     require_lowercase_hex64,
     verify_canonical_sha256,
 )
-from kvcot.discovery.b2a_r3_qualification import CandidateQualificationOutcomeR3, select_first_qualified_r3
+from kvcot.discovery.b2a_r3_candidates import verify_candidate_manifest_structure
+from kvcot.discovery.b2a_r3_qualification import (
+    CandidateQualificationOutcomeR3,
+    rederive_and_verify_qualification_outcome,
+    select_first_qualified_r3,
+)
 
 __all__ = [
     "ArtifactVerificationRefused",
@@ -190,7 +195,12 @@ def verify_qualification_artifact(
     verify_canonical_sha256(artifact)
     typed = QualificationArtifactR3.model_validate(artifact)
 
-    verify_canonical_sha256(candidate_manifest)
+    try:
+        verify_candidate_manifest_structure(
+            candidate_manifest, expected_config_sha256=expected_config_sha256
+        )
+    except Exception as exc:
+        raise ArtifactVerificationRefused(f"candidate manifest verification failed: {exc}") from exc
     if typed.candidate_manifest_canonical_sha256 != candidate_manifest.get("canonical_sha256"):
         raise ArtifactVerificationRefused(
             "qualification artifact's candidate_manifest_canonical_sha256 does not match the "
@@ -200,4 +210,13 @@ def verify_qualification_artifact(
         raise ArtifactVerificationRefused(
             "qualification artifact's config_sha256 does not match the expected config hash"
         )
+    for outcome in typed.attempted:
+        try:
+            rederive_and_verify_qualification_outcome(
+                outcome, candidate_manifest, expected_config_sha256
+            )
+        except Exception as exc:
+            raise ArtifactVerificationRefused(
+                f"qualification outcome ordinal={outcome.candidate_ordinal} failed semantic rederivation: {exc}"
+            ) from exc
     return typed

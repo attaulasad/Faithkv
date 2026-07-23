@@ -34,23 +34,15 @@ never re-derives or second-guesses any selection decision made here.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Sequence
-
-import torch
+from typing import TYPE_CHECKING, Any, Callable, Literal, Sequence
 
 from kvcot.discovery.constants import MINIMUM_FUTURE_TOKENS_AFTER_EVENT
-from kvcot.discovery.harness_types import DecodeOneFn, LayerStepObservation, PrefillFn
-from kvcot.discovery.sampling import (
-    CandidateDonorSelection,
-    IdentitySeedParts,
-    assign_depth_strata,
-    select_candidates_and_donors,
-    select_events,
-    select_kv_head,
-    select_layer,
-)
-from kvcot.discovery.uncertainty import UncertaintySignal, compute_entropy_nats, compute_logit_margin
 from kvcot.utils.hashing import sha256_int_ids
+
+if TYPE_CHECKING:
+    from kvcot.discovery.harness_types import DecodeOneFn, LayerStepObservation, PrefillFn
+    from kvcot.discovery.sampling import CandidateDonorSelection, IdentitySeedParts
+    from kvcot.discovery.uncertainty import UncertaintySignal
 
 NaturalAnswerStatus = Literal["correct", "incorrect", "unverifiable"]
 
@@ -123,6 +115,8 @@ def run_natural_pass1(
     than once (B1B-R2 §6: "Do not simulate a full prefill through repeated
     one-token calls").
     """
+    import torch
+    from kvcot.discovery.uncertainty import compute_entropy_nats, compute_logit_margin
     if max_new_tokens <= 0:
         raise ValueError(f"max_new_tokens must be positive, got {max_new_tokens}")
 
@@ -334,6 +328,14 @@ def build_pass1_plan(
     -- NEVER a plan with fewer than 3 events, and never influenced by any
     branch-gain or NLL value (none of the `kvcot.discovery.sampling`
     functions this calls accept one)."""
+    from kvcot.discovery.sampling import (
+        assign_depth_strata,
+        select_candidates_and_donors,
+        select_events,
+        select_kv_head,
+        select_layer,
+    )
+
     eligible = eligible_event_ids(trace)
     selection = select_events(eligible, identity)
     if selection is None:

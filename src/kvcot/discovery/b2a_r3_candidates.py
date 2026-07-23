@@ -35,15 +35,25 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from kvcot.discovery.b2a_r2_candidates import _ordering_hash, fetch_all_pinned_dataset_rows
 from kvcot.discovery.b2a_r3_contract import (
+    BUDGET,
     CANDIDATE_MANIFEST_ARTIFACT_SCHEMA_VERSION,
     CANDIDATE_ORDER_PROTOCOL_VERSION,
     CANDIDATE_TOTAL_COUNT,
     CANDIDATES_PER_LEVEL,
+    CONFIG_PATH,
+    DATASET_CONFIG,
+    DATASET_REPO,
+    DATASET_REVISION,
+    DATASET_SPLIT,
     EMBEDDED_ROW_COLUMNS,
     EXCLUSION_SET,
     EXCLUSION_SET_SHA256,
     GENERATION_CONFIG_SHA256,
+    MODEL_NAME,
+    MODEL_REVISION,
     QUALIFICATION_CANDIDATE_LIMIT,
+    TOKENIZER_NAME,
+    TOKENIZER_REVISION,
     require_lowercase_hex64,
     verify_canonical_sha256,
 )
@@ -210,7 +220,7 @@ class CandidateManifestR3(BaseModel):
     candidates: list[CandidateRowR3]
     canonical_sha256: str
 
-    @field_validator("canonical_sha256")
+    @field_validator("config_sha256", "canonical_sha256")
     @classmethod
     def _hex64(cls, v: str) -> str:
         return require_lowercase_hex64(v, "canonical_sha256")
@@ -221,6 +231,30 @@ class CandidateManifestR3(BaseModel):
             raise ValueError("artifact_schema_version does not match the frozen value")
         if self.candidate_order_protocol_version != CANDIDATE_ORDER_PROTOCOL_VERSION:
             raise ValueError("candidate_order_protocol_version does not match the frozen value")
+        if (
+            self.dataset_repo,
+            self.dataset_config,
+            self.dataset_split,
+            self.dataset_revision,
+            self.model_name,
+            self.model_revision,
+            self.tokenizer_name,
+            self.tokenizer_revision,
+            self.budget,
+            self.config_path,
+        ) != (
+            DATASET_REPO,
+            DATASET_CONFIG,
+            DATASET_SPLIT,
+            DATASET_REVISION,
+            MODEL_NAME,
+            MODEL_REVISION,
+            TOKENIZER_NAME,
+            TOKENIZER_REVISION,
+            BUDGET,
+            CONFIG_PATH,
+        ):
+            raise ValueError("candidate manifest identity does not match the frozen dataset/model/tokenizer/config")
         if self.generation_config_sha256 != GENERATION_CONFIG_SHA256:
             raise ValueError("generation_config_sha256 does not match the frozen value")
         if self.exclusion_set_sha256 != EXCLUSION_SET_SHA256:
@@ -406,14 +440,23 @@ def build_candidate_manifest(
     return manifest
 
 
-def verify_candidate_manifest_structure(manifest: dict[str, Any]) -> CandidateManifestR3:
+def verify_candidate_manifest_structure(
+    manifest: dict[str, Any], *, expected_config_sha256: str | None = None
+) -> CandidateManifestR3:
     """Schema-valid parse plus every internal-consistency check
     expressible without re-fetching the dataset: canonical self-hash,
     exact field set, level mixture, interleaving, per-candidate row-hash
     formulas, and every candidate's own `ordering_hash` recomputed from its
     declared identity fields."""
     verify_canonical_sha256(manifest)
-    return CandidateManifestR3.model_validate(manifest)
+    typed = CandidateManifestR3.model_validate(manifest)
+    if expected_config_sha256 is not None:
+        require_lowercase_hex64(expected_config_sha256, "expected_config_sha256")
+        if typed.config_sha256 != expected_config_sha256:
+            raise ManifestPreparationError(
+                "candidate manifest config_sha256 does not match the independently expected config hash"
+            )
+    return typed
 
 
 def verify_candidate_manifest_against_dataset(
@@ -429,16 +472,16 @@ def verify_candidate_manifest_against_dataset(
     typed = verify_candidate_manifest_structure(manifest)
     rebuilt = build_candidate_manifest(
         all_rows_in_file_order,
-        dataset_repo=typed.dataset_repo,
-        dataset_config=typed.dataset_config,
-        dataset_split=typed.dataset_split,
-        dataset_revision=typed.dataset_revision,
-        model_name=typed.model_name,
-        model_revision=typed.model_revision,
-        tokenizer_name=typed.tokenizer_name,
-        tokenizer_revision=typed.tokenizer_revision,
-        budget=typed.budget,
-        config_path=typed.config_path,
+        dataset_repo=DATASET_REPO,
+        dataset_config=DATASET_CONFIG,
+        dataset_split=DATASET_SPLIT,
+        dataset_revision=DATASET_REVISION,
+        model_name=MODEL_NAME,
+        model_revision=MODEL_REVISION,
+        tokenizer_name=TOKENIZER_NAME,
+        tokenizer_revision=TOKENIZER_REVISION,
+        budget=BUDGET,
+        config_path=CONFIG_PATH,
         config_sha256=typed.config_sha256,
     )
     if rebuilt["canonical_sha256"] != manifest["canonical_sha256"]:

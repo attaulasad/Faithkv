@@ -19,13 +19,18 @@ derived here, from raw evidence, every time.
 """
 from __future__ import annotations
 
-import math
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from kvcot.discovery.b2a_r3_contract import (
     B2A_R3_QUALIFICATION_CONDITIONS,
+    BUDGET,
+    DATASET_CONFIG,
+    DATASET_REPO,
+    DATASET_REVISION,
+    DATASET_SPLIT,
+    DIVIDE_LENGTH,
     EMBEDDED_ROW_COLUMNS,
     GENERATION_CONFIG_SHA256,
     MODEL_NAME,
@@ -36,6 +41,7 @@ from kvcot.discovery.b2a_r3_contract import (
     QUALIFICATION_MINIMUM_ELIGIBLE_EVENTS,
     QUALIFICATION_MINIMUM_PREDICTED_EVENTS,
     QUALIFICATION_PROTOCOL_VERSION,
+    QUALIFICATION_TARGET_HOURS,
     RUNTIME_PREDICTOR_VERSION,
     SAFETY_MULTIPLIER,
     THINK_PARSE_SUCCESS_STATUSES,
@@ -44,12 +50,17 @@ from kvcot.discovery.b2a_r3_contract import (
     require_lowercase_hex64,
     verify_canonical_sha256,
 )
+from kvcot.analysis.rkv_schedule import predicted_compaction_event_positions
+from kvcot.discovery.b2a_r3_candidates import CandidateManifestR3, verify_candidate_manifest_structure
 from kvcot.discovery.b2a_r3_runtime import RuntimePredictionRefused, verify_runtime_prediction
-from kvcot.utils.hashing import sha256_json, sha256_text
+from kvcot.discovery.final_contract import fullkv_qualification_timing_complete
+from kvcot.discovery.pass1 import eligible_event_positions
+from kvcot.utils.hashing import sha256_int_ids, sha256_json, sha256_text
 
 __all__ = [
     "QualificationRefused",
     "B2AR3FullKVQualificationEvidence",
+    "rederive_and_verify_qualification_outcome",
     "evaluate_b2a_r3_qualification_conditions",
     "build_qualification_outcome",
     "select_first_qualified_r3",
@@ -61,8 +72,56 @@ class QualificationRefused(ValueError):
     condition map, or a violated first-pass selection rule."""
 
 
-BUDGET = 1024  # local mirror of the frozen R-KV budget, matches b2a_r3_contract.BUDGET
 MEMORY_LIMIT_BYTES = QUALIFICATION_MEMORY_LIMIT_BYTES
+
+
+class FullKVTimingEvidenceR3(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    phase: str
+    started_at: float
+    ended_at: float
+    duration_seconds: float
+    synchronize_before_start: bool
+    synchronize_before_end: bool
+    completed: bool
+    failure_type: str | None
+    failure_message: str | None
+
+
+class ParameterPlacementEvidenceR3(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    requested_device: str
+    every_parameter_on_cuda: bool
+    no_offload_verified: bool
+    parameter_count: int
+    unique_device_types: list[str]
+    unique_devices: list[str]
+    hf_device_map: dict[str, Any] | None
+
+
+class RuntimePredictionRecordR3(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    candidate_total_tokens: int
+    reference_total_tokens: int
+    reference_example_seconds: float
+    reference_pair_seconds: float
+    reference_setup_seconds: float
+    safety_multiplier: float
+    b2b_example_count: int
+    b2b_real_pair_count: int
+    qualification_target_hours: float
+    runtime_predictor_version: str
+    runtime_source_artifact_path: str
+    runtime_source_artifact_sha256: str
+    reference_seconds_per_token: float
+    predicted_example_seconds: float
+    predicted_pair_seconds: float
+    projected_total_seconds: float
+    projected_gpu_hours: float
+    projected_runtime_within_qualification_target: bool
 
 
 class B2AR3FullKVQualificationEvidence(BaseModel):
@@ -70,7 +129,7 @@ class B2AR3FullKVQualificationEvidence(BaseModel):
     conditions (protocol §12.5), consumed by the pure evaluator below.
     Strict, extra fields forbidden."""
 
-    model_config = ConfigDict(strict=True, extra="forbid")
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
 
     candidate_ordinal: int = Field(ge=0, le=15)
     source_example_index: int = Field(ge=0)
@@ -107,10 +166,10 @@ class B2AR3FullKVQualificationEvidence(BaseModel):
     generation_prompt_preopened_think: bool
 
     fullkv_wall_seconds: float = Field(ge=0.0, allow_inf_nan=False)
-    fullkv_timing_evidence: list[dict[str, Any]]
+    fullkv_timing_evidence: list[FullKVTimingEvidenceR3]
 
     requested_device: str
-    parameter_placement_evidence: dict[str, Any]
+    parameter_placement_evidence: ParameterPlacementEvidenceR3
     actual_batch_size: int = Field(ge=0)
     peak_cuda_allocated_bytes: int = Field(ge=0)
     peak_cuda_reserved_bytes: int = Field(ge=0)
@@ -119,9 +178,11 @@ class B2AR3FullKVQualificationEvidence(BaseModel):
     predicted_event_count: int = Field(ge=0)
     eligible_event_indices: list[int]
     eligible_event_count: int = Field(ge=0)
+    budget: int = BUDGET
+    divide_length: int = DIVIDE_LENGTH
 
     generation_config_sha256: str
-    runtime_prediction: dict[str, Any]
+    runtime_prediction: RuntimePredictionRecordR3
 
     candidate_manifest_canonical_sha256: str
     config_sha256: str
@@ -154,6 +215,14 @@ class B2AR3FullKVQualificationEvidence(BaseModel):
             raise ValueError("gold_answer_sha256 does not reproduce sha256_text(row['answer'])")
         if self.row["unique_id"] != self.unique_id:
             raise ValueError("row['unique_id'] does not match unique_id")
+        if any(type(token_id) is not int for token_id in self.natural_generated_token_ids):
+            raise ValueError("natural_generated_token_ids must contain strict integers, never bool")
+        if self.generated_token_count != len(self.natural_generated_token_ids):
+            raise ValueError("generated_token_count disagrees with len(natural_generated_token_ids)")
+        if sha256_int_ids(self.natural_generated_token_ids) != self.generated_token_ids_sha256:
+            raise ValueError("generated_token_ids_sha256 does not reproduce from natural_generated_token_ids")
+        if self.budget != BUDGET or self.divide_length != DIVIDE_LENGTH:
+            raise ValueError("budget/divide_length do not match the frozen config-derived values")
         return self
 
 
@@ -172,21 +241,27 @@ def _think_span_valid(evidence: B2AR3FullKVQualificationEvidence) -> bool:
 
 
 def _fullkv_timing_complete(evidence: B2AR3FullKVQualificationEvidence) -> bool:
-    if not math.isfinite(evidence.fullkv_wall_seconds) or evidence.fullkv_wall_seconds < 0.0:
-        return False
-    timing = evidence.fullkv_timing_evidence
-    if not isinstance(timing, list) or len(timing) == 0:
-        return False
-    required_keys = {
-        "phase", "started_at", "ended_at", "duration_seconds", "synchronize_before_start",
-        "synchronize_before_end", "completed", "failure_type", "failure_message",
-    }
-    for entry in timing:
-        if not isinstance(entry, dict) or set(entry) != required_keys:
-            return False
-        if entry.get("completed") is not True:
-            return False
-    return True
+    return fullkv_qualification_timing_complete(
+        [entry.model_dump(mode="python") for entry in evidence.fullkv_timing_evidence],
+        fullkv_wall_seconds=evidence.fullkv_wall_seconds,
+    )
+
+
+def _expected_schedule(evidence: B2AR3FullKVQualificationEvidence) -> tuple[list[int], list[int]]:
+    total_len = evidence.prompt_token_count + evidence.generated_token_count
+    max_position = total_len - 1 if total_len > evidence.prompt_token_count else evidence.prompt_token_count
+    positions = predicted_compaction_event_positions(
+        prompt_length=evidence.prompt_token_count,
+        max_position=max_position,
+        budget=BUDGET,
+        divide_length=DIVIDE_LENGTH,
+    )
+    eligible = eligible_event_positions(
+        positions,
+        prompt_length=evidence.prompt_token_count,
+        total_len=total_len,
+    )
+    return positions, eligible
 
 
 def _placement_conditions(evidence: B2AR3FullKVQualificationEvidence) -> tuple[bool, bool]:
@@ -197,7 +272,7 @@ def _placement_conditions(evidence: B2AR3FullKVQualificationEvidence) -> tuple[b
     two-worker wrapper."""
     from kvcot.discovery.strict_device import _single_worker_placement_ok
 
-    placement = evidence.parameter_placement_evidence
+    placement = evidence.parameter_placement_evidence.model_dump(mode="python")
     ok = _single_worker_placement_ok(placement, requested_device=evidence.requested_device)
     if not ok:
         return False, False
@@ -225,10 +300,29 @@ def evaluate_b2a_r3_qualification_conditions(
     raw evidence -- never accepts a caller-supplied boolean for any of
     them."""
     try:
-        verify_canonical_sha256(candidate_manifest)
+        candidate_typed = verify_candidate_manifest_structure(
+            candidate_manifest, expected_config_sha256=expected_config_sha256
+        )
         candidate_manifest_ok = True
-    except Exception:
-        candidate_manifest_ok = False
+    except Exception as exc:
+        raise QualificationRefused(f"candidate manifest is not fully verifiable: {exc}") from exc
+
+    candidate = next(
+        (row for row in candidate_typed.candidates if row.candidate_ordinal == evidence.candidate_ordinal), None
+    )
+    if candidate is None:
+        raise QualificationRefused(
+            f"candidate_ordinal {evidence.candidate_ordinal} is not present in the candidate manifest"
+        )
+    for field_name in (
+        "source_example_index", "unique_id", "raw_row_sha256", "problem_sha256", "gold_answer_sha256"
+    ):
+        if getattr(evidence, field_name) != getattr(candidate, field_name):
+            raise QualificationRefused(
+                f"qualification evidence {field_name} does not match candidate ordinal {evidence.candidate_ordinal}"
+            )
+    if evidence.row != candidate.row:
+        raise QualificationRefused("qualification evidence row does not match the exact candidate row")
 
     candidate_manifest_hash_match = (
         candidate_manifest_ok
@@ -237,11 +331,11 @@ def evaluate_b2a_r3_qualification_conditions(
     config_hash_match = evidence.config_sha256 == expected_config_sha256
 
     dataset_identity_match = (
-        evidence.worker_dataset_repo == "HuggingFaceH4/MATH-500"
-        and evidence.worker_dataset_config == "default"
-        and evidence.worker_dataset_split == "test"
-        and evidence.worker_dataset_revision == candidate_manifest.get("dataset_revision")
-        and evidence.worker_dataset_revision == "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be"
+        evidence.worker_dataset_repo == DATASET_REPO
+        and evidence.worker_dataset_config == DATASET_CONFIG
+        and evidence.worker_dataset_split == DATASET_SPLIT
+        and evidence.worker_dataset_revision == candidate_typed.dataset_revision
+        and evidence.worker_dataset_revision == DATASET_REVISION
     )
 
     model_identity_match = (
@@ -258,26 +352,31 @@ def evaluate_b2a_r3_qualification_conditions(
     peak_tracked = max(evidence.peak_cuda_allocated_bytes, evidence.peak_cuda_reserved_bytes)
 
     try:
-        verify_runtime_prediction(evidence.runtime_prediction)
-        runtime_inputs_complete = True
+        runtime_payload = evidence.runtime_prediction.model_dump(mode="python")
+        verify_runtime_prediction(runtime_payload)
+        runtime_inputs_complete = runtime_payload["candidate_total_tokens"] == (
+            evidence.prompt_token_count + evidence.generated_token_count
+        )
     except RuntimePredictionRefused:
         runtime_inputs_complete = False
 
-    runtime_predictor_version_match = evidence.runtime_prediction.get("runtime_predictor_version") == (
+    runtime_predictor_version_match = runtime_payload.get("runtime_predictor_version") == (
         RUNTIME_PREDICTOR_VERSION
     )
-    safety_multiplier = evidence.runtime_prediction.get("safety_multiplier")
+    safety_multiplier = runtime_payload.get("safety_multiplier")
     safety_multiplier_exact = (
         not isinstance(safety_multiplier, bool)
         and isinstance(safety_multiplier, float)
         and safety_multiplier == SAFETY_MULTIPLIER
     )
-    projected_gpu_hours = evidence.runtime_prediction.get("projected_gpu_hours")
+    projected_gpu_hours = runtime_payload.get("projected_gpu_hours")
     projected_runtime_within_qualification_target = (
         isinstance(projected_gpu_hours, (int, float))
         and not isinstance(projected_gpu_hours, bool)
-        and projected_gpu_hours <= 3.60
+        and projected_gpu_hours <= QUALIFICATION_TARGET_HOURS
     )
+
+    expected_positions, expected_eligible_indices = _expected_schedule(evidence)
 
     conditions: dict[str, bool] = {
         "no_cap_hit": evidence.cap_hit is False,
@@ -292,7 +391,6 @@ def evaluate_b2a_r3_qualification_conditions(
         "prompt_token_count_present": evidence.prompt_token_count > 0,
         "generated_token_count_present": (
             evidence.generated_token_count > 0
-            and evidence.generated_token_count == len(evidence.natural_generated_token_ids)
         ),
         "fullkv_timing_complete": _fullkv_timing_complete(evidence),
         "candidate_manifest_hash_match": candidate_manifest_hash_match,
@@ -307,14 +405,12 @@ def evaluate_b2a_r3_qualification_conditions(
         "no_offload_verified": no_offload_verified,
         "peak_memory_within_limit": peak_tracked <= MEMORY_LIMIT_BYTES,
         "sequence_exceeds_budget": (evidence.prompt_token_count + evidence.generated_token_count) > BUDGET,
-        "predicted_compaction_present": len(evidence.predicted_compaction_event_positions) >= 1,
+        "predicted_compaction_present": len(expected_positions) >= 1,
         "predicted_event_count_at_least_six": (
-            evidence.predicted_event_count == len(evidence.predicted_compaction_event_positions)
-            and evidence.predicted_event_count >= QUALIFICATION_MINIMUM_PREDICTED_EVENTS
+            len(expected_positions) >= QUALIFICATION_MINIMUM_PREDICTED_EVENTS
         ),
         "at_least_three_events_have_49_future_tokens": (
-            evidence.eligible_event_count == len(evidence.eligible_event_indices)
-            and evidence.eligible_event_count >= QUALIFICATION_MINIMUM_ELIGIBLE_EVENTS
+            len(expected_eligible_indices) >= QUALIFICATION_MINIMUM_ELIGIBLE_EVENTS
         ),
         "runtime_inputs_complete": runtime_inputs_complete,
         "runtime_predictor_version_match": runtime_predictor_version_match,
@@ -355,6 +451,7 @@ class CandidateQualificationOutcomeR3(BaseModel):
     expected_prompt_token_ids_sha256: str
     observed_prompt_token_ids_sha256: str
     prompt_token_count: int
+    natural_generated_token_ids: list[int]
     generated_token_count: int
     generated_token_ids_sha256: str
     total_processed_tokens: int
@@ -368,9 +465,9 @@ class CandidateQualificationOutcomeR3(BaseModel):
     thinking_span_valid: bool
     trace_complete: bool
     fullkv_wall_seconds: float
-    fullkv_timing_evidence: list[dict[str, Any]]
+    fullkv_timing_evidence: list[FullKVTimingEvidenceR3]
     requested_device: str
-    parameter_placement_evidence: dict[str, Any]
+    parameter_placement_evidence: ParameterPlacementEvidenceR3
     actual_batch_size: int
     peak_cuda_allocated_bytes: int
     peak_cuda_reserved_bytes: int
@@ -379,6 +476,12 @@ class CandidateQualificationOutcomeR3(BaseModel):
     predicted_event_count: int
     eligible_event_indices: list[int]
     eligible_event_count: int
+    budget: int
+    divide_length: int
+    generation_config_sha256: str
+    candidate_manifest_canonical_sha256: str
+    config_sha256: str
+    runtime_prediction: RuntimePredictionRecordR3
     reference_seconds_per_token: float
     predicted_example_seconds: float
     predicted_pair_seconds: float
@@ -389,6 +492,21 @@ class CandidateQualificationOutcomeR3(BaseModel):
     conditions: dict[str, bool]
     qualified: bool
     failed_conditions: list[str]
+
+    @field_validator(
+        "raw_row_sha256",
+        "problem_sha256",
+        "gold_answer_sha256",
+        "expected_prompt_token_ids_sha256",
+        "observed_prompt_token_ids_sha256",
+        "generated_token_ids_sha256",
+        "generation_config_sha256",
+        "candidate_manifest_canonical_sha256",
+        "config_sha256",
+    )
+    @classmethod
+    def _hex64(cls, v: str, info: Any) -> str:
+        return require_lowercase_hex64(v, info.field_name)
 
     @model_validator(mode="after")
     def _conditions_are_internally_consistent(self) -> "CandidateQualificationOutcomeR3":
@@ -413,8 +531,28 @@ class CandidateQualificationOutcomeR3(BaseModel):
                 raise ValueError(f"named field {field_name!r} disagrees with conditions[{name!r}]")
         if self.total_processed_tokens != self.prompt_token_count + self.generated_token_count:
             raise ValueError("total_processed_tokens does not equal prompt_token_count + generated_token_count")
+        if any(type(token_id) is not int for token_id in self.natural_generated_token_ids):
+            raise ValueError("natural_generated_token_ids must contain strict integers, never bool")
+        if self.generated_token_count != len(self.natural_generated_token_ids):
+            raise ValueError("generated_token_count disagrees with len(natural_generated_token_ids)")
+        if sha256_int_ids(self.natural_generated_token_ids) != self.generated_token_ids_sha256:
+            raise ValueError("generated_token_ids_sha256 does not reproduce from natural_generated_token_ids")
         if self.peak_cuda_tracked_bytes != max(self.peak_cuda_allocated_bytes, self.peak_cuda_reserved_bytes):
             raise ValueError("peak_cuda_tracked_bytes does not equal max(allocated, reserved)")
+        if self.budget != BUDGET or self.divide_length != DIVIDE_LENGTH:
+            raise ValueError("budget/divide_length do not match frozen values")
+        runtime = self.runtime_prediction.model_dump(mode="python")
+        for field_name in (
+            "reference_seconds_per_token",
+            "predicted_example_seconds",
+            "predicted_pair_seconds",
+            "projected_total_seconds",
+            "projected_gpu_hours",
+            "safety_multiplier",
+            "runtime_predictor_version",
+        ):
+            if getattr(self, field_name) != runtime[field_name]:
+                raise ValueError(f"flattened runtime field {field_name} disagrees with runtime_prediction")
         return self
 
 
@@ -434,7 +572,8 @@ def build_qualification_outcome(
     qualified = all(conditions[name] for name in B2A_R3_QUALIFICATION_CONDITIONS)
     failed_conditions = [name for name in B2A_R3_QUALIFICATION_CONDITIONS if not conditions[name]]
 
-    runtime = evidence.runtime_prediction
+    runtime = evidence.runtime_prediction.model_dump(mode="python")
+    expected_positions, expected_eligible_indices = _expected_schedule(evidence)
     outcome = CandidateQualificationOutcomeR3(
         candidate_ordinal=evidence.candidate_ordinal,
         source_example_index=evidence.source_example_index,
@@ -453,6 +592,7 @@ def build_qualification_outcome(
         expected_prompt_token_ids_sha256=evidence.expected_prompt_token_ids_sha256,
         observed_prompt_token_ids_sha256=evidence.observed_prompt_token_ids_sha256,
         prompt_token_count=evidence.prompt_token_count,
+        natural_generated_token_ids=list(evidence.natural_generated_token_ids),
         generated_token_count=evidence.generated_token_count,
         generated_token_ids_sha256=evidence.generated_token_ids_sha256,
         total_processed_tokens=evidence.prompt_token_count + evidence.generated_token_count,
@@ -473,10 +613,16 @@ def build_qualification_outcome(
         peak_cuda_allocated_bytes=evidence.peak_cuda_allocated_bytes,
         peak_cuda_reserved_bytes=evidence.peak_cuda_reserved_bytes,
         peak_cuda_tracked_bytes=max(evidence.peak_cuda_allocated_bytes, evidence.peak_cuda_reserved_bytes),
-        predicted_compaction_event_positions=list(evidence.predicted_compaction_event_positions),
-        predicted_event_count=evidence.predicted_event_count,
-        eligible_event_indices=list(evidence.eligible_event_indices),
-        eligible_event_count=evidence.eligible_event_count,
+        predicted_compaction_event_positions=expected_positions,
+        predicted_event_count=len(expected_positions),
+        eligible_event_indices=expected_eligible_indices,
+        eligible_event_count=len(expected_eligible_indices),
+        budget=BUDGET,
+        divide_length=DIVIDE_LENGTH,
+        generation_config_sha256=evidence.generation_config_sha256,
+        candidate_manifest_canonical_sha256=evidence.candidate_manifest_canonical_sha256,
+        config_sha256=evidence.config_sha256,
+        runtime_prediction=evidence.runtime_prediction,
         reference_seconds_per_token=runtime["reference_seconds_per_token"],
         predicted_example_seconds=runtime["predicted_example_seconds"],
         predicted_pair_seconds=runtime["predicted_pair_seconds"],
@@ -489,6 +635,114 @@ def build_qualification_outcome(
         failed_conditions=failed_conditions,
     )
     return outcome.model_dump(mode="json")
+
+
+def rederive_and_verify_qualification_outcome(
+    outcome: CandidateQualificationOutcomeR3 | dict[str, Any],
+    candidate_manifest: dict[str, Any],
+    expected_config_sha256: str,
+) -> None:
+    """Reconstruct raw evidence and independently replay all 27 gates.
+
+    A valid canonical artifact is only a transport integrity check.  This
+    function is the semantic check that makes a persisted outcome
+    independently verifiable rather than trusting its stored condition map.
+    """
+    typed = (
+        outcome
+        if isinstance(outcome, CandidateQualificationOutcomeR3)
+        else CandidateQualificationOutcomeR3.model_validate(outcome)
+    )
+    manifest = verify_candidate_manifest_structure(
+        candidate_manifest, expected_config_sha256=expected_config_sha256
+    )
+    if not (0 <= typed.candidate_ordinal < len(manifest.candidates)):
+        raise QualificationRefused(f"candidate ordinal {typed.candidate_ordinal} is not present")
+    candidate = manifest.candidates[typed.candidate_ordinal]
+    for field_name in (
+        "candidate_ordinal",
+        "source_example_index",
+        "unique_id",
+        "raw_row_sha256",
+        "problem_sha256",
+        "gold_answer_sha256",
+    ):
+        if getattr(typed, field_name) != getattr(candidate, field_name):
+            raise QualificationRefused(f"persisted outcome {field_name} does not match the candidate manifest")
+
+    evidence = B2AR3FullKVQualificationEvidence(
+        candidate_ordinal=typed.candidate_ordinal,
+        source_example_index=typed.source_example_index,
+        unique_id=typed.unique_id,
+        row=candidate.row,
+        raw_row_sha256=typed.raw_row_sha256,
+        problem_sha256=typed.problem_sha256,
+        gold_answer_sha256=typed.gold_answer_sha256,
+        worker_dataset_repo=typed.worker_dataset_repo,
+        worker_dataset_config=typed.worker_dataset_config,
+        worker_dataset_split=typed.worker_dataset_split,
+        worker_dataset_revision=typed.worker_dataset_revision,
+        worker_model_name=typed.worker_model_name,
+        worker_model_revision=typed.worker_model_revision,
+        worker_tokenizer_name=typed.worker_tokenizer_name,
+        worker_tokenizer_revision=typed.worker_tokenizer_revision,
+        expected_prompt_token_ids_sha256=typed.expected_prompt_token_ids_sha256,
+        observed_prompt_token_ids_sha256=typed.observed_prompt_token_ids_sha256,
+        prompt_token_count=typed.prompt_token_count,
+        natural_generated_token_ids=typed.natural_generated_token_ids,
+        generated_token_count=typed.generated_token_count,
+        generated_token_ids_sha256=typed.generated_token_ids_sha256,
+        cap_hit=typed.cap_hit,
+        extracted_answer=typed.extracted_answer,
+        answer_verification_status=typed.answer_verification_status,
+        think_parse_status=typed.think_parse_status,
+        think_start_index=typed.think_start_index,
+        think_end_index=typed.think_end_index,
+        generation_prompt_preopened_think=typed.generation_prompt_preopened_think,
+        fullkv_wall_seconds=typed.fullkv_wall_seconds,
+        fullkv_timing_evidence=typed.fullkv_timing_evidence,
+        requested_device=typed.requested_device,
+        parameter_placement_evidence=typed.parameter_placement_evidence,
+        actual_batch_size=typed.actual_batch_size,
+        peak_cuda_allocated_bytes=typed.peak_cuda_allocated_bytes,
+        peak_cuda_reserved_bytes=typed.peak_cuda_reserved_bytes,
+        predicted_compaction_event_positions=typed.predicted_compaction_event_positions,
+        predicted_event_count=typed.predicted_event_count,
+        eligible_event_indices=typed.eligible_event_indices,
+        eligible_event_count=typed.eligible_event_count,
+        budget=typed.budget,
+        divide_length=typed.divide_length,
+        generation_config_sha256=typed.generation_config_sha256,
+        runtime_prediction=typed.runtime_prediction,
+        candidate_manifest_canonical_sha256=typed.candidate_manifest_canonical_sha256,
+        config_sha256=typed.config_sha256,
+    )
+
+    expected_positions, expected_eligible = _expected_schedule(evidence)
+    if typed.predicted_compaction_event_positions != expected_positions:
+        raise QualificationRefused("stored predicted compaction schedule does not reproduce")
+    if typed.predicted_event_count != len(expected_positions):
+        raise QualificationRefused("stored predicted_event_count does not reproduce")
+    if typed.eligible_event_indices != expected_eligible:
+        raise QualificationRefused("stored eligible event indices do not reproduce")
+    if typed.eligible_event_count != len(expected_eligible):
+        raise QualificationRefused("stored eligible_event_count does not reproduce")
+
+    conditions = evaluate_b2a_r3_qualification_conditions(
+        evidence,
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=expected_config_sha256,
+    )
+    if conditions != typed.conditions:
+        raise QualificationRefused("stored condition map disagrees with independent semantic rederivation")
+    if typed.thinking_span_valid != conditions["thinking_span_valid"]:
+        raise QualificationRefused("stored thinking_span_valid disagrees with rederivation")
+    if typed.trace_complete != conditions["trace_complete"]:
+        raise QualificationRefused("stored trace_complete disagrees with rederivation")
+    qualified = all(conditions[name] for name in B2A_R3_QUALIFICATION_CONDITIONS)
+    failed = [name for name in B2A_R3_QUALIFICATION_CONDITIONS if not conditions[name]]
+    if typed.qualified != qualified or typed.failed_conditions != failed:
+        raise QualificationRefused("stored qualified/failed_conditions disagree with rederivation")
 
 
 def select_first_qualified_r3(attempted: list[dict[str, Any]]) -> dict[str, Any] | None:

@@ -53,67 +53,37 @@ def _valid_timing():
     ]
 
 
-CANDIDATE_MANIFEST_HASH = "b" * 64
-CONFIG_SHA = "c" * 64
+CONFIG_SHA = "de8ac65a348c307c4f00089da07914666332935981bcaa7c98a150a9e7e778b3"
 PROMPT_HASH = "d" * 64
 
 
 def _candidate_manifest():
-    payload = {"dataset_revision": "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be", "x": 1}
-    payload["canonical_sha256"] = sha256_json(payload)
-    return payload
+    import json
+    from pathlib import Path
+
+    return json.loads(Path("configs/discovery/b2a_r3_candidate_manifest.json").read_text(encoding="utf-8"))
 
 
 def _valid_evidence(**overrides) -> B2AR3FullKVQualificationEvidence:
-    row = _row()
-    generated_ids = [1, 2, 3, 4, 5]
     manifest = _candidate_manifest()
-    fields = dict(
-        candidate_ordinal=0,
-        source_example_index=7,
-        unique_id=row["unique_id"],
-        row=row,
-        raw_row_sha256=sha256_json(row),
-        problem_sha256=sha256_text(row["problem"]),
-        gold_answer_sha256=sha256_text(row["answer"]),
-        worker_dataset_repo="HuggingFaceH4/MATH-500",
-        worker_dataset_config="default",
-        worker_dataset_split="test",
-        worker_dataset_revision="6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be",
-        worker_model_name="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        worker_model_revision="6a6f4aa4197940add57724a7707d069478df56b1",
-        worker_tokenizer_name="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        worker_tokenizer_revision="6a6f4aa4197940add57724a7707d069478df56b1",
-        expected_prompt_token_ids_sha256=PROMPT_HASH,
-        observed_prompt_token_ids_sha256=PROMPT_HASH,
-        prompt_token_count=1995,  # + 5 generated = 2000 > BUDGET(1024)
-        natural_generated_token_ids=generated_ids,
-        generated_token_count=len(generated_ids),
-        generated_token_ids_sha256=sha256_int_ids(generated_ids),
-        cap_hit=False,
-        extracted_answer="42",
-        answer_verification_status="correct",
-        think_parse_status="ok",
-        think_start_index=0,
-        think_end_index=3,
-        generation_prompt_preopened_think=False,
-        fullkv_wall_seconds=12.5,
-        fullkv_timing_evidence=_valid_timing(),
-        requested_device="cuda:0",
-        parameter_placement_evidence=_valid_placement(),
-        actual_batch_size=1,
-        peak_cuda_allocated_bytes=1000,
-        peak_cuda_reserved_bytes=2000,
-        predicted_compaction_event_positions=list(range(6)),
-        predicted_event_count=6,
-        eligible_event_indices=[1, 2, 3],
-        eligible_event_count=3,
-        generation_config_sha256=GENERATION_CONFIG_SHA256,
-        runtime_prediction=predict_runtime(2000).to_json(),
-        candidate_manifest_canonical_sha256=manifest["canonical_sha256"],
-        config_sha256=CONFIG_SHA,
+    ordinal = overrides.get("candidate_ordinal", 0)
+    candidate = manifest["candidates"][ordinal if 0 <= ordinal < len(manifest["candidates"]) else 0]
+    from tests.unit.discovery.test_b2a_r3_independent_audit_repair import _evidence as _strict_evidence
+
+    fields = _strict_evidence().model_dump(mode="python")
+    fields.update(
+        candidate_ordinal=ordinal,
+        source_example_index=candidate["source_example_index"],
+        unique_id=candidate["unique_id"],
+        row=candidate["row"],
+        raw_row_sha256=candidate["raw_row_sha256"],
+        problem_sha256=candidate["problem_sha256"],
+        gold_answer_sha256=candidate["gold_answer_sha256"],
     )
     fields.update(overrides)
+    if "natural_generated_token_ids" in overrides:
+        ids = overrides["natural_generated_token_ids"]
+        fields["generated_token_ids_sha256"] = overrides.get("generated_token_ids_sha256", sha256_int_ids(ids))
     return B2AR3FullKVQualificationEvidence.model_validate(fields)
 
 
@@ -167,7 +137,7 @@ def test_generation_prompt_preopened_ok_is_a_success_status():
 
 
 def test_think_end_index_exceeding_generated_count_fails():
-    conditions = _evaluate(think_end_index=999)
+    conditions = _evaluate(think_end_index=9999)
     assert conditions["thinking_span_valid"] is False
 
 
@@ -243,25 +213,19 @@ def test_sequence_length_1024_vs_1025():
     assert conditions_1025["sequence_exceeds_budget"] is True
 
 
-def test_zero_vs_present_predicted_compaction():
-    conditions_zero = _evaluate(predicted_compaction_event_positions=[], predicted_event_count=0)
-    conditions_present = _evaluate(predicted_compaction_event_positions=[10], predicted_event_count=6)
-    assert conditions_zero["predicted_compaction_present"] is False
-    assert conditions_present["predicted_compaction_present"] is True
+def test_caller_schedule_echoes_do_not_control_compaction_gate():
+    conditions = _evaluate(predicted_compaction_event_positions=[], predicted_event_count=0)
+    assert conditions["predicted_compaction_present"] is True
 
 
-def test_five_vs_six_predicted_events():
-    conditions_five = _evaluate(predicted_compaction_event_positions=list(range(5)), predicted_event_count=5)
-    conditions_six = _evaluate(predicted_compaction_event_positions=list(range(6)), predicted_event_count=6)
-    assert conditions_five["predicted_event_count_at_least_six"] is False
-    assert conditions_six["predicted_event_count_at_least_six"] is True
+def test_caller_schedule_count_echo_does_not_control_minimum_gate():
+    conditions = _evaluate(predicted_compaction_event_positions=[1], predicted_event_count=99)
+    assert conditions["predicted_event_count_at_least_six"] is True
 
 
-def test_two_vs_three_eligible_events():
-    conditions_two = _evaluate(eligible_event_indices=[1, 2], eligible_event_count=2)
-    conditions_three = _evaluate(eligible_event_indices=[1, 2, 3], eligible_event_count=3)
-    assert conditions_two["at_least_three_events_have_49_future_tokens"] is False
-    assert conditions_three["at_least_three_events_have_49_future_tokens"] is True
+def test_caller_eligible_echo_does_not_control_minimum_gate():
+    conditions = _evaluate(eligible_event_indices=[999], eligible_event_count=99)
+    assert conditions["at_least_three_events_have_49_future_tokens"] is True
 
 
 def test_runtime_boundary_via_predictor():
@@ -309,12 +273,10 @@ def test_evidence_rejects_bad_answer_status():
 
 
 def test_generated_count_mismatching_array_length_fails_condition():
-    # Evidence construction itself must still succeed (a genuinely
-    # malformed worker observation must remain representable so it can be
-    # attempted and recorded as a FAILED candidate, never crash the run) --
-    # but the derived condition must be False.
-    conditions = _evaluate(generated_token_count=999)
-    assert conditions["generated_token_count_present"] is False
+    # A token-array/count disagreement is provenance corruption, not a
+    # scientifically failed candidate.
+    with pytest.raises(Exception):
+        _valid_evidence(generated_token_count=999)
 
 
 # --------------------------------------------------------------------- outcome

@@ -76,7 +76,16 @@ TOKENIZER_NAME: Final[str] = MODEL_NAME
 TOKENIZER_REVISION: Final[str] = MODEL_REVISION
 
 BUDGET: Final[int] = 1024
+DIVIDE_LENGTH: Final[int] = 128
 CONFIG_PATH: Final[str] = "configs/discovery/llama8b_math500_b1024.yaml"
+
+PROMPT_MESSAGE_ROLES: Final[tuple[str, ...]] = ("user",)
+PROMPT_ADD_GENERATION: Final[bool] = True
+PROMPT_TOKENIZE: Final[bool] = True
+PROMPT_SPECIAL_TOKENS_NOTE: Final[str] = (
+    "special-token behavior is entirely delegated to the tokenizer's own chat_template (Jinja) -- "
+    "apply_chat_template was called with no separate add_special_tokens override"
+)
 
 # --------------------------------------------------------------------------
 # Frozen exact artifact paths (protocol §12.2) -- no "recommended"

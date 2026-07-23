@@ -166,6 +166,105 @@ FULLKV_TIMING_EXACT_MULTIPLICITY: dict[str, int] = {
     "fullkv_complete_natural_generation": 1,
     "fullkv_complete_worker": 1,
 }
+
+_FULLKV_QUALIFICATION_SINGLETON_PHASES: tuple[str, ...] = (
+    "before_model_load",
+    "fullkv_worker_startup",
+    "snapshot_tokenizer_resolution",
+    "tokenizer_load",
+    "model_load",
+    "post_load_validation",
+    "post_load_baseline",
+    "fullkv_prefill",
+    "answer_verification",
+    "fullkv_complete_natural_generation",
+    "fullkv_complete_worker",
+)
+_FULLKV_QUALIFICATION_PHASE_ORDER: tuple[str, ...] = (
+    "before_model_load",
+    "fullkv_worker_startup",
+    "snapshot_tokenizer_resolution",
+    "tokenizer_load",
+    "model_load",
+    "post_load_validation",
+    "post_load_baseline",
+    "fullkv_prefill",
+    "fullkv_decode",
+    "answer_verification",
+    "fullkv_complete_natural_generation",
+    "fullkv_complete_worker",
+)
+
+
+def fullkv_qualification_timing_complete(
+    records: Sequence[Mapping[str, Any]], *, fullkv_wall_seconds: Any
+) -> bool:
+    """Strictly validate the timing list emitted by ``run_fullkv_worker``.
+
+    This is a qualification-only semantic check over the existing B1
+    vocabulary.  It does not alter ``timing_contract_satisfied`` and thus
+    leaves historical B2A-R1/R2 verification behavior unchanged.
+    """
+    if type(fullkv_wall_seconds) not in (int, float) or not math.isfinite(float(fullkv_wall_seconds)):
+        return False
+    if fullkv_wall_seconds < 0:
+        return False
+    required_fields = {
+        "phase",
+        "started_at",
+        "ended_at",
+        "duration_seconds",
+        "synchronize_before_start",
+        "synchronize_before_end",
+        "completed",
+        "failure_type",
+        "failure_message",
+    }
+    if not isinstance(records, Sequence) or isinstance(records, (str, bytes)) or not records:
+        return False
+
+    phase_names: list[str] = []
+    counts: dict[str, int] = {}
+    allowed = set(_FULLKV_QUALIFICATION_PHASE_ORDER)
+    natural_duration: float | None = None
+    for record in records:
+        if not isinstance(record, Mapping) or set(record) != required_fields:
+            return False
+        phase = record.get("phase")
+        if not isinstance(phase, str) or phase not in allowed:
+            return False
+        for name in ("started_at", "ended_at", "duration_seconds"):
+            value = record.get(name)
+            if type(value) not in (int, float) or not math.isfinite(float(value)) or value < 0:
+                return False
+        started = record["started_at"]
+        ended = record["ended_at"]
+        duration = record["duration_seconds"]
+        if ended < started or duration != ended - started:
+            return False
+        if record.get("synchronize_before_start") is not True:
+            return False
+        if record.get("synchronize_before_end") is not True:
+            return False
+        if record.get("completed") is not True:
+            return False
+        if record.get("failure_type") is not None or record.get("failure_message") is not None:
+            return False
+        phase_names.append(phase)
+        counts[phase] = counts.get(phase, 0) + 1
+        if phase == "fullkv_complete_natural_generation":
+            natural_duration = float(duration)
+
+    if any(counts.get(phase, 0) != 1 for phase in _FULLKV_QUALIFICATION_SINGLETON_PHASES):
+        return False
+    if counts.get("fullkv_decode", 0) < 1:
+        return False
+    expected_order = list(_FULLKV_QUALIFICATION_PHASE_ORDER[:8])
+    expected_order.extend(["fullkv_decode"] * counts["fullkv_decode"])
+    expected_order.extend(_FULLKV_QUALIFICATION_PHASE_ORDER[9:])
+    if phase_names != expected_order:
+        return False
+    return natural_duration == float(fullkv_wall_seconds)
 RKV_TIMING_EXACT_MULTIPLICITY: dict[str, int] = {
     "rkv_worker_startup": 1,
     "snapshot_tokenizer_resolution": 1,

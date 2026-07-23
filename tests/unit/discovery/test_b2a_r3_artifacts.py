@@ -37,26 +37,22 @@ from kvcot.utils.hashing import sha256_int_ids, sha256_json, sha256_text
 
 from tests.unit.discovery.test_b2a_r3_qualification import _valid_evidence
 
-CONFIG_SHA = "c" * 64
+CONFIG_SHA = "de8ac65a348c307c4f00089da07914666332935981bcaa7c98a150a9e7e778b3"
+
+
+def _uid(ordinal: int) -> str:
+    return _candidate_manifest()["candidates"][ordinal]["unique_id"]
 
 
 def _candidate_manifest():
-    payload = {"dataset_revision": DATASET_REVISION, "x": 1}
-    payload["canonical_sha256"] = sha256_json(payload)
-    return payload
+    import json
+    from pathlib import Path
+
+    return json.loads(Path(CANDIDATE_MANIFEST_PATH).read_text(encoding="utf-8"))
 
 
 def _outcome(ordinal: int, *, qualified: bool):
-    overrides = {"candidate_ordinal": ordinal, "unique_id": f"test/algebra/{ordinal}.json"}
-    row = dict(overrides)
-    row_full = {
-        "problem": "p", "solution": "s", "answer": "42", "subject": "Algebra", "level": 5,
-        "unique_id": overrides["unique_id"],
-    }
-    overrides["row"] = row_full
-    overrides["raw_row_sha256"] = sha256_json(row_full)
-    overrides["problem_sha256"] = sha256_text(row_full["problem"])
-    overrides["gold_answer_sha256"] = sha256_text(row_full["answer"])
+    overrides = {"candidate_ordinal": ordinal}
     if not qualified:
         overrides["answer_verification_status"] = "incorrect"
     manifest = _candidate_manifest()
@@ -106,11 +102,11 @@ def test_valid_artifact_with_selected_row_verifies():
     attempted = [_outcome(0, qualified=False), _outcome(1, qualified=True)]
     artifact, manifest = _artifact(
         attempted, selection_status=SELECTION_STATUS_SELECTED, first_ordinal=1,
-        selected_unique_id="test/algebra/1.json",
+        selected_unique_id=_uid(1),
     )
     typed = verify_qualification_artifact(artifact, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA)
     assert isinstance(typed, QualificationArtifactR3)
-    assert typed.selected_unique_id == "test/algebra/1.json"
+    assert typed.selected_unique_id == _uid(1)
 
 
 def test_valid_artifact_with_no_candidate_qualified_verifies():
@@ -126,7 +122,7 @@ def test_rejects_unknown_field():
     attempted = [_outcome(0, qualified=True)]
     artifact, manifest = _artifact(
         attempted, selection_status=SELECTION_STATUS_SELECTED, first_ordinal=0,
-        selected_unique_id="test/algebra/0.json",
+        selected_unique_id=_uid(0),
     )
     artifact = dict(artifact)
     artifact["extra"] = 1
@@ -138,7 +134,7 @@ def test_rejects_wrong_candidate_manifest_hash():
     attempted = [_outcome(0, qualified=True)]
     artifact, manifest = _artifact(
         attempted, selection_status=SELECTION_STATUS_SELECTED, first_ordinal=0,
-        selected_unique_id="test/algebra/0.json",
+        selected_unique_id=_uid(0),
     )
     wrong_manifest = dict(manifest, x=999)
     wrong_manifest["canonical_sha256"] = sha256_json({k: v for k, v in wrong_manifest.items() if k != "canonical_sha256"})
@@ -150,7 +146,7 @@ def test_rejects_wrong_config_hash():
     attempted = [_outcome(0, qualified=True)]
     artifact, manifest = _artifact(
         attempted, selection_status=SELECTION_STATUS_SELECTED, first_ordinal=0,
-        selected_unique_id="test/algebra/0.json",
+        selected_unique_id=_uid(0),
     )
     with pytest.raises(ArtifactVerificationRefused):
         verify_qualification_artifact(artifact, candidate_manifest=manifest, expected_config_sha256="0" * 64)
@@ -160,7 +156,7 @@ def test_rejects_tampered_canonical_hash():
     attempted = [_outcome(0, qualified=True)]
     artifact, manifest = _artifact(
         attempted, selection_status=SELECTION_STATUS_SELECTED, first_ordinal=0,
-        selected_unique_id="test/algebra/0.json",
+        selected_unique_id=_uid(0),
     )
     artifact = dict(artifact, canonical_sha256="0" * 64)
     with pytest.raises(Exception):
@@ -171,7 +167,7 @@ def test_rejects_inconsistent_selected_ordinal():
     attempted = [_outcome(0, qualified=False), _outcome(1, qualified=True)]
     artifact, manifest = _artifact(
         attempted, selection_status=SELECTION_STATUS_SELECTED, first_ordinal=0,  # WRONG -- 0 failed
-        selected_unique_id="test/algebra/1.json",
+        selected_unique_id=_uid(1),
     )
     artifact["canonical_sha256"] = sha256_json({k: v for k, v in artifact.items() if k != "canonical_sha256"})
     with pytest.raises(Exception):
@@ -182,7 +178,7 @@ def test_rejects_attempted_count_mismatch():
     attempted = [_outcome(0, qualified=True)]
     artifact, manifest = _artifact(
         attempted, selection_status=SELECTION_STATUS_SELECTED, first_ordinal=0,
-        selected_unique_id="test/algebra/0.json",
+        selected_unique_id=_uid(0),
     )
     artifact = dict(artifact)
     artifact["attempted_candidate_count"] = 5
@@ -195,7 +191,7 @@ def test_rejects_bad_timestamp_order():
     attempted = [_outcome(0, qualified=True)]
     artifact, manifest = _artifact(
         attempted, selection_status=SELECTION_STATUS_SELECTED, first_ordinal=0,
-        selected_unique_id="test/algebra/0.json",
+        selected_unique_id=_uid(0),
     )
     artifact = dict(artifact)
     artifact["attempt_started_at_utc"], artifact["attempt_completed_at_utc"] = (
