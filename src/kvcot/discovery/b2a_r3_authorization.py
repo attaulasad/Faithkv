@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,14 @@ from kvcot.discovery.b2a_r3_contract import (
     validate_authorization_id,
     verify_canonical_sha256,
 )
+from kvcot.discovery.b2a_r3_candidates import verify_candidate_manifest_structure
+from kvcot.discovery.b2a_r3_provenance import (
+    ActiveAuthorizationPaths,
+    AttemptProvenancePolicy,
+    GitStateProvider,
+    verify_attempt_provenance,
+)
+from kvcot.utils.hashing import sha256_file
 
 __all__ = [
     "AuthorizationAlreadyConsumed",
@@ -39,7 +48,8 @@ __all__ = [
     "AUTHORIZATION_STAGE_FULLKV_QUALIFICATION",
     "AUTHORIZATION_STAGE_B2A_R3_EXECUTION",
     "AuthorizationClaimR3",
-    "create_authorization_claim",
+    "VerifiedAuthorizationContext",
+    "verify_authorization_preconditions",
     "claim_authorization",
     "plan_authorization_claim_dry_run",
 ]
@@ -156,10 +166,124 @@ class AuthorizationClaimR3(BaseModel):
                 f"global_claim_path {self.global_claim_path!r} does not match the deterministic path "
                 f"{expected_path!r} derived from authorization_id"
             )
+        ActiveAuthorizationPaths.from_verified_claim(self)
         return self
 
 
-def create_authorization_claim(payload: dict[str, Any], *, claims_root: str | Path) -> Path:
+_VERIFIED_CONTEXT_TOKEN = object()
+
+
+@dataclass(frozen=True)
+class VerifiedAuthorizationContext:
+    claim: AuthorizationClaimR3
+    policy: AttemptProvenancePolicy
+    active_paths: ActiveAuthorizationPaths
+    _verification_token: object
+
+
+def verify_authorization_preconditions(
+    claim_payload: dict[str, Any],
+    *,
+    policy: AttemptProvenancePolicy,
+    git_state: GitStateProvider,
+    authorization_document_path: str | Path,
+    candidate_manifest: dict[str, Any],
+    expected_config_sha256: str,
+    qualification_artifact: dict[str, Any] | None = None,
+    selected_manifest: Any | None = None,
+    selection_provenance: dict[str, Any] | None = None,
+    repository_root: str | Path = ".",
+) -> VerifiedAuthorizationContext:
+    """Verify the complete document/Git/artifact chain before consumption."""
+    verify_canonical_sha256(claim_payload)
+    claim = AuthorizationClaimR3.model_validate(claim_payload)
+
+    import re
+
+    stage_patterns = {
+        AUTHORIZATION_STAGE_FULLKV_QUALIFICATION:
+            r"docs/B2A_R3_STAGE_B_QUALIFICATION_AUTHORIZATION_[0-9]{4}-[0-9]{2}-[0-9]{2}\.md",
+        AUTHORIZATION_STAGE_B2A_R3_EXECUTION:
+            r"docs/B2A_R3_STAGE_C_EXECUTION_AUTHORIZATION_[0-9]{4}-[0-9]{2}-[0-9]{2}\.md",
+    }
+    if re.fullmatch(stage_patterns[claim.authorization_stage], claim.authorization_document_path) is None:
+        raise AuthorizationClaimRefused("authorization document path does not match the exact stage/date pattern")
+    expected_document = (Path(repository_root) / claim.authorization_document_path).resolve()
+    supplied_document = Path(authorization_document_path).resolve()
+    if supplied_document != expected_document or not supplied_document.is_file():
+        raise AuthorizationClaimRefused("authorization document is missing or not the exact claimed path")
+    if not git_state.is_path_committed(claim.authorization_document_path):
+        raise AuthorizationClaimRefused("authorization document is not committed")
+    observed_document_hash = sha256_file(supplied_document)
+    if observed_document_hash != claim.authorization_document_sha256:
+        raise AuthorizationClaimRefused("authorization document byte hash does not match the claim")
+
+    if policy.authorization_id != claim.authorization_id:
+        raise AuthorizationClaimRefused("policy authorization_id does not match the claim")
+    if policy.authorization_document_sha256 != claim.authorization_document_sha256:
+        raise AuthorizationClaimRefused("policy authorization-document hash does not match the claim")
+    if tuple(claim.required_ancestor_shas) != policy.required_ancestor_shas:
+        raise AuthorizationClaimRefused("claim required ancestors do not exactly match the policy")
+    if claim.required_rkv_sha != policy.required_rkv_sha:
+        raise AuthorizationClaimRefused("claim required R-KV SHA does not match the policy")
+    if not (
+        claim.observed_repository == claim.authorized_repository == policy.required_repository == REQUIRED_REPOSITORY
+    ):
+        raise AuthorizationClaimRefused("observed/authorized/required repository identities disagree")
+    if not (claim.observed_branch == claim.authorized_branch == policy.required_branch):
+        raise AuthorizationClaimRefused("observed/authorized/required branch identities disagree")
+    if not (claim.observed_commit_sha == claim.authorized_commit_sha == policy.required_commit_sha):
+        raise AuthorizationClaimRefused("observed/authorized/required commit identities disagree")
+    if not (claim.observed_rkv_sha == claim.required_rkv_sha == policy.required_rkv_sha):
+        raise AuthorizationClaimRefused("observed/required R-KV identities disagree")
+
+    ok, reasons = verify_attempt_provenance(policy, git_state)
+    if not ok:
+        raise AuthorizationClaimRefused(f"repository pre-claim verification failed: {reasons}")
+
+    candidate = verify_candidate_manifest_structure(
+        candidate_manifest, expected_config_sha256=expected_config_sha256
+    )
+    if claim.candidate_manifest_canonical_sha256 != candidate.canonical_sha256:
+        raise AuthorizationClaimRefused("claim candidate-manifest hash does not match the supplied manifest")
+
+    if claim.authorization_stage == AUTHORIZATION_STAGE_FULLKV_QUALIFICATION:
+        if any(value is not None for value in (
+            qualification_artifact, selected_manifest, selection_provenance
+        )):
+            raise AuthorizationClaimRefused("Stage B preconditions must not receive Stage C artifacts")
+    else:
+        if qualification_artifact is None or selected_manifest is None or selection_provenance is None:
+            raise AuthorizationClaimRefused("Stage C preconditions require the complete qualification/selection chain")
+        from kvcot.discovery.b2a_r3_artifacts import verify_qualification_artifact
+        from kvcot.discovery.b2a_r3_freeze import verify_selection_provenance
+
+        qualification = verify_qualification_artifact(
+            qualification_artifact,
+            candidate_manifest=candidate_manifest,
+            expected_config_sha256=expected_config_sha256,
+        )
+        if claim.qualification_artifact_canonical_sha256 != qualification.canonical_sha256:
+            raise AuthorizationClaimRefused("claim qualification-artifact hash does not match")
+        verified_selection = verify_selection_provenance(
+            selection_provenance,
+            selected_manifest=selected_manifest,
+            candidate_manifest=candidate_manifest,
+            qualification_artifact=qualification_artifact,
+            expected_config_sha256=expected_config_sha256,
+        )
+        if claim.selected_manifest_sha256 != verified_selection.selected_manifest_sha256:
+            raise AuthorizationClaimRefused("claim selected-manifest hash does not match")
+
+    return VerifiedAuthorizationContext(
+        claim=claim,
+        policy=policy,
+        active_paths=ActiveAuthorizationPaths.from_verified_claim(claim),
+        _verification_token=_VERIFIED_CONTEXT_TOKEN,
+    )
+
+
+def _create_authorization_claim(payload: dict[str, Any], *, claims_root: str | Path) -> Path:
     """Steps 2-4 of protocol §14.4.2: derive the deterministic claim path,
     exclusively create it (`O_CREAT | O_EXCL`), then write + flush +
     fsync the payload. The success of the exclusive-create call IS the
@@ -194,7 +318,12 @@ def create_authorization_claim(payload: dict[str, Any], *, claims_root: str | Pa
     return claim_path
 
 
-def claim_authorization(payload: dict[str, Any], *, claims_root: str | Path) -> tuple[AuthorizationClaimR3, Path]:
+def claim_authorization(
+    payload: dict[str, Any],
+    *,
+    claims_root: str | Path,
+    verified_context: VerifiedAuthorizationContext,
+) -> tuple[AuthorizationClaimR3, Path]:
     """Full-schema validation (including the payload's own
     `canonical_sha256`) followed by the atomic claim operation. Returns
     `(typed_claim, claim_path)` on success; raises
@@ -202,7 +331,11 @@ def claim_authorization(payload: dict[str, Any], *, claims_root: str | Path) -> 
     occupied."""
     verify_canonical_sha256(payload)
     typed = AuthorizationClaimR3.model_validate(payload)
-    claim_path = create_authorization_claim(payload, claims_root=claims_root)
+    if verified_context._verification_token is not _VERIFIED_CONTEXT_TOKEN:
+        raise AuthorizationClaimRefused("authorization context was not produced by semantic precondition verification")
+    if typed != verified_context.claim:
+        raise AuthorizationClaimRefused("verified context does not authorize this exact claim payload")
+    claim_path = _create_authorization_claim(payload, claims_root=claims_root)
     return typed, claim_path
 
 

@@ -4,6 +4,7 @@ written under `tmp_path` -- no real claim is ever created at
 from __future__ import annotations
 
 import threading
+import multiprocessing
 
 import pytest
 
@@ -12,9 +13,10 @@ from kvcot.discovery.b2a_r3_authorization import (
     AUTHORIZATION_STAGE_FULLKV_QUALIFICATION,
     AuthorizationAlreadyConsumed,
     AuthorizationClaimR3,
+    _create_authorization_claim as create_authorization_claim,
     claim_authorization,
-    create_authorization_claim,
     plan_authorization_claim_dry_run,
+    verify_authorization_preconditions,
 )
 from kvcot.discovery.b2a_r3_contract import (
     AUTHORIZATION_CLAIM_ARTIFACT_SCHEMA_VERSION,
@@ -23,6 +25,7 @@ from kvcot.discovery.b2a_r3_contract import (
     global_claim_path,
 )
 from kvcot.utils.hashing import sha256_json
+from kvcot.utils.hashing import sha256_file
 
 
 def _stage_b_payload(**overrides):
@@ -70,6 +73,41 @@ def _stage_c_payload(**overrides):
     base.update(overrides)
     base["canonical_sha256"] = sha256_json(base)
     return base
+
+
+def _verified_stage_b(tmp_path, **payload_overrides):
+    import json
+    from pathlib import Path
+
+    from kvcot.discovery.b2a_r3_contract import CANDIDATE_MANIFEST_PATH
+    from tests.unit.discovery.test_b2a_r3_provenance import FakeGitState, _policy
+
+    document_rel = "docs/B2A_R3_STAGE_B_QUALIFICATION_AUTHORIZATION_2026-08-01.md"
+    document = tmp_path / document_rel
+    document.parent.mkdir(parents=True, exist_ok=True)
+    document.write_text("synthetic Stage B authorization\n", encoding="utf-8")
+    candidate_manifest = json.loads(Path(CANDIDATE_MANIFEST_PATH).read_text(encoding="utf-8"))
+    payload = _stage_b_payload(
+        authorization_document_sha256=sha256_file(document),
+        candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],
+        **payload_overrides,
+    )
+    policy = _policy(
+        required_commit_sha="b" * 40,
+        required_ancestor_shas=("c" * 40,),
+        authorization_document_sha256=payload["authorization_document_sha256"],
+    )
+    git_state = FakeGitState(commit_sha="b" * 40, ancestors=frozenset({"c" * 40}))
+    context = verify_authorization_preconditions(
+        payload,
+        policy=policy,
+        git_state=git_state,
+        authorization_document_path=document,
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=candidate_manifest["config_sha256"],
+        repository_root=tmp_path,
+    )
+    return payload, context, document, candidate_manifest, policy, git_state
 
 
 def test_stage_b_payload_validates():
@@ -161,17 +199,38 @@ def test_second_claim_for_same_id_fails(tmp_path):
 
 
 def test_claim_authorization_full_validation_and_creation(tmp_path):
-    payload = _stage_b_payload()
-    typed, path = claim_authorization(payload, claims_root=tmp_path)
+    payload, context, _document, _manifest, _policy_value, _git_state = _verified_stage_b(tmp_path)
+    claims_root = tmp_path / "claims"
+    typed, path = claim_authorization(payload, claims_root=claims_root, verified_context=context)
     assert isinstance(typed, AuthorizationClaimR3)
-    assert path.exists()
+    assert path.exists() and path.stat().st_size > 0
 
 
 def test_claim_authorization_rejects_invalid_payload_before_touching_disk(tmp_path):
     payload = _stage_b_payload(authorized_repository="wrong/repo")
     with pytest.raises(Exception):
-        claim_authorization(payload, claims_root=tmp_path)
+        claim_authorization(payload, claims_root=tmp_path, verified_context=object())
     assert list(tmp_path.iterdir()) == []
+
+
+def test_preconditions_reject_authorization_document_byte_change(tmp_path):
+    payload, _context, document, candidate_manifest, policy, git_state = _verified_stage_b(tmp_path)
+    document.write_text("tampered bytes\n", encoding="utf-8")
+    with pytest.raises(Exception):
+        verify_authorization_preconditions(
+            payload,
+            policy=policy,
+            git_state=git_state,
+            authorization_document_path=document,
+            candidate_manifest=candidate_manifest,
+            expected_config_sha256=candidate_manifest["config_sha256"],
+            repository_root=tmp_path,
+        )
+
+
+def test_preconditions_reject_observed_repository_disagreement(tmp_path):
+    with pytest.raises(Exception):
+        _verified_stage_b(tmp_path, observed_repository="someone/else")
 
 
 def test_empty_partial_or_corrupt_claim_remains_consumed(tmp_path):
@@ -256,3 +315,51 @@ def test_concurrent_claim_exactly_one_winner_one_refusal(tmp_path, trial):
     assert claim_path.exists()
     # No overwrite: exactly one claim file, with genuine content (not empty).
     assert claim_path.stat().st_size > 0
+
+
+def _multiprocess_claim_attempt(payload, claims_root, start_event, result_queue):
+    """Top-level spawn target: must remain picklable on Windows."""
+    from kvcot.discovery.b2a_r3_authorization import (
+        AuthorizationAlreadyConsumed,
+        _create_authorization_claim,
+    )
+
+    start_event.wait()
+    try:
+        _create_authorization_claim(payload, claims_root=claims_root)
+        result_queue.put("success")
+    except AuthorizationAlreadyConsumed:
+        result_queue.put("AuthorizationAlreadyConsumed")
+
+
+@pytest.mark.parametrize("trial", range(5))
+def test_multiprocess_claim_exactly_one_winner_one_refusal(tmp_path, trial):
+    ctx = multiprocessing.get_context("spawn")
+    claims_root = tmp_path / f"process-trial-{trial}"
+    authorization_id = f"process-race-{trial}"
+    payload = _stage_b_payload(
+        authorization_id=authorization_id,
+        global_claim_path=global_claim_path(authorization_id),
+    )
+    start_event = ctx.Event()
+    result_queue = ctx.Queue()
+    processes = [
+        ctx.Process(
+            target=_multiprocess_claim_attempt,
+            args=(payload, str(claims_root), start_event, result_queue),
+        )
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    start_event.set()
+    for process in processes:
+        process.join(timeout=30)
+        assert process.exitcode == 0
+
+    outcomes = sorted(result_queue.get(timeout=5) for _ in range(2))
+    assert outcomes == ["AuthorizationAlreadyConsumed", "success"]
+    entries = list(claims_root.iterdir())
+    assert len(entries) == 1
+    assert entries[0].name == f"{authorization_id}.json"
+    assert entries[0].stat().st_size > 0

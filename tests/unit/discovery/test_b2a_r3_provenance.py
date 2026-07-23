@@ -4,11 +4,17 @@ torch, no CUDA."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
 from kvcot.discovery.b2a_r3_contract import PROVENANCE_POLICY_VERSION, REQUIRED_REPOSITORY
-from kvcot.discovery.b2a_r3_provenance import AttemptProvenancePolicy, WorktreeStatus, verify_attempt_provenance
+from kvcot.discovery.b2a_r3_provenance import (
+    ActiveAuthorizationPaths,
+    AttemptProvenancePolicy,
+    WorktreeStatus,
+    verify_attempt_provenance,
+)
 
 REQUIRED_BRANCH = "research/b2a-r3-runtime-qualified-calibration"
 REQUIRED_COMMIT = "a" * 40
@@ -44,6 +50,9 @@ class FakeGitState:
     def worktree_status(self) -> WorktreeStatus:
         return self.status
 
+    def is_path_committed(self, path: str) -> bool:
+        return True
+
 
 def _policy(**overrides) -> AttemptProvenancePolicy:
     fields = dict(
@@ -58,6 +67,17 @@ def _policy(**overrides) -> AttemptProvenancePolicy:
     )
     fields.update(overrides)
     return AttemptProvenancePolicy(**fields)
+
+
+def _active_paths(**overrides) -> ActiveAuthorizationPaths:
+    values = dict(
+        authorization_id="stage-b-2026-08-01",
+        global_claim_path="results/decisions/b2a_r3_authorization_claims/stage-b-2026-08-01.json",
+        attempt_id="deadbeef",
+        attempt_directory_path="results/decisions/b2a_r3_attempt_20260801T000000000000Z_deadbeef",
+    )
+    values.update(overrides)
+    return ActiveAuthorizationPaths.from_verified_claim(SimpleNamespace(**values))
 
 
 def test_policy_rejects_wrong_version():
@@ -120,7 +140,7 @@ def test_post_claim_allowlist_permits_exact_paths():
     attempt_dir = "results/decisions/b2a_r3_attempt_20260801T000000000000Z_deadbeef"
     dirty = WorktreeStatus(staged_paths=(), unstaged_paths=(claim_path,), untracked_paths=(attempt_dir,))
     ok, reasons = verify_attempt_provenance(
-        _policy(), FakeGitState(status=dirty), post_claim_allowlist=frozenset({claim_path, attempt_dir}),
+        _policy(), FakeGitState(status=dirty), active_authorization_paths=_active_paths(),
     )
     assert ok is True
     assert reasons == ()
@@ -132,7 +152,7 @@ def test_post_claim_allowlist_rejects_any_other_path():
     claim_path = global_claim_path("stage-b-2026-08-01")
     dirty = WorktreeStatus(staged_paths=(), unstaged_paths=(claim_path, "configs/lock.yaml"), untracked_paths=())
     ok, reasons = verify_attempt_provenance(
-        _policy(), FakeGitState(status=dirty), post_claim_allowlist=frozenset({claim_path}),
+        _policy(), FakeGitState(status=dirty), active_authorization_paths=_active_paths(),
     )
     assert ok is False
     assert any("configs/lock.yaml" in r for r in reasons)
@@ -141,13 +161,38 @@ def test_post_claim_allowlist_rejects_any_other_path():
 def test_never_claims_configs_directory_as_expected():
     dirty = WorktreeStatus(staged_paths=(), unstaged_paths=(), untracked_paths=("configs/some_new_file.json",))
     ok, reasons = verify_attempt_provenance(
-        _policy(), FakeGitState(status=dirty), post_claim_allowlist=frozenset({"configs/some_new_file.json"}),
+        _policy(), FakeGitState(status=dirty), active_authorization_paths=_active_paths(),
     )
-    # The allowlist mechanism itself is generic (caller-supplied), but this
-    # test documents that a real caller must never pass a `configs/` path
-    # in the allowlist -- verified structurally by the freezer/authorization
-    # modules never doing so, not by this generic function refusing it.
-    assert ok is True  # generic function honors whatever allowlist it's given
+    assert ok is False
+    assert any("configs/some_new_file.json" in reason for reason in reasons)
+
+
+def test_child_of_active_attempt_directory_is_accepted():
+    child = "results/decisions/b2a_r3_attempt_20260801T000000000000Z_deadbeef/result.json"
+    dirty = WorktreeStatus((), (), (child,))
+    ok, reasons = verify_attempt_provenance(
+        _policy(), FakeGitState(status=dirty), active_authorization_paths=_active_paths()
+    )
+    assert ok is True
+    assert reasons == ()
+
+
+@pytest.mark.parametrize(
+    "dirty_path",
+    [
+        "results/decisions/b2a_r3_authorization_claims/different.json",
+        "results/decisions/b2a_r3_attempt_20260801T000000000000Z_other",
+        "results/decisions/b2a_r3_attempt_20260801T000000000000Z_deadbeef-sibling/file.json",
+        "results/decisions/b2a_r3_attempt_20260801T000000000000Z_deadbeef/../escape.json",
+        "src/kvcot/discovery/change.py",
+    ],
+)
+def test_post_claim_paths_reject_siblings_traversal_and_source(dirty_path):
+    dirty = WorktreeStatus((), (), (dirty_path,))
+    ok, _reasons = verify_attempt_provenance(
+        _policy(), FakeGitState(status=dirty), active_authorization_paths=_active_paths()
+    )
+    assert ok is False
 
 
 # --------------------------------------------------------------------- historical regression

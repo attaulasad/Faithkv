@@ -7,7 +7,7 @@ import pytest
 
 from kvcot.discovery.b2a_r3_artifacts import SELECTION_STATUS_NONE_QUALIFIED, SELECTION_STATUS_SELECTED
 from kvcot.discovery.b2a_r3_candidates import build_candidate_manifest
-from kvcot.discovery.b2a_r3_contract import SELECTED_MANIFEST_PATH
+from kvcot.discovery.b2a_r3_contract import PROMPT_SPECIAL_TOKENS_NOTE, SELECTED_MANIFEST_PATH
 from kvcot.discovery.b2a_r3_freeze import (
     PromptRenderingResult,
     RowFreezeRefusedR3,
@@ -50,7 +50,7 @@ def _fake_renderer(row: dict) -> PromptRenderingResult:
         tokenizer_revision_used_for_prompt_hash=MODEL_REVISION,
         prompt_rendering_config=ChatTemplateRenderingConfig(
             message_roles=("user",), add_generation_prompt=True, tokenize=True,
-            add_special_tokens_note="delegated to chat_template",
+            add_special_tokens_note=PROMPT_SPECIAL_TOKENS_NOTE,
         ),
     )
 
@@ -78,6 +78,7 @@ def _outcome_for(candidate_manifest, ordinal: int, *, qualified: bool):
     row = candidate["row"]
     overrides = dict(
         candidate_ordinal=ordinal,
+        source_example_index=candidate["source_example_index"],
         unique_id=candidate["unique_id"],
         row=row,
         raw_row_sha256=candidate["raw_row_sha256"],
@@ -260,6 +261,7 @@ def test_write_and_verify_round_trip(tmp_path):
     typed = verify_selection_provenance(
         reloaded_provenance, selected_manifest=reloaded_manifest,
         candidate_manifest=candidate_manifest, qualification_artifact=artifact,
+        expected_config_sha256=CONFIG_SHA,
     )
     assert typed.selected_unique_id == new_manifest.unique_id
 
@@ -276,7 +278,7 @@ def test_verify_selection_provenance_rejects_wrong_external_hash(tmp_path):
     with pytest.raises(RowFreezeRefusedR3):
         verify_selection_provenance(
             tampered, selected_manifest=new_manifest, candidate_manifest=candidate_manifest,
-            qualification_artifact=artifact,
+            qualification_artifact=artifact, expected_config_sha256=CONFIG_SHA,
         )
 
 

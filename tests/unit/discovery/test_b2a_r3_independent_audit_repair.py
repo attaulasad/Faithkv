@@ -261,3 +261,70 @@ def test_alternate_self_consistent_dataset_identity_is_rejected():
     manifest = _rehash(manifest)
     with pytest.raises(Exception):
         verify_candidate_manifest_structure(manifest)
+
+
+def test_claim_consumption_without_verified_preconditions_is_rejected(tmp_path):
+    import inspect
+
+    from kvcot.discovery.b2a_r3_authorization import claim_authorization
+
+    assert "verified_context" in inspect.signature(claim_authorization).parameters
+    with pytest.raises(TypeError):
+        claim_authorization({}, claims_root=tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_arbitrary_post_claim_config_allowlist_is_rejected():
+    from kvcot.discovery.b2a_r3_provenance import WorktreeStatus, verify_attempt_provenance
+    from tests.unit.discovery.test_b2a_r3_provenance import FakeGitState, _policy
+
+    dirty = WorktreeStatus((), (), ("configs/smuggled.json",))
+    ok, _reasons = verify_attempt_provenance(_policy(), FakeGitState(status=dirty))
+    assert ok is False
+
+
+def test_renderer_prompt_hash_mismatch_is_rejected():
+    from kvcot.discovery.b2a_r3_freeze import PromptRenderingResult, construct_selected_manifest_and_provenance
+    from tests.unit.discovery.test_b2a_r3_freeze import _fake_renderer, _valid_chain
+
+    candidate_manifest, artifact = _valid_chain()
+
+    def bad_renderer(row):
+        valid = _fake_renderer(row)
+        values = valid.__dict__.copy()
+        values["prompt_token_ids_sha256"] = "0" * 64
+        return PromptRenderingResult(**values)
+
+    with pytest.raises(Exception):
+        construct_selected_manifest_and_provenance(
+            candidate_manifest=candidate_manifest,
+            qualification_artifact=artifact,
+            expected_config_sha256=candidate_manifest["config_sha256"],
+            tokenizer_renderer=bad_renderer,
+        )
+
+
+def test_selection_provenance_semantic_ordinal_mismatch_is_rejected():
+    from kvcot.discovery.b2a_r3_freeze import (
+        construct_selected_manifest_and_provenance,
+        verify_selection_provenance,
+    )
+    from tests.unit.discovery.test_b2a_r3_freeze import _fake_renderer, _valid_chain
+
+    candidate_manifest, artifact = _valid_chain()
+    selected_manifest, provenance = construct_selected_manifest_and_provenance(
+        candidate_manifest=candidate_manifest,
+        qualification_artifact=artifact,
+        expected_config_sha256=candidate_manifest["config_sha256"],
+        tokenizer_renderer=_fake_renderer,
+    )
+    provenance["selected_ordinal"] = 1
+    provenance = _rehash(provenance)
+    with pytest.raises(Exception):
+        verify_selection_provenance(
+            provenance,
+            selected_manifest=selected_manifest,
+            candidate_manifest=candidate_manifest,
+            qualification_artifact=artifact,
+            expected_config_sha256=candidate_manifest["config_sha256"],
+        )

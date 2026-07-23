@@ -2778,6 +2778,7 @@ def cmd_prepare_b2a_r3_candidates(args: argparse.Namespace) -> int:
 def cmd_verify_b2a_r3_candidates(args: argparse.Namespace) -> int:
     import json
 
+    from kvcot.config import config_identity
     from kvcot.discovery import b2a_r3_contract as c
     from kvcot.discovery.b2a_r3_candidates import (
         verify_candidate_manifest_against_dataset,
@@ -2789,7 +2790,9 @@ def cmd_verify_b2a_r3_candidates(args: argparse.Namespace) -> int:
         manifest = json.load(f)
 
     try:
-        typed = verify_candidate_manifest_structure(manifest)
+        typed = verify_candidate_manifest_structure(
+            manifest, expected_config_sha256=config_identity(c.CONFIG_PATH)
+        )
     except Exception as e:  # noqa: BLE001 -- report the reason, exit nonzero
         print(f"verify-b2a-r3-candidates: STRUCTURAL VERIFICATION FAILED: {e}")
         return 1
@@ -2800,7 +2803,7 @@ def cmd_verify_b2a_r3_candidates(args: argparse.Namespace) -> int:
     if args.verify_existing:
         from kvcot.discovery.b2a_r2_candidates import fetch_all_pinned_dataset_rows
 
-        rows = fetch_all_pinned_dataset_rows(typed.dataset_repo, typed.dataset_revision)
+        rows = fetch_all_pinned_dataset_rows(c.DATASET_REPO, c.DATASET_REVISION)
         try:
             verify_candidate_manifest_against_dataset(manifest, rows)
         except Exception as e:  # noqa: BLE001
@@ -2813,6 +2816,7 @@ def cmd_verify_b2a_r3_candidates(args: argparse.Namespace) -> int:
 def cmd_plan_b2a_r3_qualification(args: argparse.Namespace) -> int:
     import json
 
+    from kvcot.config import config_identity
     from kvcot.discovery import b2a_r3_contract as c
     from kvcot.discovery.b2a_r3_candidates import verify_candidate_manifest_structure
 
@@ -2822,7 +2826,9 @@ def cmd_plan_b2a_r3_qualification(args: argparse.Namespace) -> int:
     candidates_path = args.candidates or c.CANDIDATE_MANIFEST_PATH
     with open(candidates_path, "r", encoding="utf-8") as f:
         manifest = json.load(f)
-    typed = verify_candidate_manifest_structure(manifest)
+    typed = verify_candidate_manifest_structure(
+        manifest, expected_config_sha256=config_identity(c.CONFIG_PATH)
+    )
 
     print("plan-b2a-r3-qualification dry-run plan:")
     print(f"  candidate_manifest_canonical_sha256: {typed.canonical_sha256}")
@@ -2855,6 +2861,9 @@ def cmd_verify_b2a_r3_qualification(args: argparse.Namespace) -> int:
     artifact_path = args.artifact or c.QUALIFICATION_ARTIFACT_PATH
     candidates_path = args.candidates or c.CANDIDATE_MANIFEST_PATH
     config_path = args.config or c.CONFIG_PATH
+    if config_path != c.CONFIG_PATH:
+        print(f"verify-b2a-r3-qualification: VERIFICATION FAILED: config path must be {c.CONFIG_PATH}")
+        return 1
 
     with open(artifact_path, "r", encoding="utf-8") as f:
         artifact = json.load(f)
@@ -2888,6 +2897,8 @@ def cmd_freeze_b2a_r3_selected_row(args: argparse.Namespace) -> int:
     candidates_path = args.candidates or c.CANDIDATE_MANIFEST_PATH
     artifact_path = args.artifact or c.QUALIFICATION_ARTIFACT_PATH
     config_path = args.config or c.CONFIG_PATH
+    if config_path != c.CONFIG_PATH:
+        raise SystemExit(f"freeze-b2a-r3-selected-row config path must be {c.CONFIG_PATH}")
 
     with open(candidates_path, "r", encoding="utf-8") as f:
         candidate_manifest = json.load(f)
@@ -2908,6 +2919,7 @@ def cmd_freeze_b2a_r3_selected_row(args: argparse.Namespace) -> int:
 def cmd_verify_b2a_r3_selection(args: argparse.Namespace) -> int:
     import json
 
+    from kvcot.config import config_identity
     from kvcot.discovery import b2a_r3_contract as c
     from kvcot.discovery.b2a_r3_freeze import verify_selection_provenance
     from kvcot.discovery.manifest import B2AOneExampleManifest
@@ -2930,6 +2942,7 @@ def cmd_verify_b2a_r3_selection(args: argparse.Namespace) -> int:
         typed = verify_selection_provenance(
             provenance, selected_manifest=selected_manifest, candidate_manifest=candidate_manifest,
             qualification_artifact=qualification_artifact,
+            expected_config_sha256=config_identity(c.CONFIG_PATH),
         )
     except Exception as e:  # noqa: BLE001
         print(f"verify-b2a-r3-selection: VERIFICATION FAILED: {e}")
@@ -2942,8 +2955,16 @@ def cmd_verify_b2a_r3_selection(args: argparse.Namespace) -> int:
 def cmd_verify_b2a_r3_authorization(args: argparse.Namespace) -> int:
     import json
 
-    from kvcot.discovery.b2a_r3_authorization import AuthorizationClaimR3
+    from kvcot.config import config_identity
+    from kvcot.discovery import b2a_r3_contract as c
+    from kvcot.discovery.b2a_r3_authorization import (
+        AUTHORIZATION_STAGE_B2A_R3_EXECUTION,
+        AuthorizationClaimR3,
+        verify_authorization_preconditions,
+    )
     from kvcot.discovery.b2a_r3_contract import verify_canonical_sha256
+    from kvcot.discovery.b2a_r3_provenance import AttemptProvenancePolicy, SubprocessGitStateProvider
+    from kvcot.discovery.manifest import B2AOneExampleManifest
 
     with open(args.claim, "r", encoding="utf-8") as f:
         claim = json.load(f)
@@ -2951,6 +2972,45 @@ def cmd_verify_b2a_r3_authorization(args: argparse.Namespace) -> int:
     try:
         verify_canonical_sha256(claim)
         typed = AuthorizationClaimR3.model_validate(claim)
+        candidates_path = args.candidates or c.CANDIDATE_MANIFEST_PATH
+        with open(candidates_path, "r", encoding="utf-8") as f:
+            candidate_manifest = json.load(f)
+        expected_config_sha256 = config_identity(c.CONFIG_PATH)
+        policy = AttemptProvenancePolicy(
+            provenance_policy_version=c.PROVENANCE_POLICY_VERSION,
+            required_repository=c.REQUIRED_REPOSITORY,
+            required_branch=typed.authorized_branch,
+            required_commit_sha=typed.authorized_commit_sha,
+            required_ancestor_shas=tuple(typed.required_ancestor_shas),
+            required_rkv_sha=typed.required_rkv_sha,
+            authorization_id=typed.authorization_id,
+            authorization_document_sha256=typed.authorization_document_sha256,
+        )
+        qualification_artifact = None
+        selected_manifest = None
+        selection_provenance = None
+        if typed.authorization_stage == AUTHORIZATION_STAGE_B2A_R3_EXECUTION:
+            qualification_path = args.qualification or c.QUALIFICATION_ARTIFACT_PATH
+            selected_path = args.manifest or c.SELECTED_MANIFEST_PATH
+            provenance_path = args.provenance or c.SELECTION_PROVENANCE_PATH
+            with open(qualification_path, "r", encoding="utf-8") as f:
+                qualification_artifact = json.load(f)
+            with open(selected_path, "r", encoding="utf-8") as f:
+                selected_manifest = B2AOneExampleManifest.model_validate_json(f.read())
+            with open(provenance_path, "r", encoding="utf-8") as f:
+                selection_provenance = json.load(f)
+        verify_authorization_preconditions(
+            claim,
+            policy=policy,
+            git_state=SubprocessGitStateProvider(args.repository_root),
+            authorization_document_path=args.document or typed.authorization_document_path,
+            candidate_manifest=candidate_manifest,
+            expected_config_sha256=expected_config_sha256,
+            qualification_artifact=qualification_artifact,
+            selected_manifest=selected_manifest,
+            selection_provenance=selection_provenance,
+            repository_root=args.repository_root,
+        )
     except Exception as e:  # noqa: BLE001
         print(f"verify-b2a-r3-authorization: VERIFICATION FAILED: {e}")
         return 1
@@ -3130,8 +3190,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--artifact", default=None)
     p.set_defaults(func=cmd_verify_b2a_r3_selection)
 
-    p = sub.add_parser("verify-b2a-r3-authorization", help="B2A-R3: verify an authorization-claim artifact's schema.")
+    p = sub.add_parser("verify-b2a-r3-authorization", help="B2A-R3: fully verify an authorization claim and provenance chain.")
     p.add_argument("--claim", required=True)
+    p.add_argument("--document", default=None)
+    p.add_argument("--candidates", default=None)
+    p.add_argument("--qualification", default=None)
+    p.add_argument("--manifest", default=None)
+    p.add_argument("--provenance", default=None)
+    p.add_argument("--repository-root", default=".")
     p.set_defaults(func=cmd_verify_b2a_r3_authorization)
 
     return parser

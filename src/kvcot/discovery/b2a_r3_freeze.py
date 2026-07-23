@@ -21,7 +21,6 @@ never load `transformers`.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -37,12 +36,16 @@ from kvcot.discovery.b2a_r3_contract import (
     SELECTED_MANIFEST_PATH,
     SELECTION_PROTOCOL_VERSION,
     SELECTION_PROVENANCE_ARTIFACT_SCHEMA_VERSION,
+    PROMPT_ADD_GENERATION,
+    PROMPT_MESSAGE_ROLES,
+    PROMPT_SPECIAL_TOKENS_NOTE,
+    PROMPT_TOKENIZE,
     compute_canonical_sha256,
     require_lowercase_hex64,
     verify_canonical_sha256,
 )
 from kvcot.discovery.manifest import B2AOneExampleManifest, ChatTemplateRenderingConfig
-from kvcot.utils.hashing import sha256_json
+from kvcot.utils.hashing import sha256_int_ids, sha256_json
 
 __all__ = [
     "RowFreezeRefusedR3",
@@ -62,11 +65,12 @@ class RowFreezeRefusedR3(RuntimeError):
     qualification artifact and candidate manifest jointly authorize."""
 
 
-@dataclass(frozen=True)
-class PromptRenderingResult:
+class PromptRenderingResult(BaseModel):
     """What an injected `TokenizerRenderer` must return -- the rendering-
     derived fields only; the row/raw-content hash are already known from
     the candidate manifest and are never re-derived here."""
+
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
 
     rendered_user_message_sha256: str
     chat_template_source_sha256: str
@@ -77,8 +81,46 @@ class PromptRenderingResult:
     tokenizer_revision_used_for_prompt_hash: str
     prompt_rendering_config: ChatTemplateRenderingConfig
 
+    @field_validator(
+        "rendered_user_message_sha256",
+        "chat_template_source_sha256",
+        "chat_message_payload_sha256",
+        "prompt_token_ids_sha256",
+    )
+    @classmethod
+    def _render_hash(cls, v: str, info: Any) -> str:
+        return require_lowercase_hex64(v, info.field_name)
+
+    @model_validator(mode="after")
+    def _prompt_identity_reproduces(self) -> "PromptRenderingResult":
+        if any(type(token_id) is not int for token_id in self.prompt_token_ids):
+            raise ValueError("prompt_token_ids must contain strict integers, never bool")
+        if self.prompt_token_count != len(self.prompt_token_ids):
+            raise ValueError("prompt_token_count disagrees with len(prompt_token_ids)")
+        if sha256_int_ids(list(self.prompt_token_ids)) != self.prompt_token_ids_sha256:
+            raise ValueError("prompt_token_ids_sha256 does not reproduce from prompt_token_ids")
+        config = self.prompt_rendering_config
+        if (
+            tuple(config.message_roles),
+            config.add_generation_prompt,
+            config.tokenize,
+            config.add_special_tokens_note,
+        ) != (
+            PROMPT_MESSAGE_ROLES,
+            PROMPT_ADD_GENERATION,
+            PROMPT_TOKENIZE,
+            PROMPT_SPECIAL_TOKENS_NOTE,
+        ):
+            raise ValueError("prompt_rendering_config does not match the frozen canonical convention")
+        return self
+
 
 TokenizerRenderer = Callable[[dict[str, Any]], PromptRenderingResult]
+
+
+def _verify_rendering_binding(rendering: PromptRenderingResult, candidate_manifest: dict[str, Any]) -> None:
+    if rendering.tokenizer_revision_used_for_prompt_hash != candidate_manifest["tokenizer_revision"]:
+        raise RowFreezeRefusedR3("renderer tokenizer revision does not match the candidate manifest")
 
 
 class SelectionProvenanceR3(BaseModel):
@@ -205,7 +247,8 @@ def construct_selected_manifest_and_provenance(
             f"stored={candidate_row.raw_row_sha256!r}"
         )
 
-    rendering = tokenizer_renderer(row)
+    rendering = PromptRenderingResult.model_validate(tokenizer_renderer(row))
+    _verify_rendering_binding(rendering, candidate_manifest)
 
     new_manifest = B2AOneExampleManifest(
         dataset_repo=candidate_manifest["dataset_repo"],
@@ -271,6 +314,7 @@ def verify_selection_provenance(
     selected_manifest: B2AOneExampleManifest,
     candidate_manifest: dict[str, Any],
     qualification_artifact: dict[str, Any],
+    expected_config_sha256: str,
 ) -> SelectionProvenanceR3:
     """Full strict verification against the selected manifest's own
     EXTERNAL hash (`B2AOneExampleManifest.manifest_hash()`, never a
@@ -278,6 +322,54 @@ def verify_selection_provenance(
     candidate-manifest / qualification-artifact hashes actually supplied."""
     verify_canonical_sha256(provenance)
     typed = SelectionProvenanceR3.model_validate(provenance)
+    candidate_row, outcome = verify_freeze_chain(
+        candidate_manifest=candidate_manifest,
+        qualification_artifact=qualification_artifact,
+        expected_config_sha256=expected_config_sha256,
+    )
+    if typed.selected_ordinal != candidate_row.candidate_ordinal:
+        raise RowFreezeRefusedR3("selection provenance ordinal does not match the replayed freeze chain")
+    if typed.selected_unique_id != candidate_row.unique_id:
+        raise RowFreezeRefusedR3("selection provenance unique_id does not match the replayed freeze chain")
+    if typed.row_raw_sha256 != candidate_row.raw_row_sha256:
+        raise RowFreezeRefusedR3("selection provenance row hash does not match the selected candidate")
+
+    if (
+        selected_manifest.dataset_repo,
+        selected_manifest.dataset_config,
+        selected_manifest.dataset_split,
+        selected_manifest.dataset_revision,
+        selected_manifest.example_index,
+        selected_manifest.unique_id,
+        selected_manifest.raw_content_hash,
+        selected_manifest.gold_answer,
+    ) != (
+        candidate_manifest["dataset_repo"],
+        candidate_manifest["dataset_config"],
+        candidate_manifest["dataset_split"],
+        candidate_manifest["dataset_revision"],
+        candidate_row.source_example_index,
+        candidate_row.unique_id,
+        candidate_row.raw_row_sha256,
+        candidate_row.row["answer"],
+    ):
+        raise RowFreezeRefusedR3("selected manifest identity/content does not match the replayed selected row")
+    if selected_manifest.prompt_token_ids is None or selected_manifest.prompt_token_count is None:
+        raise RowFreezeRefusedR3("selected manifest prompt token identity is incomplete")
+    if any(type(token_id) is not int for token_id in selected_manifest.prompt_token_ids):
+        raise RowFreezeRefusedR3("selected manifest prompt token IDs are not strict integers")
+    if selected_manifest.prompt_token_count != len(selected_manifest.prompt_token_ids):
+        raise RowFreezeRefusedR3("selected manifest prompt token count does not reproduce")
+    prompt_hash = sha256_int_ids(list(selected_manifest.prompt_token_ids))
+    if prompt_hash != selected_manifest.prompt_token_ids_sha256:
+        raise RowFreezeRefusedR3("selected manifest prompt token hash does not reproduce")
+    if selected_manifest.tokenizer_revision_used_for_prompt_hash != candidate_manifest["tokenizer_revision"]:
+        raise RowFreezeRefusedR3("selected manifest tokenizer revision does not match the candidate manifest")
+    config = selected_manifest.prompt_rendering_config
+    if config is None or (
+        tuple(config.message_roles), config.add_generation_prompt, config.tokenize, config.add_special_tokens_note
+    ) != (PROMPT_MESSAGE_ROLES, PROMPT_ADD_GENERATION, PROMPT_TOKENIZE, PROMPT_SPECIAL_TOKENS_NOTE):
+        raise RowFreezeRefusedR3("selected manifest rendering config is not the frozen convention")
     if typed.selected_manifest_sha256 != selected_manifest.manifest_hash():
         raise RowFreezeRefusedR3(
             "selection provenance's selected_manifest_sha256 does not match "
@@ -293,6 +385,12 @@ def verify_selection_provenance(
             "selection provenance's qualification_artifact_canonical_sha256 does not match the supplied "
             "qualification artifact's own canonical_sha256"
         )
+    if typed.prompt_token_ids_sha256 != selected_manifest.prompt_token_ids_sha256:
+        raise RowFreezeRefusedR3("selection provenance prompt hash does not match the selected manifest")
+    if typed.tokenizer_revision_used_for_prompt_hash != selected_manifest.tokenizer_revision_used_for_prompt_hash:
+        raise RowFreezeRefusedR3("selection provenance tokenizer revision does not match the selected manifest")
+    if outcome.unique_id != candidate_row.unique_id:
+        raise RowFreezeRefusedR3("qualification outcome does not match the replayed candidate")
     return typed
 
 

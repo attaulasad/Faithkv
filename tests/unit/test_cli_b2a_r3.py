@@ -79,20 +79,31 @@ def test_freeze_b2a_r3_selected_row_refuses_without_dry_run():
         main(["freeze-b2a-r3-selected-row"])
 
 
-def test_verify_b2a_r3_authorization_end_to_end(tmp_path, capsys):
+def test_verify_b2a_r3_authorization_end_to_end(tmp_path, capsys, monkeypatch):
     from kvcot.discovery.b2a_r3_contract import (
         AUTHORIZATION_CLAIM_ARTIFACT_SCHEMA_VERSION,
         REQUIRED_REPOSITORY,
         global_claim_path,
     )
-    from kvcot.utils.hashing import sha256_json
+    from kvcot.utils.hashing import sha256_file, sha256_json
+    from tests.unit.discovery.test_b2a_r3_provenance import FakeGitState
+
+    document_rel = "docs/B2A_R3_STAGE_B_QUALIFICATION_AUTHORIZATION_2026-08-01.md"
+    document_path = tmp_path / document_rel
+    document_path.parent.mkdir(parents=True)
+    document_path.write_text("synthetic CLI authorization\n", encoding="utf-8")
+    candidate_manifest = json.loads(Path("configs/discovery/b2a_r3_candidate_manifest.json").read_text())
+    monkeypatch.setattr(
+        "kvcot.discovery.b2a_r3_provenance.SubprocessGitStateProvider",
+        lambda _root: FakeGitState(commit_sha="b" * 40, ancestors=frozenset({"c" * 40})),
+    )
 
     payload = {
         "artifact_schema_version": AUTHORIZATION_CLAIM_ARTIFACT_SCHEMA_VERSION,
         "authorization_id": "cli-smoke-test",
         "authorization_stage": "fullkv_qualification",
-        "authorization_document_path": "docs/B2A_R3_STAGE_B_QUALIFICATION_AUTHORIZATION_2026-08-01.md",
-        "authorization_document_sha256": "a" * 64,
+        "authorization_document_path": document_rel,
+        "authorization_document_sha256": sha256_file(document_path),
         "authorized_repository": REQUIRED_REPOSITORY,
         "authorized_branch": "research/b2a-r3-runtime-qualified-calibration",
         "authorized_commit_sha": "b" * 40,
@@ -102,7 +113,7 @@ def test_verify_b2a_r3_authorization_end_to_end(tmp_path, capsys):
         "required_ancestor_shas": ["c" * 40],
         "required_rkv_sha": "45eaa7d69d20b7388321f077020a610d9afb65bd",
         "observed_rkv_sha": "45eaa7d69d20b7388321f077020a610d9afb65bd",
-        "candidate_manifest_canonical_sha256": "d" * 64,
+        "candidate_manifest_canonical_sha256": candidate_manifest["canonical_sha256"],
         "qualification_artifact_canonical_sha256": None,
         "selected_manifest_sha256": None,
         "selected_manifest_hash_algorithm": None,
@@ -115,7 +126,10 @@ def test_verify_b2a_r3_authorization_end_to_end(tmp_path, capsys):
     claim_path = tmp_path / "claim.json"
     claim_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    rc = main(["verify-b2a-r3-authorization", "--claim", str(claim_path)])
+    rc = main([
+        "verify-b2a-r3-authorization", "--claim", str(claim_path),
+        "--document", str(document_path), "--repository-root", str(tmp_path),
+    ])
     assert rc == 0
     out = capsys.readouterr().out
     assert "verification PASSED" in out
