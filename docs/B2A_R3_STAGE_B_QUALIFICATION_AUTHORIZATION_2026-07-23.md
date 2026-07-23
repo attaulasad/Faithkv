@@ -21,6 +21,11 @@ is the later execution commit that contains this exact document, the audited
 code commit above is its ancestor, and the diff from that code commit to
 the execution commit contains only this file.
 
+The phase-wide Stage-B wall-time limit is separately frozen here as 12,960
+seconds. This is the B2A-R3 qualification target of 3.60 hours expressed in
+seconds; it is not the 57,600-second arithmetic envelope of eight
+per-candidate worker timeouts.
+
 <!-- BEGIN B2A-R3 AUTHORIZATION JSON -->
 ```json
 {
@@ -34,7 +39,7 @@ the execution commit contains only this file.
   "required_rkv_sha": "45eaa7d69d20b7388321f077020a610d9afb65bd",
   "candidate_manifest_canonical_sha256": "b8148647698ca5ab5335ea28dc1416109b26f73dd05b87eed2fe9eca4b25ff42",
   "maximum_candidates": 8,
-  "phase_wall_time_limit_seconds": 57600,
+  "phase_wall_time_limit_seconds": 12960,
   "qualification_artifact_canonical_sha256": null,
   "selected_manifest_sha256": null,
   "selected_manifest_hash_algorithm": null,
