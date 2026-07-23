@@ -1,6 +1,75 @@
 # Plan and status
 
-## Current status: B2A-R3 Step 3 Stage-A audit repairs implemented; ready for independent re-audit (2026-07-23)
+## Current status: B2A-R3 Step 3R4 CPU protocol alignment and Stage-B readiness repairs implemented; ready for independent re-audit (2026-07-23)
+
+A re-audit of Step 3 Stage-A SHA `7062f3cb8a6f555d3b67cf9e9be3bd6710e78120`
+(on `research/b2a-r3-runtime-qualified-calibration`) found six findings,
+all repaired with a dedicated adversarial regression suite:
+
+1. **Qualification schema/protocol mismatch** — the v1 per-candidate
+   outcome record duplicated four artifact-level identity fields onto
+   every attempted candidate and persisted a redundant nested runtime-
+   prediction object. A dated protocol amendment
+   (`docs/B2A_R3_STAGE_A_PROTOCOL_ALIGNMENT_AMENDMENT_2026-07-23.md`)
+   freezes the exact v2 field table (no real qualification artifact has
+   ever been produced, so this version bump reinterprets nothing
+   historical); `kvcot.discovery.b2a_r3_qualification`'s
+   `CandidateQualificationOutcomeR3` is realigned to it.
+2. **Incorrect FullKV timing vocabulary** — the qualification timing
+   helper spliced two memory phases into its timing-only vocabulary and
+   used the wrong phase order. `kvcot.discovery.final_contract` now
+   derives the qualification timing check directly from the canonical
+   `FULLKV_REQUIRED_TIMING_PHASES`, and validates memory-phase evidence
+   separately via a new `fullkv_qualification_memory_complete`.
+3. **Circular claim-derived authorization policy** — the enforced
+   `AttemptProvenancePolicy` was built directly from the claim's own
+   fields rather than from the tracked authorization document (confirmed:
+   a document containing only placeholder text previously passed full
+   verification). A new `kvcot.discovery.b2a_r3_authorization_document`
+   module requires a strict, machine-readable embedded JSON block and
+   builds the policy entirely from it.
+4. **Non-global claim path** — `claim_authorization`'s public API
+   accepted an arbitrary `claims_root`. It is now
+   `claim_authorization(payload, *, repository_root, verified_context,
+   git_state)`, deriving the one deterministic claim path internally and
+   reverifying Git/worktree state immediately before consumption.
+5. **Missing canonical FullKV R3 adapter** — no schema-validated path
+   existed from a FullKV worker result into qualification evidence. A new
+   `kvcot.discovery.b2a_r3_worker_adapter` module adds a versioned
+   `FullKVWorkerResultR3` schema and the one authoritative conversion
+   function.
+6. **Missing qualification coordinator/writer** — no CPU-testable
+   architecture existed to drive first-pass qualification against a
+   verified Stage-B authorization context.
+   `kvcot.discovery.b2a_r3_artifacts` gains a qualification-artifact
+   builder and atomic writer; a new
+   `kvcot.discovery.b2a_r3_qualification_coordinator` module adds the
+   sequential coordinator itself.
+
+Full detail: `docs/B2A_R3_STAGE_B_READINESS_REPAIR_2026-07-23.md`.
+
+```text
+STEP 3R4 CPU PROTOCOL ALIGNMENT AND STAGE-B READINESS REPAIRS IMPLEMENTED —
+READY FOR INDEPENDENT RE-AUDIT;
+STAGE B FULLKV QUALIFICATION REMAINS BLOCKED
+```
+
+No GPU was used, no CUDA was initialized, no model weights or tokenizer
+were loaded for execution, no real qualification artifact was produced,
+no real selected-manifest replacement occurred, no real authorization
+document or claim was created, and no attempt directory was created by
+this pass. Stage B, Stage C, B2B, and any FaithKV method implementation
+remain blocked pending their own separate, future, dated authorizations.
+The committed B2A-R3 candidate manifest is unchanged (canonical hash
+`b8148647698ca5ab5335ea28dc1416109b26f73dd05b87eed2fe9eca4b25ff42`).
+
+Next action:
+
+```text
+Independent re-audit of the final Step 3R4 repair SHA.
+```
+
+## Prior status: B2A-R3 Step 3 Stage-A audit repairs implemented; ready for independent re-audit (2026-07-23)
 
 Every blocking independent-audit finding against starting SHA
 `6778fd119c33f5025f328321a33eb7c62ad86d20` has a CPU-only repair and

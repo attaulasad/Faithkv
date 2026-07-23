@@ -398,6 +398,46 @@ STAGE B FULLKV QUALIFICATION REMAINS BLOCKED
 - The next required action is an independent re-audit of the final repair
   SHA.
 
+### Section 1j — B2A-R3 Step 3R4 CPU protocol alignment and Stage-B readiness repair (dated 2026-07-23)
+
+Added by
+`docs/B2A_R3_STAGE_B_READINESS_REPAIR_2026-07-23.md` and
+`docs/B2A_R3_STAGE_A_PROTOCOL_ALIGNMENT_AMENDMENT_2026-07-23.md`,
+superseding nothing above except the narrow qualification-outcome schema/
+version fields the dated amendment names explicitly (§3 of that
+document). A re-audit of Step 3 Stage-A SHA
+`7062f3cb8a6f555d3b67cf9e9be3bd6710e78120` identified six findings: a
+qualification-outcome schema that duplicated artifact-level identity
+fields onto every attempted candidate and persisted a redundant nested
+runtime-prediction object; a FullKV timing helper that spliced two memory
+phases into its timing vocabulary and used the wrong phase order; an
+authorization-precondition check that derived its enforced policy from
+the claim itself rather than the tracked authorization document; a
+public claim-consumption API that accepted an arbitrary `claims_root`
+instead of the one deterministic global path; a missing canonical
+adapter from a FullKV worker result into qualification evidence; and a
+missing qualification-artifact builder/atomic-writer/coordinator
+architecture. All six are repaired, each with a dedicated adversarial
+regression suite.
+
+```text
+STEP 3R4 CPU PROTOCOL ALIGNMENT AND STAGE-B READINESS REPAIRS IMPLEMENTED —
+READY FOR INDEPENDENT RE-AUDIT;
+STAGE B FULLKV QUALIFICATION REMAINS BLOCKED
+```
+
+- This is a CPU-only repair and governance round. It does not self-certify
+  its own work and does not authorize Stage B or Stage C.
+- No GPU/CUDA initialization, model or tokenizer execution, FullKV or
+  R-KV run, real qualification/freeze/claim/attempt, B2B execution, or
+  FaithKV method implementation is authorized or performed.
+- Historical B2A-R1/R2 artifacts and verification semantics, the committed
+  B2A-R3 candidate-manifest content (canonical hash unchanged:
+  `b8148647698ca5ab5335ea28dc1416109b26f73dd05b87eed2fe9eca4b25ff42`),
+  `configs/lock.yaml`, and the R-KV gitlink remain unchanged.
+- The next required action is an independent re-audit of the final
+  Step 3R4 repair SHA.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

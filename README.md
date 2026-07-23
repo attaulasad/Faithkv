@@ -2,6 +2,41 @@
 
 ## Current status (read this first)
 
+**B2A-R3 STEP 3R4 CPU PROTOCOL ALIGNMENT AND STAGE-B READINESS REPAIRS
+IMPLEMENTED — READY FOR INDEPENDENT RE-AUDIT (2026-07-23).** A re-audit
+of Step 3 Stage-A SHA `7062f3cb8a6f555d3b67cf9e9be3bd6710e78120` found six
+findings, all repaired with CPU-only code and dedicated adversarial
+tests: a qualification-outcome schema realigned to a dated v2 protocol
+amendment; a FullKV timing helper corrected to the canonical timing
+vocabulary, with memory evidence now validated separately; authorization
+policy now built from a strict, machine-readable authorization document
+instead of the claim itself; claim consumption bound to the one exact
+global path, with an immediate pre-consumption Git/worktree reverification;
+a new canonical FullKV-worker-result-to-evidence adapter; and a new
+qualification-artifact builder, atomic writer, and sequential Stage-B
+coordinator. See
+`docs/B2A_R3_STAGE_B_READINESS_REPAIR_2026-07-23.md`,
+`docs/B2A_R3_STAGE_A_PROTOCOL_ALIGNMENT_AMENDMENT_2026-07-23.md`, and
+`CLAUDE.md` §1j.
+
+```text
+STEP 3R4 CPU PROTOCOL ALIGNMENT AND STAGE-B READINESS REPAIRS IMPLEMENTED —
+READY FOR INDEPENDENT RE-AUDIT;
+STAGE B FULLKV QUALIFICATION REMAINS BLOCKED
+```
+
+No GPU was used, no CUDA was initialized, no model weights or tokenizer
+were loaded for execution, no real qualification artifact was produced,
+no real selected-manifest replacement occurred, no real authorization
+document or claim was created, and no attempt directory was created.
+Stage B FullKV qualification, Stage C B2A-R3 execution, all GPU/CUDA
+activity, B2B, and FaithKV method implementation remain prohibited
+pending their own separate, future, dated authorizations. The committed
+B2A-R3 candidate manifest is unchanged (canonical hash
+`b8148647698ca5ab5335ea28dc1416109b26f73dd05b87eed2fe9eca4b25ff42`).
+
+### Prior status: B2A-R3 Step 3 Stage-A audit repairs implemented (2026-07-23)
+
 **B2A-R3 STEP 3 STAGE-A AUDIT REPAIRS IMPLEMENTED — READY FOR
 INDEPENDENT RE-AUDIT (2026-07-23).** The blocking findings against
 `6778fd119c33f5025f328321a33eb7c62ad86d20` have been repaired with
@@ -14,20 +49,6 @@ provenance is semantically replayed. Atomic claim creation is covered by
 real spawned-process races as well as thread tests. See
 `docs/B2A_R3_STEP3_STAGE_A_INDEPENDENT_AUDIT_REPAIR_2026-07-23.md` and
 `CLAUDE.md` §1i.
-
-```text
-STEP 3 STAGE-A AUDIT REPAIRS IMPLEMENTED —
-READY FOR INDEPENDENT RE-AUDIT;
-STAGE B FULLKV QUALIFICATION REMAINS BLOCKED
-```
-
-No GPU was used, no CUDA was initialized, no model weights or tokenizer
-were loaded for execution, no real qualification artifact was produced,
-no real selected-manifest replacement occurred, and no real authorization
-claim was created. Stage B FullKV qualification, Stage C B2A-R3
-execution, all GPU/CUDA activity, B2B, and FaithKV method implementation
-remain prohibited pending their own separate, future, dated
-authorizations.
 
 ### Prior status: B2A-R3 Step 2B independent re-audit PASSED (2026-07-23)
 

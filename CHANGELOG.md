@@ -1,5 +1,71 @@
 # Changelog
 
+## 2026-07-23 — B2A-R3 Step 3R4 CPU protocol alignment and Stage-B readiness repairs (READY FOR INDEPENDENT RE-AUDIT; STAGE B BLOCKED)
+
+Repairs six findings identified against Step 3 Stage-A implementation SHA
+`7062f3cb8a6f555d3b67cf9e9be3bd6710e78120`, in eight forward-only commits
+on `research/b2a-r3-runtime-qualified-calibration`:
+
+- **Finding 1 (qualification schema/protocol mismatch)** — a dated
+  protocol amendment
+  (`docs/B2A_R3_STAGE_A_PROTOCOL_ALIGNMENT_AMENDMENT_2026-07-23.md`)
+  bumps `QUALIFICATION_ARTIFACT_SCHEMA_VERSION`/`QUALIFICATION_PROTOCOL_VERSION`
+  v1->v2 and freezes the exact v2 per-candidate outcome field table (no
+  real qualification artifact has ever been produced, so this reinterprets
+  nothing historical). `CandidateQualificationOutcomeR3` drops four
+  fields duplicated from the artifact level plus a redundant nested
+  runtime-prediction object, and renames its generation-config field to
+  `worker_generation_config_sha256`; a new frozen
+  `QUALIFICATION_OUTCOME_V2_FIELD_NAMES` contract constant and drift test
+  keep the schema and the contract from silently diverging again.
+- **Finding 2 (incorrect FullKV timing vocabulary)** —
+  `fullkv_qualification_timing_complete` now derives its phase vocabulary
+  directly from the canonical, already-frozen `FULLKV_REQUIRED_TIMING_PHASES`
+  instead of a hand-rolled list that had spliced two memory phases into
+  the timing vocabulary and used the wrong phase order. A new
+  `fullkv_qualification_memory_complete` validates memory-phase evidence
+  separately via the existing `FULLKV_REQUIRED_MEMORY_PHASES` contract.
+- **Finding 3 (circular claim-derived authorization policy)** — a new
+  `kvcot.discovery.b2a_r3_authorization_document` module requires a
+  strict, machine-readable embedded JSON block in every dated Stage B/C
+  authorization document (rejecting the historical placeholder-text
+  document that previously passed full verification);
+  `verify_authorization_preconditions` now builds the enforced policy
+  entirely from the parsed document, never the claim.
+- **Finding 4 (non-global claim path)** — `claim_authorization`'s public
+  API is now `claim_authorization(payload, *, repository_root,
+  verified_context, git_state)`, deriving the one deterministic claim
+  path internally and reverifying Git/worktree state immediately before
+  consumption; there is no `claims_root` parameter to redirect it.
+- **Finding 5 (missing canonical FullKV R3 adapter)** — a new
+  `kvcot.discovery.b2a_r3_worker_adapter` module adds a versioned
+  `FullKVWorkerResultR3` schema (never modifying the historical B2A-R1/R2
+  `FullKVWorkerResult`) and the one authoritative
+  `adapt_fullkv_worker_result_to_r3_evidence` conversion function.
+- **Finding 6 (missing qualification coordinator/writer)** —
+  `kvcot.discovery.b2a_r3_artifacts` gains `build_qualification_artifact`/
+  `write_qualification_artifact_atomic`; a new
+  `kvcot.discovery.b2a_r3_qualification_coordinator` module adds the
+  sequential, first-pass Stage-B coordinator, reading its authorization
+  limits only from a genuinely verified `VerifiedAuthorizationContext`.
+
+The committed candidate manifest is unchanged
+(`b8148647698ca5ab5335ea28dc1416109b26f73dd05b87eed2fe9eca4b25ff42`); no
+real qualification artifact, selected manifest, authorization document,
+or authorization claim was ever created. Full detail:
+`docs/B2A_R3_STAGE_B_READINESS_REPAIR_2026-07-23.md`.
+
+```text
+STEP 3R4 CPU PROTOCOL ALIGNMENT AND STAGE-B READINESS REPAIRS IMPLEMENTED —
+READY FOR INDEPENDENT RE-AUDIT;
+STAGE B FULLKV QUALIFICATION REMAINS BLOCKED
+```
+
+No GPU used, no CUDA initialized, no model/tokenizer loaded for
+execution, no FullKV or R-KV run, no real qualification/freeze/
+authorization artifact created, no B2A-R3 or B2B execution, and no
+FaithKV method implementation.
+
 ## 2026-07-23 — B2A-R3 Step 3 Stage-A independent-audit repairs implemented (READY FOR INDEPENDENT RE-AUDIT; STAGE B BLOCKED)
 
 Repairs every blocking independent-audit finding against
