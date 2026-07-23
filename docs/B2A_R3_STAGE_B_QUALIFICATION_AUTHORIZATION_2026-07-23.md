@@ -26,6 +26,26 @@ seconds. This is the B2A-R3 qualification target of 3.60 hours expressed in
 seconds; it is not the 57,600-second arithmetic envelope of eight
 per-candidate worker timeouts.
 
+Additional frozen Stage-B bindings:
+
+- Per-candidate worker timeout: 7,200 seconds.
+- Hardware: exactly one RTX 3090.
+- VRAM ceiling: peak tracked CUDA memory must be at most 22 GiB
+  (`22 * 1024**3` bytes), measured as the maximum of allocated and
+  reserved bytes.
+- Projected B2B qualification threshold: at most 3.60 GPU-hours.
+- Model: `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` at revision
+  `6a6f4aa4197940add57724a7707d069478df56b1`.
+- Tokenizer: `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` at revision
+  `6a6f4aa4197940add57724a7707d069478df56b1`.
+- Dataset: `HuggingFaceH4/MATH-500`, config `default`, split `test`, at
+  revision `6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be`.
+- Lifecycle: this document authorizes one Stage-B authorization claim
+  lifecycle only. The claim JSON must remain outside the repository until
+  the Stage-B runner exclusively creates
+  `results/decisions/b2a_r3_authorization_claims/stage-b-2026-07-23-final.json`;
+  that exclusive creation is the irreversible consumption event.
+
 <!-- BEGIN B2A-R3 AUTHORIZATION JSON -->
 ```json
 {
