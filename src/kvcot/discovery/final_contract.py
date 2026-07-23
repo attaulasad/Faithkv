@@ -167,43 +167,37 @@ FULLKV_TIMING_EXACT_MULTIPLICITY: dict[str, int] = {
     "fullkv_complete_worker": 1,
 }
 
-_FULLKV_QUALIFICATION_SINGLETON_PHASES: tuple[str, ...] = (
-    "before_model_load",
-    "fullkv_worker_startup",
-    "snapshot_tokenizer_resolution",
-    "tokenizer_load",
-    "model_load",
-    "post_load_validation",
-    "post_load_baseline",
-    "fullkv_prefill",
-    "answer_verification",
-    "fullkv_complete_natural_generation",
-    "fullkv_complete_worker",
-)
-_FULLKV_QUALIFICATION_PHASE_ORDER: tuple[str, ...] = (
-    "before_model_load",
-    "fullkv_worker_startup",
-    "snapshot_tokenizer_resolution",
-    "tokenizer_load",
-    "model_load",
-    "post_load_validation",
-    "post_load_baseline",
-    "fullkv_prefill",
-    "fullkv_decode",
-    "answer_verification",
-    "fullkv_complete_natural_generation",
-    "fullkv_complete_worker",
+# Step 3R4 (docs/B2A_R3_STAGE_A_PROTOCOL_ALIGNMENT_AMENDMENT_2026-07-23.md
+# §4, repairs independent-audit Finding 2): the qualification-only timing
+# vocabulary is now EXACTLY `FULLKV_REQUIRED_TIMING_PHASES` -- the same
+# canonical, already-frozen 10-phase vocabulary `timing_contract_satisfied`
+# uses for the real FullKV worker -- never a second, hand-rolled phase
+# list. The prior version of this module spliced two MEMORY phases
+# (`before_model_load`, `post_load_baseline`) into the TIMING singleton/
+# order lists and placed `answer_verification` before
+# `fullkv_complete_natural_generation`, backwards relative to the
+# canonical worker order. Both defects are removed by deriving the
+# singleton set and phase order directly from `FULLKV_REQUIRED_TIMING_PHASES`
+# rather than maintaining an independent, qualification-only copy.
+_FULLKV_QUALIFICATION_PHASE_ORDER: tuple[str, ...] = FULLKV_REQUIRED_TIMING_PHASES
+_FULLKV_QUALIFICATION_DECODE_INDEX: int = FULLKV_REQUIRED_TIMING_PHASES.index("fullkv_decode")
+_FULLKV_QUALIFICATION_SINGLETON_PHASES: tuple[str, ...] = tuple(
+    phase for phase in FULLKV_REQUIRED_TIMING_PHASES if phase != "fullkv_decode"
 )
 
 
 def fullkv_qualification_timing_complete(
     records: Sequence[Mapping[str, Any]], *, fullkv_wall_seconds: Any
 ) -> bool:
-    """Strictly validate the timing list emitted by ``run_fullkv_worker``.
+    """Strictly validate the TIMING-ONLY list emitted by ``run_fullkv_worker``
+    against the canonical ``FULLKV_REQUIRED_TIMING_PHASES`` vocabulary.
 
     This is a qualification-only semantic check over the existing B1
     vocabulary.  It does not alter ``timing_contract_satisfied`` and thus
-    leaves historical B2A-R1/R2 verification behavior unchanged.
+    leaves historical B2A-R1/R2 verification behavior unchanged. Memory
+    phases (``before_model_load``, ``post_load_baseline``, ...) must never
+    appear in this list -- see ``fullkv_qualification_memory_complete``,
+    which validates memory-phase evidence separately.
     """
     if type(fullkv_wall_seconds) not in (int, float) or not math.isfinite(float(fullkv_wall_seconds)):
         return False
@@ -259,12 +253,79 @@ def fullkv_qualification_timing_complete(
         return False
     if counts.get("fullkv_decode", 0) < 1:
         return False
-    expected_order = list(_FULLKV_QUALIFICATION_PHASE_ORDER[:8])
+    expected_order = list(_FULLKV_QUALIFICATION_PHASE_ORDER[:_FULLKV_QUALIFICATION_DECODE_INDEX])
     expected_order.extend(["fullkv_decode"] * counts["fullkv_decode"])
-    expected_order.extend(_FULLKV_QUALIFICATION_PHASE_ORDER[9:])
+    expected_order.extend(_FULLKV_QUALIFICATION_PHASE_ORDER[_FULLKV_QUALIFICATION_DECODE_INDEX + 1 :])
     if phase_names != expected_order:
         return False
     return natural_duration == float(fullkv_wall_seconds)
+
+
+# Step 3R4 §4: memory-phase evidence is validated SEPARATELY from timing,
+# using the existing, unmodified `FULLKV_REQUIRED_MEMORY_PHASES`/
+# `FULLKV_MEMORY_EXACT_MULTIPLICITY` contract -- never spliced into the
+# timing vocabulary above.
+_FULLKV_QUALIFICATION_MEMORY_REQUIRED_FIELDS: frozenset[str] = frozenset({
+    "allocated_before", "reserved_before", "peak_allocated", "peak_reserved",
+    "allocated_after", "reserved_after", "reset_point", "synchronized_before",
+    "synchronized_after", "completed",
+})
+
+
+def _valid_qualification_memory_record(record: Mapping[str, Any]) -> bool:
+    if not isinstance(record, Mapping) or not _FULLKV_QUALIFICATION_MEMORY_REQUIRED_FIELDS.issubset(record):
+        return False
+    if record.get("completed") is not True:
+        return False
+    if record.get("synchronized_before") is not True or record.get("synchronized_after") is not True:
+        return False
+    for name in ("allocated_before", "reserved_before", "peak_allocated", "peak_reserved",
+                 "allocated_after", "reserved_after"):
+        value = record.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return False
+    return True
+
+
+def fullkv_qualification_memory_complete(records: Sequence[Mapping[str, Any]]) -> bool:
+    """Strictly validate FullKV MEMORY-phase evidence, separately from
+    timing (Step 3R4 §4, repairs independent-audit Finding 2). Requires
+    exactly the phases/multiplicities in ``FULLKV_REQUIRED_MEMORY_PHASES``/
+    ``FULLKV_MEMORY_EXACT_MULTIPLICITY`` -- the same contract
+    ``memory_contract_satisfied`` already uses for the two-worker gate,
+    applied here to one worker's memory evidence alone. Rejects a missing
+    phase, a duplicate singleton, a phase outside the required set (in
+    particular, a TIMING phase smuggled into memory evidence), and a
+    non-finite/negative/boolean-as-int reading."""
+    if not isinstance(records, Sequence) or isinstance(records, (str, bytes)) or not records:
+        return False
+    counts: dict[str, int] = {}
+    for record in records:
+        if not _valid_qualification_memory_record(record):
+            return False
+        phase = record.get("phase")
+        if not isinstance(phase, str) or phase not in FULLKV_REQUIRED_MEMORY_PHASES:
+            return False
+        counts[phase] = counts.get(phase, 0) + 1
+    for phase, expected in FULLKV_MEMORY_EXACT_MULTIPLICITY.items():
+        if counts.get(phase, 0) != expected:
+            return False
+    if set(counts) != set(FULLKV_REQUIRED_MEMORY_PHASES):
+        return False
+    return True
+
+
+def peak_cuda_bytes_from_qualification_memory_evidence(
+    records: Sequence[Mapping[str, Any]],
+) -> tuple[int, int]:
+    """Extracts ``(peak_allocated_bytes, peak_reserved_bytes)`` from the
+    ``fullkv_complete_worker`` memory-phase record -- the canonical
+    worker's own running peak across its whole lifetime. Callers MUST call
+    ``fullkv_qualification_memory_complete`` first and only call this on
+    evidence that already passed; this function does not itself validate
+    the list."""
+    complete = next(record for record in records if record.get("phase") == "fullkv_complete_worker")
+    return int(complete["peak_allocated"]), int(complete["peak_reserved"])
 RKV_TIMING_EXACT_MULTIPLICITY: dict[str, int] = {
     "rkv_worker_startup": 1,
     "snapshot_tokenizer_resolution": 1,

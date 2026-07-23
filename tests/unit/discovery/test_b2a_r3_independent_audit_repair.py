@@ -73,17 +73,18 @@ def _rehash(payload: dict) -> dict:
 
 
 def _timing() -> list[dict]:
+    """Step 3R4 (repairs independent-audit Finding 2): the TIMING-only
+    canonical order (`FULLKV_REQUIRED_TIMING_PHASES`) -- no memory phase
+    (`before_model_load`/`post_load_baseline`) is ever mixed in here; see
+    `_memory()` below for those, validated separately."""
+    # Six singleton phases before the decode loop, one second apart.
     phases = (
-        "before_model_load",
         "fullkv_worker_startup",
         "snapshot_tokenizer_resolution",
         "tokenizer_load",
         "model_load",
         "post_load_validation",
-        "post_load_baseline",
         "fullkv_prefill",
-        "fullkv_decode",
-        "answer_verification",
     )
     records = []
     for index, phase in enumerate(phases):
@@ -100,6 +101,19 @@ def _timing() -> list[dict]:
                 "failure_message": None,
             }
         )
+    records.append(
+        {
+            "phase": "fullkv_decode",
+            "started_at": 6.0,
+            "ended_at": 7.0,
+            "duration_seconds": 1.0,
+            "synchronize_before_start": True,
+            "synchronize_before_end": True,
+            "completed": True,
+            "failure_type": None,
+            "failure_message": None,
+        }
+    )
     records.extend(
         [
             {
@@ -107,6 +121,17 @@ def _timing() -> list[dict]:
                 "started_at": 7.0,
                 "ended_at": 10.0,
                 "duration_seconds": 3.0,
+                "synchronize_before_start": True,
+                "synchronize_before_end": True,
+                "completed": True,
+                "failure_type": None,
+                "failure_message": None,
+            },
+            {
+                "phase": "answer_verification",
+                "started_at": 10.0,
+                "ended_at": 11.0,
+                "duration_seconds": 1.0,
                 "synchronize_before_start": True,
                 "synchronize_before_end": True,
                 "completed": True,
@@ -127,6 +152,34 @@ def _timing() -> list[dict]:
         ]
     )
     return records
+
+
+def _memory() -> list[dict]:
+    """Step 3R4: the FullKV MEMORY-phase evidence, validated separately
+    from timing above via `fullkv_qualification_memory_complete`."""
+    phases = (
+        "before_model_load",
+        "model_load",
+        "post_load_baseline",
+        "fullkv_complete_natural_generation",
+        "fullkv_complete_worker",
+    )
+    return [
+        {
+            "phase": phase,
+            "allocated_before": 0,
+            "reserved_before": 0,
+            "peak_allocated": 1_000,
+            "peak_reserved": 2_000,
+            "allocated_after": 500,
+            "reserved_after": 1_000,
+            "reset_point": "after_model_and_tokenizer_load_before_measured_inference",
+            "synchronized_before": True,
+            "synchronized_after": True,
+            "completed": True,
+        }
+        for phase in phases
+    ]
 
 
 def _evidence(**overrides) -> B2AR3FullKVQualificationEvidence:
