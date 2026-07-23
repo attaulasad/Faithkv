@@ -221,11 +221,27 @@ strict verifier and the frozen committed config hash.
 
 ## Validation status
 
-Focused independent-audit tests, qualification/artifact tests,
-authorization/provenance/freezer tests, historical timing and B2A
-regressions, subprocess import guards and the aggregate R3 suite are green.
-The final closure commit records the exact complete CPU-suite and remote-CI
-results after they run against the final repair tree.
+All local validation used `CUDA_VISIBLE_DEVICES=""` and `PYTHONPATH=src`.
+
+- `python -m compileall -q src tests`: pass.
+- Independent-audit attack file: 48 passed.
+- Aggregate R3 suite: 329 passed.
+- Historical qualification/contract/timing/schedule/worker/MATH regression
+  set: 191 passed.
+- Subprocess import guards and source scan: 6 passed, 9 deselected.
+- `python -m pytest -m "not gpu" -q`: 1685 passed, 14 deselected.
+- `git diff --check`: pass.
+
+The first aggregate attempts exposed an intermittent historical test issue:
+exact answer identity unnecessarily launched the isolated symbolic verifier
+and could time out under suite load, making a controlled worker exit before
+its injected failure point. The exact-identity fast path now records a
+typed equivalent result without a subprocess; every non-identical
+comparison retains the frozen symbolic verifier and timeout. The focused
+worker/MATH regressions and subsequent complete CPU run are green.
+
+Remote CPU CI is recorded in the final audit report after the final SHA is
+pushed. Until then: `REMOTE CPU CI UNCONFIRMED`.
 
 ## Final state
 
