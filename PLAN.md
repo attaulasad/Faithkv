@@ -1,6 +1,65 @@
 # Plan and status
 
-## Current status: B2A-R3 Step 2B independent re-audit PASSED; Step 3 Stage-A CPU implementation in progress (2026-07-23)
+## Current status: B2A-R3 Step 3 Stage-A CPU implementation complete; ready for independent code audit (2026-07-23)
+
+Every Stage-A CPU deliverable authorized by `CLAUDE.md` §1h /
+`docs/B2A_R3_STEP2B_INDEPENDENT_REAUDIT_2026-07-23.md` is implemented and
+CPU-tested on `research/b2a-r3-runtime-qualified-calibration`:
+
+- `kvcot.discovery.b2a_r3_contract` — frozen constants, canonical hashing
+  rule, authorization-ID validation, the 27-name qualification-condition
+  tuple, the 13-row exclusion set, the frozen generation-configuration
+  hash, and the exact runtime-predictor constants (all independently
+  cross-checked against real repository sources).
+- `kvcot.discovery.b2a_r3_candidates` — deterministic, outcome-blind
+  candidate-manifest construction (level-4/level-5 interleave, protocol
+  §8.2) and its strict schemas. The one real Stage-A artifact,
+  `configs/discovery/b2a_r3_candidate_manifest.json`, was generated from
+  the pinned MATH-500 dataset, reproduced byte-identically across two
+  independent fetches, and independently re-verified against the full
+  pinned population.
+- `kvcot.discovery.b2a_r3_runtime` — the exact runtime predictor (protocol
+  §7), verified against the frozen `2775`-passes/`2776`-fails integer
+  boundary and the continuous ceiling (derived, not hard-coded).
+- `kvcot.discovery.b2a_r3_qualification` — the pure 27-condition
+  qualification evaluator and first-pass selection rule, exercised only
+  against synthetic evidence.
+- `kvcot.discovery.b2a_r3_artifacts` / `b2a_r3_freeze` — strict
+  qualification-artifact verification and a synthetic-only selected-row
+  freezer (separate pure-construction/I-O layers; no Stage-A path writes
+  the real selected manifest or selection provenance).
+- `kvcot.discovery.b2a_r3_authorization` / `b2a_r3_provenance` — the
+  atomic, globally-exclusive authorization-claim mechanism (creation IS
+  consumption, proven via a 20-trial threaded concurrency test) and a
+  separately-constructed `AttemptProvenancePolicy` that never touches
+  `attempt_verification.py`'s historical `REQUIRED_BRANCH` constant.
+- `kvcot.cli` — seven new CPU-only planning/verification commands
+  (`prepare-b2a-r3-candidates`, `verify-b2a-r3-candidates`,
+  `plan-b2a-r3-qualification --dry-run`, `verify-b2a-r3-qualification`,
+  `freeze-b2a-r3-selected-row --dry-run`, `verify-b2a-r3-selection`,
+  `verify-b2a-r3-authorization`) — no `run-b2a-r3-qualification`,
+  `execute-b2a-r3`, or `claim-b2a-r3-authorization` command exists.
+
+```text
+STEP 3 STAGE-A CPU IMPLEMENTATION COMPLETE —
+READY FOR INDEPENDENT CODE AUDIT;
+STAGE B FULLKV QUALIFICATION REMAINS BLOCKED
+```
+
+No GPU was used, no CUDA was initialized, no model weights or tokenizer
+were loaded for execution, no real qualification artifact was produced,
+no real selected-manifest replacement occurred, and no real authorization
+claim was created by this pass. Stage B (FullKV qualification), Stage C
+(B2A-R3 execution), B2B, and any FaithKV method implementation remain
+blocked pending their own separate, future, dated authorizations.
+
+Next action:
+
+```text
+Independent code audit of the final Step 3 Stage-A SHA.
+```
+
+## Prior status: B2A-R3 Step 2B independent re-audit PASSED; Step 3 Stage-A CPU implementation in progress (2026-07-23)
 
 A genuinely independent re-audit of the Step 2B repair commit found all
 seven Step 2B findings (R3-AUDIT-19 through R3-AUDIT-25) materially

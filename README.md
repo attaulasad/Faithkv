@@ -2,16 +2,46 @@
 
 ## Current status (read this first)
 
-**B2A-R3 STEP 2B INDEPENDENT RE-AUDIT: PASS — STEP 3 STAGE-A CPU
-IMPLEMENTATION IN PROGRESS (2026-07-23).** A genuinely independent
-re-audit of the Step 2B repair found all seven Step 2B findings
-(R3-AUDIT-19 through R3-AUDIT-25) materially repaired, with one narrow
-explanatory correction (the protocol's own claim that `1.20` is "exactly
-representable in IEEE-754 binary64" is imprecise — the gate itself is
-unchanged: exact `==` against the same frozen Python float literal). Two
-hashes central to the frozen predictor/qualification contract, and the
-frozen `2775`/`2776` integer runtime boundary, were independently
-reproduced and matched exactly. See:
+**B2A-R3 STEP 3 STAGE-A CPU IMPLEMENTATION COMPLETE — READY FOR
+INDEPENDENT CODE AUDIT (2026-07-23).** Following the independent Step 2B
+re-audit (below), every Stage-A CPU deliverable is implemented and
+CPU-tested: strict contracts/schemas, the deterministic candidate
+generator (plus the one real, committed candidate manifest,
+`configs/discovery/b2a_r3_candidate_manifest.json`, reproduced
+byte-identically across two independent fetches), the exact runtime
+predictor, the pure 27-condition qualification evaluator, qualification-
+artifact verification, a synthetic-only selected-row freezer, the atomic
+authorization-claim mechanism (creation IS consumption, proven via a
+20-trial threaded concurrency test), a separately-constructed
+`AttemptProvenancePolicy`, and seven new CPU-only planning/verification
+CLI commands. See `docs/B2A_R3_STEP2B_INDEPENDENT_REAUDIT_2026-07-23.md`
+and `CLAUDE.md` §1h for the authorization boundary this implementation
+stayed inside.
+
+```text
+STEP 3 STAGE-A CPU IMPLEMENTATION COMPLETE —
+READY FOR INDEPENDENT CODE AUDIT;
+STAGE B FULLKV QUALIFICATION REMAINS BLOCKED
+```
+
+No GPU was used, no CUDA was initialized, no model weights or tokenizer
+were loaded for execution, no real qualification artifact was produced,
+no real selected-manifest replacement occurred, and no real authorization
+claim was created. Stage B FullKV qualification, Stage C B2A-R3
+execution, all GPU/CUDA activity, B2B, and FaithKV method implementation
+remain prohibited pending their own separate, future, dated
+authorizations.
+
+### Prior status: B2A-R3 Step 2B independent re-audit PASSED (2026-07-23)
+
+A genuinely independent re-audit of the Step 2B repair found all seven
+Step 2B findings (R3-AUDIT-19 through R3-AUDIT-25) materially repaired,
+with one narrow explanatory correction (the protocol's own claim that
+`1.20` is "exactly representable in IEEE-754 binary64" is imprecise — the
+gate itself is unchanged: exact `==` against the same frozen Python float
+literal). Two hashes central to the frozen predictor/qualification
+contract, and the frozen `2775`/`2776` integer runtime boundary, were
+independently reproduced and matched exactly. See:
 
 - `docs/B2A_R3_STEP2B_INDEPENDENT_REAUDIT_2026-07-23.md` — the
   independent re-audit record.
@@ -28,18 +58,7 @@ STAGE C B2A-R3 EXECUTION PROHIBITED
 GPU / CUDA / MODEL INFERENCE PROHIBITED
 ```
 
-This authorizes only Step 3 Stage-A: CPU-only implementation of the
-B2A-R3 candidate manifest/generator (including one real, committed
-candidate manifest built from the pinned MATH-500 dataset's public
-content), the pure runtime predictor, the pure qualification evaluator
-(exercised only against synthetic evidence), artifact verifiers, a
-synthetic-only selected-row freezer, the atomic authorization-claim
-mechanism (exercised only against synthetic fixtures), a
-separately-constructed `AttemptProvenancePolicy`, CPU-only planning/
-verification CLI commands, and CPU tests for all of the above (`CLAUDE.md`
-§1h). Stage B FullKV qualification, Stage C B2A-R3 execution, all
-GPU/CUDA activity, B2B, and FaithKV method implementation remain
-prohibited. B2A-R2 (see "Historical status" below) remains a consumed
+B2A-R2 (see "Historical status" below) remains a consumed
 experimental attempt, prohibited from rerun, its
 `B2A-R2 FINAL VERDICT: FAIL -- B2B BLOCKED` unchanged.
 

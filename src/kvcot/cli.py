@@ -2717,6 +2717,248 @@ def cmd_b2a_calibrate(args: argparse.Namespace) -> int:
             )
 
 
+# --------------------------------------------------------------- B2A-R3 (Step 3 Stage-A)
+#
+# CPU-only planning/verification commands for the B2A-R3 runtime-qualified
+# calibration protocol (docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md,
+# CLAUDE.md §1h). Every command below is either a deterministic CPU-only
+# builder/verifier or a --dry-run planning command -- none of them ever
+# initializes CUDA, loads a model, loads a tokenizer for execution, or
+# imports R-KV. Stage B (FullKV qualification), Stage C (B2A-R3 execution),
+# and authorization-claim creation each require a separate, future, dated
+# authorization and are deliberately NOT exposed as CLI commands here.
+
+
+def cmd_prepare_b2a_r3_candidates(args: argparse.Namespace) -> int:
+    from kvcot.config import config_identity
+    from kvcot.discovery import b2a_r3_contract as c
+    from kvcot.discovery.b2a_r2_candidates import fetch_all_pinned_dataset_rows
+    from kvcot.discovery.b2a_r3_candidates import (
+        atomic_write_json,
+        fetch_and_build_candidate_manifest,
+        verify_candidate_manifest_against_dataset,
+    )
+
+    output_path = args.output or c.CANDIDATE_MANIFEST_PATH
+
+    if args.dry_run:
+        print("prepare-b2a-r3-candidates dry-run plan:")
+        print(f"  dataset: {c.DATASET_REPO}@{c.DATASET_REVISION}")
+        print(f"  model: {c.MODEL_NAME}@{c.MODEL_REVISION}")
+        print(f"  budget: {c.BUDGET}")
+        print(f"  exclusion_set_sha256: {c.EXCLUSION_SET_SHA256}")
+        print(
+            f"  candidate_count: {c.CANDIDATE_TOTAL_COUNT} "
+            f"(level_4={c.CANDIDATES_PER_LEVEL}, level_5={c.CANDIDATES_PER_LEVEL})"
+        )
+        print(f"  output_path: {output_path}")
+        print("  no network fetch, no write performed by --dry-run")
+        return 0
+
+    if not args.execute:
+        raise SystemExit("prepare-b2a-r3-candidates requires exactly one of --dry-run or --execute.")
+
+    config_sha256 = config_identity(c.CONFIG_PATH)
+    manifest = fetch_and_build_candidate_manifest(
+        dataset_repo=c.DATASET_REPO, dataset_config=c.DATASET_CONFIG, dataset_split=c.DATASET_SPLIT,
+        dataset_revision=c.DATASET_REVISION, model_name=c.MODEL_NAME, model_revision=c.MODEL_REVISION,
+        tokenizer_name=c.TOKENIZER_NAME, tokenizer_revision=c.TOKENIZER_REVISION, budget=c.BUDGET,
+        config_path=c.CONFIG_PATH, config_sha256=config_sha256,
+    )
+    rows = fetch_all_pinned_dataset_rows(c.DATASET_REPO, c.DATASET_REVISION)
+    verify_candidate_manifest_against_dataset(manifest, rows)
+    atomic_write_json(output_path, manifest)
+
+    print(f"prepare-b2a-r3-candidates: wrote {output_path}")
+    print(f"  canonical_sha256={manifest['canonical_sha256']}")
+    print(f"  candidate_count={manifest['candidate_count']} level_mixture={manifest['level_mixture']}")
+    return 0
+
+
+def cmd_verify_b2a_r3_candidates(args: argparse.Namespace) -> int:
+    import json
+
+    from kvcot.discovery import b2a_r3_contract as c
+    from kvcot.discovery.b2a_r3_candidates import (
+        verify_candidate_manifest_against_dataset,
+        verify_candidate_manifest_structure,
+    )
+
+    manifest_path = args.manifest or c.CANDIDATE_MANIFEST_PATH
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    try:
+        typed = verify_candidate_manifest_structure(manifest)
+    except Exception as e:  # noqa: BLE001 -- report the reason, exit nonzero
+        print(f"verify-b2a-r3-candidates: STRUCTURAL VERIFICATION FAILED: {e}")
+        return 1
+
+    print(f"verify-b2a-r3-candidates: structural verification PASSED for {manifest_path}")
+    print(f"  candidate_count={typed.candidate_count} level_mixture={typed.level_mixture}")
+
+    if args.verify_existing:
+        from kvcot.discovery.b2a_r2_candidates import fetch_all_pinned_dataset_rows
+
+        rows = fetch_all_pinned_dataset_rows(typed.dataset_repo, typed.dataset_revision)
+        try:
+            verify_candidate_manifest_against_dataset(manifest, rows)
+        except Exception as e:  # noqa: BLE001
+            print(f"verify-b2a-r3-candidates: --verify-existing FAILED: {e}")
+            return 1
+        print("verify-b2a-r3-candidates: --verify-existing reproduced the manifest from the pinned dataset")
+    return 0
+
+
+def cmd_plan_b2a_r3_qualification(args: argparse.Namespace) -> int:
+    import json
+
+    from kvcot.discovery import b2a_r3_contract as c
+    from kvcot.discovery.b2a_r3_candidates import verify_candidate_manifest_structure
+
+    if not args.dry_run:
+        raise SystemExit("plan-b2a-r3-qualification only supports --dry-run -- Stage B remains unauthorized.")
+
+    candidates_path = args.candidates or c.CANDIDATE_MANIFEST_PATH
+    with open(candidates_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+    typed = verify_candidate_manifest_structure(manifest)
+
+    print("plan-b2a-r3-qualification dry-run plan:")
+    print(f"  candidate_manifest_canonical_sha256: {typed.canonical_sha256}")
+    print(
+        "  candidates_to_attempt_in_order: "
+        f"{[cand.unique_id for cand in typed.candidates[:c.QUALIFICATION_CANDIDATE_LIMIT]]}"
+    )
+    print(f"  qualification_candidate_limit = {c.QUALIFICATION_CANDIDATE_LIMIT}")
+    print(f"  per_candidate_worker_timeout_seconds = {c.PER_CANDIDATE_WORKER_TIMEOUT_SECONDS}")
+    print(f"  absolute_timeout_envelope_seconds = {c.ABSOLUTE_TIMEOUT_ENVELOPE_SECONDS}")
+    print("  qualification_phase_wall_time_limit = null")
+    print("  gpu_qualification_authorized = false")
+    print("  wall_time_authorization_required = true")
+    print("  authorization_claim_created = false")
+    print("  authorization_consumed = false")
+    print("  would_initialize_cuda = false")
+    print("  would_load_model = false")
+    print("  would_load_tokenizer_for_execution = false")
+    print("  would_import_rkv = false")
+    return 0
+
+
+def cmd_verify_b2a_r3_qualification(args: argparse.Namespace) -> int:
+    import json
+
+    from kvcot.config import config_identity
+    from kvcot.discovery import b2a_r3_contract as c
+    from kvcot.discovery.b2a_r3_artifacts import verify_qualification_artifact
+
+    artifact_path = args.artifact or c.QUALIFICATION_ARTIFACT_PATH
+    candidates_path = args.candidates or c.CANDIDATE_MANIFEST_PATH
+    config_path = args.config or c.CONFIG_PATH
+
+    with open(artifact_path, "r", encoding="utf-8") as f:
+        artifact = json.load(f)
+    with open(candidates_path, "r", encoding="utf-8") as f:
+        candidate_manifest = json.load(f)
+    expected_config_sha256 = config_identity(config_path)
+
+    try:
+        typed = verify_qualification_artifact(
+            artifact, candidate_manifest=candidate_manifest, expected_config_sha256=expected_config_sha256,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"verify-b2a-r3-qualification: VERIFICATION FAILED: {e}")
+        return 1
+
+    print(f"verify-b2a-r3-qualification: verification PASSED for {artifact_path}")
+    print(f"  selection_status={typed.selection_status} selected_unique_id={typed.selected_unique_id}")
+    return 0
+
+
+def cmd_freeze_b2a_r3_selected_row(args: argparse.Namespace) -> int:
+    import json
+
+    from kvcot.config import config_identity
+    from kvcot.discovery import b2a_r3_contract as c
+    from kvcot.discovery.b2a_r3_freeze import plan_freeze_dry_run
+
+    if not args.dry_run:
+        raise SystemExit("freeze-b2a-r3-selected-row only supports --dry-run -- no production freezer is exposed.")
+
+    candidates_path = args.candidates or c.CANDIDATE_MANIFEST_PATH
+    artifact_path = args.artifact or c.QUALIFICATION_ARTIFACT_PATH
+    config_path = args.config or c.CONFIG_PATH
+
+    with open(candidates_path, "r", encoding="utf-8") as f:
+        candidate_manifest = json.load(f)
+    with open(artifact_path, "r", encoding="utf-8") as f:
+        qualification_artifact = json.load(f)
+    expected_config_sha256 = config_identity(config_path)
+
+    plan = plan_freeze_dry_run(
+        candidate_manifest=candidate_manifest, qualification_artifact=qualification_artifact,
+        expected_config_sha256=expected_config_sha256,
+    )
+    print("freeze-b2a-r3-selected-row dry-run plan:")
+    for key, value in plan.items():
+        print(f"  {key} = {value}")
+    return 0 if plan["would_freeze"] else 1
+
+
+def cmd_verify_b2a_r3_selection(args: argparse.Namespace) -> int:
+    import json
+
+    from kvcot.discovery import b2a_r3_contract as c
+    from kvcot.discovery.b2a_r3_freeze import verify_selection_provenance
+    from kvcot.discovery.manifest import B2AOneExampleManifest
+
+    provenance_path = args.provenance or c.SELECTION_PROVENANCE_PATH
+    manifest_path = args.manifest or c.SELECTED_MANIFEST_PATH
+    candidates_path = args.candidates or c.CANDIDATE_MANIFEST_PATH
+    artifact_path = args.artifact or c.QUALIFICATION_ARTIFACT_PATH
+
+    with open(provenance_path, "r", encoding="utf-8") as f:
+        provenance = json.load(f)
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        selected_manifest = B2AOneExampleManifest.model_validate_json(f.read())
+    with open(candidates_path, "r", encoding="utf-8") as f:
+        candidate_manifest = json.load(f)
+    with open(artifact_path, "r", encoding="utf-8") as f:
+        qualification_artifact = json.load(f)
+
+    try:
+        typed = verify_selection_provenance(
+            provenance, selected_manifest=selected_manifest, candidate_manifest=candidate_manifest,
+            qualification_artifact=qualification_artifact,
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"verify-b2a-r3-selection: VERIFICATION FAILED: {e}")
+        return 1
+    print(f"verify-b2a-r3-selection: verification PASSED for {provenance_path}")
+    print(f"  selected_unique_id={typed.selected_unique_id}")
+    return 0
+
+
+def cmd_verify_b2a_r3_authorization(args: argparse.Namespace) -> int:
+    import json
+
+    from kvcot.discovery.b2a_r3_authorization import AuthorizationClaimR3
+    from kvcot.discovery.b2a_r3_contract import verify_canonical_sha256
+
+    with open(args.claim, "r", encoding="utf-8") as f:
+        claim = json.load(f)
+
+    try:
+        verify_canonical_sha256(claim)
+        typed = AuthorizationClaimR3.model_validate(claim)
+    except Exception as e:  # noqa: BLE001
+        print(f"verify-b2a-r3-authorization: VERIFICATION FAILED: {e}")
+        return 1
+    print(f"verify-b2a-r3-authorization: verification PASSED for {args.claim}")
+    print(f"  authorization_id={typed.authorization_id} authorization_stage={typed.authorization_stage}")
+    return 0
+
+
 # ----------------------------------------------------------------------------- main
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2842,6 +3084,55 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output-summary", default="results/decisions/gsm8k_v3_b128_failure_atlas_summary.json")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_failure_atlas)
+
+    p = sub.add_parser(
+        "prepare-b2a-r3-candidates",
+        help="B2A-R3: CPU-only deterministic candidate-manifest construction from the pinned MATH-500 dataset.",
+    )
+    p.add_argument("--output", default=None)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--execute", action="store_true")
+    p.set_defaults(func=cmd_prepare_b2a_r3_candidates)
+
+    p = sub.add_parser("verify-b2a-r3-candidates", help="B2A-R3: verify the committed candidate manifest.")
+    p.add_argument("--manifest", default=None)
+    p.add_argument("--verify-existing", action="store_true")
+    p.set_defaults(func=cmd_verify_b2a_r3_candidates)
+
+    p = sub.add_parser(
+        "plan-b2a-r3-qualification",
+        help="B2A-R3: CPU-only qualification planning. Stage B FullKV qualification remains unauthorized.",
+    )
+    p.add_argument("--candidates", default=None)
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_plan_b2a_r3_qualification)
+
+    p = sub.add_parser("verify-b2a-r3-qualification", help="B2A-R3: verify a qualification artifact.")
+    p.add_argument("--artifact", default=None)
+    p.add_argument("--candidates", default=None)
+    p.add_argument("--config", default=None)
+    p.set_defaults(func=cmd_verify_b2a_r3_qualification)
+
+    p = sub.add_parser(
+        "freeze-b2a-r3-selected-row",
+        help="B2A-R3: CPU-only freeze planning (dry-run only -- Stage A never writes the real selected manifest).",
+    )
+    p.add_argument("--candidates", default=None)
+    p.add_argument("--artifact", default=None)
+    p.add_argument("--config", default=None)
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_freeze_b2a_r3_selected_row)
+
+    p = sub.add_parser("verify-b2a-r3-selection", help="B2A-R3: verify a selection-provenance artifact.")
+    p.add_argument("--provenance", default=None)
+    p.add_argument("--manifest", default=None)
+    p.add_argument("--candidates", default=None)
+    p.add_argument("--artifact", default=None)
+    p.set_defaults(func=cmd_verify_b2a_r3_selection)
+
+    p = sub.add_parser("verify-b2a-r3-authorization", help="B2A-R3: verify an authorization-claim artifact's schema.")
+    p.add_argument("--claim", required=True)
+    p.set_defaults(func=cmd_verify_b2a_r3_authorization)
 
     return parser
 
