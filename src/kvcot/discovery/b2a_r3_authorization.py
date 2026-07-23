@@ -178,13 +178,19 @@ class VerifiedAuthorizationContext:
     claim: AuthorizationClaimR3
     policy: AttemptProvenancePolicy
     active_paths: ActiveAuthorizationPaths
+    # Step 3R4 Finding 3: sourced from the PARSED authorization document,
+    # never the claim -- the future qualification coordinator (Finding 6)
+    # reads its Stage-B limits only through this verified context, never
+    # from a CLI argument or a hard-coded default. Both are `None` for a
+    # Stage C (b2a_r3_execution) context.
+    maximum_candidates: int | None
+    phase_wall_time_limit_seconds: int | None
     _verification_token: object
 
 
 def verify_authorization_preconditions(
     claim_payload: dict[str, Any],
     *,
-    policy: AttemptProvenancePolicy,
     git_state: GitStateProvider,
     authorization_document_path: str | Path,
     candidate_manifest: dict[str, Any],
@@ -194,7 +200,21 @@ def verify_authorization_preconditions(
     selection_provenance: dict[str, Any] | None = None,
     repository_root: str | Path = ".",
 ) -> VerifiedAuthorizationContext:
-    """Verify the complete document/Git/artifact chain before consumption."""
+    """Verify the complete document/Git/artifact chain before consumption.
+
+    Step 3R4 Finding 3: the enforced policy is now constructed ENTIRELY
+    from the parsed authorization document (never accepted as a caller-
+    supplied parameter) -- the claim's fields are then required to equal
+    the document's fields, never the reverse. A Markdown document
+    containing no machine-readable JSON block (e.g. the historical
+    "synthetic Stage B authorization" placeholder text) is rejected
+    outright, before any Git state is even inspected.
+    """
+    from kvcot.discovery.b2a_r3_authorization_document import (
+        parse_authorization_document,
+        policy_from_authorization_document,
+    )
+
     verify_canonical_sha256(claim_payload)
     claim = AuthorizationClaimR3.model_validate(claim_payload)
 
@@ -218,14 +238,41 @@ def verify_authorization_preconditions(
     if observed_document_hash != claim.authorization_document_sha256:
         raise AuthorizationClaimRefused("authorization document byte hash does not match the claim")
 
-    if policy.authorization_id != claim.authorization_id:
-        raise AuthorizationClaimRefused("policy authorization_id does not match the claim")
-    if policy.authorization_document_sha256 != claim.authorization_document_sha256:
-        raise AuthorizationClaimRefused("policy authorization-document hash does not match the claim")
-    if tuple(claim.required_ancestor_shas) != policy.required_ancestor_shas:
-        raise AuthorizationClaimRefused("claim required ancestors do not exactly match the policy")
-    if claim.required_rkv_sha != policy.required_rkv_sha:
-        raise AuthorizationClaimRefused("claim required R-KV SHA does not match the policy")
+    try:
+        document = parse_authorization_document(supplied_document)
+    except Exception as exc:
+        raise AuthorizationClaimRefused(f"authorization document is not machine-readable: {exc}") from exc
+
+    if document.authorization_id != claim.authorization_id:
+        raise AuthorizationClaimRefused("document authorization_id does not match the claim")
+    if document.authorization_stage != claim.authorization_stage:
+        raise AuthorizationClaimRefused("document authorization_stage does not match the claim")
+    if document.authorized_branch != claim.authorized_branch:
+        raise AuthorizationClaimRefused("document authorized_branch does not match the claim")
+    if document.authorized_commit_sha != claim.authorized_commit_sha:
+        raise AuthorizationClaimRefused("document authorized_commit_sha does not match the claim")
+    if tuple(document.required_ancestor_shas) != tuple(claim.required_ancestor_shas):
+        raise AuthorizationClaimRefused("document required_ancestor_shas does not match the claim")
+    if document.required_rkv_sha != claim.required_rkv_sha:
+        raise AuthorizationClaimRefused("document required_rkv_sha does not match the claim")
+    if document.candidate_manifest_canonical_sha256 != claim.candidate_manifest_canonical_sha256:
+        raise AuthorizationClaimRefused("document candidate_manifest_canonical_sha256 does not match the claim")
+    if claim.authorization_stage == AUTHORIZATION_STAGE_B2A_R3_EXECUTION:
+        if document.qualification_artifact_canonical_sha256 != claim.qualification_artifact_canonical_sha256:
+            raise AuthorizationClaimRefused(
+                "document qualification_artifact_canonical_sha256 does not match the claim"
+            )
+        if document.selected_manifest_sha256 != claim.selected_manifest_sha256:
+            raise AuthorizationClaimRefused("document selected_manifest_sha256 does not match the claim")
+        if document.selected_manifest_hash_algorithm != claim.selected_manifest_hash_algorithm:
+            raise AuthorizationClaimRefused("document selected_manifest_hash_algorithm does not match the claim")
+
+    # The policy is built ENTIRELY from the parsed document -- never from
+    # the claim (Step 3R4 Finding 3). The claim-vs-document equality
+    # checks above already ensure the claim cannot smuggle a divergent
+    # value past this point.
+    policy = policy_from_authorization_document(document, authorization_document_sha256=observed_document_hash)
+
     if not (
         claim.observed_repository == claim.authorized_repository == policy.required_repository == REQUIRED_REPOSITORY
     ):
@@ -279,6 +326,8 @@ def verify_authorization_preconditions(
         claim=claim,
         policy=policy,
         active_paths=ActiveAuthorizationPaths.from_verified_claim(claim),
+        maximum_candidates=document.maximum_candidates,
+        phase_wall_time_limit_seconds=document.phase_wall_time_limit_seconds,
         _verification_token=_VERIFIED_CONTEXT_TOKEN,
     )
 

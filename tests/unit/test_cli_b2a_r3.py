@@ -88,11 +88,39 @@ def test_verify_b2a_r3_authorization_end_to_end(tmp_path, capsys, monkeypatch):
     from kvcot.utils.hashing import sha256_file, sha256_json
     from tests.unit.discovery.test_b2a_r3_provenance import FakeGitState
 
+    from kvcot.discovery.b2a_r3_authorization_document import (
+        AUTHORIZATION_DOCUMENT_BEGIN_MARKER,
+        AUTHORIZATION_DOCUMENT_END_MARKER,
+        AUTHORIZATION_DOCUMENT_SCHEMA_VERSION,
+    )
+
     document_rel = "docs/B2A_R3_STAGE_B_QUALIFICATION_AUTHORIZATION_2026-08-01.md"
     document_path = tmp_path / document_rel
     document_path.parent.mkdir(parents=True)
-    document_path.write_text("synthetic CLI authorization\n", encoding="utf-8")
     candidate_manifest = json.loads(Path("configs/discovery/b2a_r3_candidate_manifest.json").read_text())
+    document_body = {
+        "authorization_document_schema_version": AUTHORIZATION_DOCUMENT_SCHEMA_VERSION,
+        "authorization_id": "cli-smoke-test",
+        "authorization_stage": "fullkv_qualification",
+        "authorized_repository": REQUIRED_REPOSITORY,
+        "authorized_branch": "research/b2a-r3-runtime-qualified-calibration",
+        "authorized_commit_sha": "b" * 40,
+        "required_ancestor_shas": ["c" * 40],
+        "required_rkv_sha": "45eaa7d69d20b7388321f077020a610d9afb65bd",
+        "candidate_manifest_canonical_sha256": candidate_manifest["canonical_sha256"],
+        "maximum_candidates": 8,
+        "phase_wall_time_limit_seconds": 3600,
+        "qualification_artifact_canonical_sha256": None,
+        "selected_manifest_sha256": None,
+        "selected_manifest_hash_algorithm": None,
+        "created_at_utc": "2026-08-01T00:00:00+00:00",
+    }
+    document_path.write_text(
+        "# CLI smoke-test authorization document\n\n"
+        f"{AUTHORIZATION_DOCUMENT_BEGIN_MARKER}\n```json\n{json.dumps(document_body, indent=2)}\n```\n"
+        f"{AUTHORIZATION_DOCUMENT_END_MARKER}\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(
         "kvcot.discovery.b2a_r3_provenance.SubprocessGitStateProvider",
         lambda _root: FakeGitState(commit_sha="b" * 40, ancestors=frozenset({"c" * 40})),

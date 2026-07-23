@@ -2963,7 +2963,7 @@ def cmd_verify_b2a_r3_authorization(args: argparse.Namespace) -> int:
         verify_authorization_preconditions,
     )
     from kvcot.discovery.b2a_r3_contract import verify_canonical_sha256
-    from kvcot.discovery.b2a_r3_provenance import AttemptProvenancePolicy, SubprocessGitStateProvider
+    from kvcot.discovery.b2a_r3_provenance import SubprocessGitStateProvider
     from kvcot.discovery.manifest import B2AOneExampleManifest
 
     with open(args.claim, "r", encoding="utf-8") as f:
@@ -2976,16 +2976,10 @@ def cmd_verify_b2a_r3_authorization(args: argparse.Namespace) -> int:
         with open(candidates_path, "r", encoding="utf-8") as f:
             candidate_manifest = json.load(f)
         expected_config_sha256 = config_identity(c.CONFIG_PATH)
-        policy = AttemptProvenancePolicy(
-            provenance_policy_version=c.PROVENANCE_POLICY_VERSION,
-            required_repository=c.REQUIRED_REPOSITORY,
-            required_branch=typed.authorized_branch,
-            required_commit_sha=typed.authorized_commit_sha,
-            required_ancestor_shas=tuple(typed.required_ancestor_shas),
-            required_rkv_sha=typed.required_rkv_sha,
-            authorization_id=typed.authorization_id,
-            authorization_document_sha256=typed.authorization_document_sha256,
-        )
+        # Step 3R4 Finding 3: the policy is no longer constructed here from
+        # the claim's own fields -- verify_authorization_preconditions now
+        # parses the authorization document itself and builds the policy
+        # from it, then requires the claim to agree with the document.
         qualification_artifact = None
         selected_manifest = None
         selection_provenance = None
@@ -3001,7 +2995,6 @@ def cmd_verify_b2a_r3_authorization(args: argparse.Namespace) -> int:
                 selection_provenance = json.load(f)
         verify_authorization_preconditions(
             claim,
-            policy=policy,
             git_state=SubprocessGitStateProvider(args.repository_root),
             authorization_document_path=args.document or typed.authorization_document_path,
             candidate_manifest=candidate_manifest,

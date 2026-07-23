@@ -75,39 +75,85 @@ def _stage_c_payload(**overrides):
     return base
 
 
+def _document_payload(*, authorization_id, authorization_stage, authorized_branch, authorized_commit_sha,
+                       required_ancestor_shas, required_rkv_sha, candidate_manifest_canonical_sha256,
+                       maximum_candidates=None, phase_wall_time_limit_seconds=None,
+                       qualification_artifact_canonical_sha256=None, selected_manifest_sha256=None,
+                       selected_manifest_hash_algorithm=None):
+    from kvcot.discovery.b2a_r3_authorization_document import AUTHORIZATION_DOCUMENT_SCHEMA_VERSION
+
+    return {
+        "authorization_document_schema_version": AUTHORIZATION_DOCUMENT_SCHEMA_VERSION,
+        "authorization_id": authorization_id,
+        "authorization_stage": authorization_stage,
+        "authorized_repository": REQUIRED_REPOSITORY,
+        "authorized_branch": authorized_branch,
+        "authorized_commit_sha": authorized_commit_sha,
+        "required_ancestor_shas": list(required_ancestor_shas),
+        "required_rkv_sha": required_rkv_sha,
+        "candidate_manifest_canonical_sha256": candidate_manifest_canonical_sha256,
+        "maximum_candidates": maximum_candidates,
+        "phase_wall_time_limit_seconds": phase_wall_time_limit_seconds,
+        "qualification_artifact_canonical_sha256": qualification_artifact_canonical_sha256,
+        "selected_manifest_sha256": selected_manifest_sha256,
+        "selected_manifest_hash_algorithm": selected_manifest_hash_algorithm,
+        "created_at_utc": "2026-08-01T00:00:00+00:00",
+    }
+
+
+def _write_document(path, payload: dict) -> None:
+    import json as _json
+
+    from kvcot.discovery.b2a_r3_authorization_document import (
+        AUTHORIZATION_DOCUMENT_BEGIN_MARKER,
+        AUTHORIZATION_DOCUMENT_END_MARKER,
+    )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = _json.dumps(payload, indent=2)
+    text = (
+        "# Synthetic authorization document (test fixture)\n\n"
+        f"{AUTHORIZATION_DOCUMENT_BEGIN_MARKER}\n```json\n{body}\n```\n{AUTHORIZATION_DOCUMENT_END_MARKER}\n"
+    )
+    path.write_text(text, encoding="utf-8")
+
+
 def _verified_stage_b(tmp_path, **payload_overrides):
     import json
     from pathlib import Path
 
     from kvcot.discovery.b2a_r3_contract import CANDIDATE_MANIFEST_PATH
-    from tests.unit.discovery.test_b2a_r3_provenance import FakeGitState, _policy
+    from tests.unit.discovery.test_b2a_r3_provenance import FakeGitState
 
     document_rel = "docs/B2A_R3_STAGE_B_QUALIFICATION_AUTHORIZATION_2026-08-01.md"
     document = tmp_path / document_rel
-    document.parent.mkdir(parents=True, exist_ok=True)
-    document.write_text("synthetic Stage B authorization\n", encoding="utf-8")
     candidate_manifest = json.loads(Path(CANDIDATE_MANIFEST_PATH).read_text(encoding="utf-8"))
+    _write_document(document, _document_payload(
+        authorization_id="stage-b-2026-08-01",
+        authorization_stage=AUTHORIZATION_STAGE_FULLKV_QUALIFICATION,
+        authorized_branch="research/b2a-r3-runtime-qualified-calibration",
+        authorized_commit_sha="b" * 40,
+        required_ancestor_shas=("c" * 40,),
+        required_rkv_sha="45eaa7d69d20b7388321f077020a610d9afb65bd",
+        candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],
+        maximum_candidates=8,
+        phase_wall_time_limit_seconds=3600,
+    ))
     payload = _stage_b_payload(
         authorization_document_sha256=sha256_file(document),
         candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],
         **payload_overrides,
     )
-    policy = _policy(
-        required_commit_sha="b" * 40,
-        required_ancestor_shas=("c" * 40,),
-        authorization_document_sha256=payload["authorization_document_sha256"],
-    )
     git_state = FakeGitState(commit_sha="b" * 40, ancestors=frozenset({"c" * 40}))
     context = verify_authorization_preconditions(
         payload,
-        policy=policy,
         git_state=git_state,
         authorization_document_path=document,
         candidate_manifest=candidate_manifest,
         expected_config_sha256=candidate_manifest["config_sha256"],
         repository_root=tmp_path,
     )
-    return payload, context, document, candidate_manifest, policy, git_state
+    return payload, context, document, candidate_manifest, git_state
 
 
 def _stage_c_inputs(tmp_path, **payload_overrides):
@@ -116,13 +162,11 @@ def _stage_c_inputs(tmp_path, **payload_overrides):
         _fake_renderer,
         _valid_chain,
     )
-    from tests.unit.discovery.test_b2a_r3_provenance import FakeGitState, _policy
+    from tests.unit.discovery.test_b2a_r3_provenance import FakeGitState
     from kvcot.discovery.b2a_r3_freeze import construct_selected_manifest_and_provenance
 
     document_rel = "docs/B2A_R3_STAGE_C_EXECUTION_AUTHORIZATION_2026-08-05.md"
     document = tmp_path / document_rel
-    document.parent.mkdir(parents=True, exist_ok=True)
-    document.write_text("synthetic Stage C authorization\n", encoding="utf-8")
     candidate_manifest, qualification_artifact = _valid_chain()
     selected_manifest, selection_provenance = construct_selected_manifest_and_provenance(
         candidate_manifest=candidate_manifest,
@@ -130,6 +174,18 @@ def _stage_c_inputs(tmp_path, **payload_overrides):
         expected_config_sha256=CONFIG_SHA,
         tokenizer_renderer=_fake_renderer,
     )
+    _write_document(document, _document_payload(
+        authorization_id="stage-c-2026-08-05",
+        authorization_stage=AUTHORIZATION_STAGE_B2A_R3_EXECUTION,
+        authorized_branch="research/b2a-r3-runtime-qualified-calibration",
+        authorized_commit_sha="b" * 40,
+        required_ancestor_shas=("c" * 40,),
+        required_rkv_sha="45eaa7d69d20b7388321f077020a610d9afb65bd",
+        candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],
+        qualification_artifact_canonical_sha256=qualification_artifact["canonical_sha256"],
+        selected_manifest_sha256=selected_manifest.manifest_hash(),
+        selected_manifest_hash_algorithm=SELECTED_MANIFEST_HASH_ALGORITHM,
+    ))
     payload_values = {
         "authorization_document_sha256": sha256_file(document),
         "candidate_manifest_canonical_sha256": candidate_manifest["canonical_sha256"],
@@ -138,16 +194,9 @@ def _stage_c_inputs(tmp_path, **payload_overrides):
     }
     payload_values.update(payload_overrides)
     payload = _stage_c_payload(**payload_values)
-    policy = _policy(
-        authorization_id=payload["authorization_id"],
-        required_commit_sha="b" * 40,
-        required_ancestor_shas=("c" * 40,),
-        authorization_document_sha256=payload["authorization_document_sha256"],
-    )
     git_state = FakeGitState(commit_sha="b" * 40, ancestors=frozenset({"c" * 40}))
     return {
         "claim_payload": payload,
-        "policy": policy,
         "git_state": git_state,
         "authorization_document_path": document,
         "candidate_manifest": candidate_manifest,
@@ -248,7 +297,7 @@ def test_second_claim_for_same_id_fails(tmp_path):
 
 
 def test_claim_authorization_full_validation_and_creation(tmp_path):
-    payload, context, _document, _manifest, _policy_value, _git_state = _verified_stage_b(tmp_path)
+    payload, context, _document, _manifest, _git_state = _verified_stage_b(tmp_path)
     claims_root = tmp_path / "claims"
     typed, path = claim_authorization(payload, claims_root=claims_root, verified_context=context)
     assert isinstance(typed, AuthorizationClaimR3)
@@ -263,12 +312,11 @@ def test_claim_authorization_rejects_invalid_payload_before_touching_disk(tmp_pa
 
 
 def test_preconditions_reject_authorization_document_byte_change(tmp_path):
-    payload, _context, document, candidate_manifest, policy, git_state = _verified_stage_b(tmp_path)
+    payload, _context, document, candidate_manifest, git_state = _verified_stage_b(tmp_path)
     document.write_text("tampered bytes\n", encoding="utf-8")
     with pytest.raises(Exception):
         verify_authorization_preconditions(
             payload,
-            policy=policy,
             git_state=git_state,
             authorization_document_path=document,
             candidate_manifest=candidate_manifest,
@@ -297,12 +345,11 @@ def test_preconditions_reject_claim_identity_disagreements(tmp_path, field, valu
 
 
 def test_preconditions_reject_missing_authorization_document(tmp_path):
-    payload, _context, document, candidate_manifest, policy, git_state = _verified_stage_b(tmp_path)
+    payload, _context, document, candidate_manifest, git_state = _verified_stage_b(tmp_path)
     document.unlink()
     with pytest.raises(Exception):
         verify_authorization_preconditions(
             payload,
-            policy=policy,
             git_state=git_state,
             authorization_document_path=document,
             candidate_manifest=candidate_manifest,
@@ -312,7 +359,7 @@ def test_preconditions_reject_missing_authorization_document(tmp_path):
 
 
 def test_preconditions_reject_uncommitted_authorization_document(tmp_path):
-    payload, _context, document, candidate_manifest, policy, git_state = _verified_stage_b(tmp_path)
+    payload, _context, document, candidate_manifest, git_state = _verified_stage_b(tmp_path)
 
     class UncommittedDocumentGitState:
         def __getattr__(self, name):
@@ -324,7 +371,6 @@ def test_preconditions_reject_uncommitted_authorization_document(tmp_path):
     with pytest.raises(Exception):
         verify_authorization_preconditions(
             payload,
-            policy=policy,
             git_state=UncommittedDocumentGitState(),
             authorization_document_path=document,
             candidate_manifest=candidate_manifest,
@@ -336,11 +382,10 @@ def test_preconditions_reject_uncommitted_authorization_document(tmp_path):
 def test_preconditions_reject_missing_required_ancestor(tmp_path):
     from tests.unit.discovery.test_b2a_r3_provenance import FakeGitState
 
-    payload, _context, document, candidate_manifest, policy, _git_state = _verified_stage_b(tmp_path)
+    payload, _context, document, candidate_manifest, _git_state = _verified_stage_b(tmp_path)
     with pytest.raises(Exception):
         verify_authorization_preconditions(
             payload,
-            policy=policy,
             git_state=FakeGitState(commit_sha="b" * 40, ancestors=frozenset()),
             authorization_document_path=document,
             candidate_manifest=candidate_manifest,
