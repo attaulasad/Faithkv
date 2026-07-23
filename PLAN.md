@@ -1,6 +1,45 @@
 # Plan and status
 
-## Current status: B2A-R3 Step 2B protocol implementation-contract repair complete; independent re-audit pending (2026-07-22)
+## Current status: B2A-R3 Step 2B independent re-audit PASSED; Step 3 Stage-A CPU implementation in progress (2026-07-23)
+
+A genuinely independent re-audit of the Step 2B repair commit found all
+seven Step 2B findings (R3-AUDIT-19 through R3-AUDIT-25) materially
+repaired, with one narrow explanatory correction (the protocol's own
+claim that `1.20` is "exactly representable in IEEE-754 binary64" is
+imprecise — the gate itself is unchanged: exact `==` against the same
+frozen Python float literal). Two hashes central to the frozen predictor/
+qualification contract, and the frozen `2775`/`2776` integer runtime
+boundary, were independently reproduced and matched exactly. Full detail:
+`docs/B2A_R3_STEP2B_INDEPENDENT_REAUDIT_2026-07-23.md`; `CLAUDE.md` §1h
+records the same authorization boundary.
+
+```text
+INDEPENDENT STEP 2B RE-AUDIT: PASS
+STEP 3 STAGE-A CPU IMPLEMENTATION AUTHORIZED
+STAGE B FULLKV QUALIFICATION PROHIBITED
+STAGE C B2A-R3 EXECUTION PROHIBITED
+GPU / CUDA / MODEL INFERENCE PROHIBITED
+```
+
+This authorizes only Step 3 Stage-A: CPU-only implementation of the
+B2A-R3 candidate manifest/generator (including one real, committed
+candidate manifest built from the pinned MATH-500 dataset's public
+content), the pure runtime predictor, the pure qualification evaluator
+(exercised only against synthetic evidence), artifact verifiers, a
+synthetic-only selected-row freezer, the atomic authorization-claim
+mechanism (exercised only against synthetic fixtures), a
+separately-constructed `AttemptProvenancePolicy`, CPU-only planning/
+verification CLI commands, and CPU tests for all of the above. It does
+not authorize Stage B FullKV qualification, Stage C B2A-R3 execution,
+B2B, or any FaithKV method implementation.
+
+Next action:
+
+```text
+Independent code audit of the final Step 3 Stage-A SHA.
+```
+
+## Prior status: B2A-R3 Step 2B protocol implementation-contract repair complete; independent re-audit pending (2026-07-22)
 
 A second independent re-audit of the Step 2A repair commit
 (`81e11cb57202e0d4b434aabb347963ae3c34b80b`) found the original 18 defects

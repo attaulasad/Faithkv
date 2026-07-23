@@ -313,6 +313,61 @@ threshold, budget, model, dataset, or gate frozen by
 or configuration file is modified by it; `configs/lock.yaml` and the
 pinned R-KV revision are unchanged.
 
+### Section 1h — B2A-R3 Step 2B independent re-audit and Step 3 Stage-A CPU implementation (dated 2026-07-23)
+
+Added by
+`docs/B2A_R3_STEP2B_INDEPENDENT_REAUDIT_2026-07-23.md`, superseding
+nothing above. A genuinely independent re-audit of the Step 2B repair
+commit (§1g, folded into
+`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` and
+`docs/B2A_R3_PROTOCOL_AUDIT_REPAIR_2026-07-22.md`) found all seven Step 2B
+findings (R3-AUDIT-19 through R3-AUDIT-25) materially repaired, with one
+narrow explanatory correction (the protocol's own claim that `1.20` is
+"exactly representable in IEEE-754 binary64" is imprecise — the gate
+itself, exact `==` comparison against the same frozen Python float
+literal, is unchanged). Two hashes central to the frozen predictor/
+qualification contract (`runtime_source_artifact_sha256` over
+`docs/evidence/B2A_R2_ATTEMPT_INDEX_2026-07-22.json`, and
+`generation_config_sha256` over the frozen `generation:` payload) and the
+frozen `2775`-passes/`2776`-fails integer runtime boundary were
+independently reproduced and matched exactly.
+
+```text
+INDEPENDENT STEP 2B RE-AUDIT: PASS
+STEP 3 STAGE-A CPU IMPLEMENTATION AUTHORIZED
+STAGE B FULLKV QUALIFICATION PROHIBITED
+STAGE C B2A-R3 EXECUTION PROHIBITED
+GPU / CUDA / MODEL INFERENCE PROHIBITED
+```
+
+This subsection authorizes exactly Step 3 Stage-A: CPU-only implementation
+of the B2A-R3 candidate manifest/generator, runtime predictor, pure
+qualification evaluator (exercised only against synthetic/injected
+evidence), artifact verifiers, a synthetic-only selected-row freezer, the
+atomic authorization-claim mechanism (exercised only against synthetic
+fixtures — no real claim is ever created by Stage A), a
+separately-constructed `AttemptProvenancePolicy` that does not modify
+`attempt_verification.py`'s historical `REQUIRED_BRANCH` constant or any
+historical B2A-R1/R2 verification, CPU-only dry-run/verification CLI
+commands, and CPU tests for all of the above. It also authorizes
+generating and committing exactly one real, deterministic,
+outcome-blind B2A-R3 candidate manifest
+(`configs/discovery/b2a_r3_candidate_manifest.json`) — built from the
+pinned MATH-500 dataset's already-public content, requiring no model, no
+CUDA, and no GPU.
+
+- Does **not** authorize Stage B (FullKV qualification against real
+  weights), Stage C (B2A-R3 execution), B2B, any CUDA initialization, any
+  R-KV import outside its historical B2A-R1/R2 role, a real qualification
+  artifact, a real selected-manifest replacement, a real authorization
+  claim, or any FaithKV method implementation.
+- Does **not** change any threshold, budget, model, dataset, revision, or
+  gate frozen by §1/§1a-§1g/§4/§4a-§4c/§8/§9. Does not modify
+  `configs/lock.yaml` or the pinned R-KV revision.
+- Does not modify `src/kvcot/discovery/attempt_verification.py`'s
+  historical `REQUIRED_BRANCH` constant, and does not weaken any
+  historical B2A-R1/R2 verification.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

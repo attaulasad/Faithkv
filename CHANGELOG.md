@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-07-23 — B2A-R3 Step 2B independent re-audit PASSED; Step 3 Stage-A CPU implementation begins (GPU REMAINS PROHIBITED)
+
+A genuinely independent re-audit of the Step 2B repair commit found all
+seven Step 2B findings (R3-AUDIT-19 through R3-AUDIT-25) materially
+repaired, with one narrow explanatory correction (the protocol's claim
+that `1.20` is "exactly representable in IEEE-754 binary64" is imprecise
+— the gate itself, exact `==` against the same frozen Python float
+literal, is unchanged). Two hashes central to the frozen predictor/
+qualification contract (`runtime_source_artifact_sha256`,
+`generation_config_sha256`) and the frozen `2775`/`2776` integer runtime
+boundary were independently reproduced and matched exactly. Full detail:
+`docs/B2A_R3_STEP2B_INDEPENDENT_REAUDIT_2026-07-23.md`; `CLAUDE.md` §1h;
+`PLAN.md`/`README.md` current-status sections.
+
+```text
+INDEPENDENT STEP 2B RE-AUDIT: PASS
+STEP 3 STAGE-A CPU IMPLEMENTATION AUTHORIZED
+STAGE B FULLKV QUALIFICATION PROHIBITED
+STAGE C B2A-R3 EXECUTION PROHIBITED
+GPU / CUDA / MODEL INFERENCE PROHIBITED
+```
+
+This authorizes only Step 3 Stage-A CPU implementation (strict B2A-R3
+contracts/schemas, the deterministic candidate generator and one real
+committed candidate manifest, the pure runtime predictor, the pure
+qualification evaluator exercised only against synthetic evidence,
+artifact verifiers, a synthetic-only selected-row freezer, the atomic
+authorization-claim mechanism exercised only against synthetic fixtures, a
+separately-constructed `AttemptProvenancePolicy`, and CPU-only planning/
+verification CLI commands) — implemented in the commits that follow this
+entry on the same branch. It does not authorize Stage B, Stage C, B2B, or
+any FaithKV method implementation.
+
 ## 2026-07-22 — B2A-R3 protocol Step 2B implementation-contract closure: 7 findings resolved (DOCUMENTATION ONLY; STEP 3 BLOCKED; GPU REMAINS PROHIBITED)
 
 A second independent re-audit of the Step 2A repair commit

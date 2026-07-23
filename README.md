@@ -2,37 +2,45 @@
 
 ## Current status (read this first)
 
-**B2A-R3 PROTOCOL: STEP 2B IMPLEMENTATION-CONTRACT CLOSED, INDEPENDENT
-RE-AUDIT REQUIRED (2026-07-22).** A second independent re-audit of the
-Step 2A repair commit (`81e11cb57202e0d4b434aabb347963ae3c34b80b`) found
-the original 18 defects materially repaired, but identified seven further
-implementation-level ambiguities (an unfrozen qualification-condition
-tuple, incomplete artifact schemas, unresolved selected-manifest hash
-semantics, an underspecified candidate-row freezing contract, a
-Markdown-vs-JSON hashing conflict, a non-atomic authorization-claim
-design, and conflated protocol-identity fields). All seven are repaired.
-All 25 findings across both rounds are now repaired. See:
+**B2A-R3 STEP 2B INDEPENDENT RE-AUDIT: PASS — STEP 3 STAGE-A CPU
+IMPLEMENTATION IN PROGRESS (2026-07-23).** A genuinely independent
+re-audit of the Step 2B repair found all seven Step 2B findings
+(R3-AUDIT-19 through R3-AUDIT-25) materially repaired, with one narrow
+explanatory correction (the protocol's own claim that `1.20` is "exactly
+representable in IEEE-754 binary64" is imprecise — the gate itself is
+unchanged: exact `==` against the same frozen Python float literal). Two
+hashes central to the frozen predictor/qualification contract, and the
+frozen `2775`/`2776` integer runtime boundary, were independently
+reproduced and matched exactly. See:
 
-- `docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` — the
-  Step-2B-repaired protocol.
+- `docs/B2A_R3_STEP2B_INDEPENDENT_REAUDIT_2026-07-23.md` — the
+  independent re-audit record.
+- `docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` — the frozen
+  protocol.
 - `docs/B2A_R3_PROTOCOL_AUDIT_REPAIR_2026-07-22.md` — the full
   audit-finding ledger (Step 2A and Step 2B).
 
 ```text
-B2A-R3 STATUS:
-PROTOCOL IMPLEMENTATION CONTRACT REPAIRED (STEP 2B) — INDEPENDENT
-RE-AUDIT REQUIRED
-CPU IMPLEMENTATION BLOCKED
-GPU EXECUTION PROHIBITED
+INDEPENDENT STEP 2B RE-AUDIT: PASS
+STEP 3 STAGE-A CPU IMPLEMENTATION AUTHORIZED
+STAGE B FULLKV QUALIFICATION PROHIBITED
+STAGE C B2A-R3 EXECUTION PROHIBITED
+GPU / CUDA / MODEL INFERENCE PROHIBITED
 ```
 
-The repairing author does not self-certify this protocol — a separate,
-genuinely independent re-audit of this Step 2B repair is the next required
-action before any Stage A (CPU-only) implementation may begin (`CLAUDE.md`
-§1g). Stage B FullKV qualification, Stage C B2A-R3 execution, all GPU/CUDA
-activity, B2B, and FaithKV method implementation remain prohibited. B2A-R2
-(see "Historical status" below) remains a consumed experimental attempt,
-prohibited from rerun, its
+This authorizes only Step 3 Stage-A: CPU-only implementation of the
+B2A-R3 candidate manifest/generator (including one real, committed
+candidate manifest built from the pinned MATH-500 dataset's public
+content), the pure runtime predictor, the pure qualification evaluator
+(exercised only against synthetic evidence), artifact verifiers, a
+synthetic-only selected-row freezer, the atomic authorization-claim
+mechanism (exercised only against synthetic fixtures), a
+separately-constructed `AttemptProvenancePolicy`, CPU-only planning/
+verification CLI commands, and CPU tests for all of the above (`CLAUDE.md`
+§1h). Stage B FullKV qualification, Stage C B2A-R3 execution, all
+GPU/CUDA activity, B2B, and FaithKV method implementation remain
+prohibited. B2A-R2 (see "Historical status" below) remains a consumed
+experimental attempt, prohibited from rerun, its
 `B2A-R2 FINAL VERDICT: FAIL -- B2B BLOCKED` unchanged.
 
 ### Historical status
