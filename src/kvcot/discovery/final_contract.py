@@ -167,22 +167,42 @@ FULLKV_TIMING_EXACT_MULTIPLICITY: dict[str, int] = {
     "fullkv_complete_worker": 1,
 }
 
-# Step 3R4 (docs/B2A_R3_STAGE_A_PROTOCOL_ALIGNMENT_AMENDMENT_2026-07-23.md
-# §4, repairs independent-audit Finding 2): the qualification-only timing
-# vocabulary is now EXACTLY `FULLKV_REQUIRED_TIMING_PHASES` -- the same
-# canonical, already-frozen 10-phase vocabulary `timing_contract_satisfied`
-# uses for the real FullKV worker -- never a second, hand-rolled phase
-# list. The prior version of this module spliced two MEMORY phases
-# (`before_model_load`, `post_load_baseline`) into the TIMING singleton/
-# order lists and placed `answer_verification` before
-# `fullkv_complete_natural_generation`, backwards relative to the
-# canonical worker order. Both defects are removed by deriving the
-# singleton set and phase order directly from `FULLKV_REQUIRED_TIMING_PHASES`
-# rather than maintaining an independent, qualification-only copy.
-_FULLKV_QUALIFICATION_PHASE_ORDER: tuple[str, ...] = FULLKV_REQUIRED_TIMING_PHASES
-_FULLKV_QUALIFICATION_DECODE_INDEX: int = FULLKV_REQUIRED_TIMING_PHASES.index("fullkv_decode")
+# Step 3R4-Repair-2 (docs/B2A_R3_STEP3R4_REPAIR2_2026-07-23.md, repairs
+# Step 3R4 independent-re-audit Blocking Findings 2/3): the prior version of
+# this constant aliased `FULLKV_REQUIRED_TIMING_PHASES` directly, on the
+# claim that qualification's timing vocabulary is "the same canonical,
+# already-frozen 10-phase vocabulary" the real worker emits. That claim was
+# false: the real `run_fullkv_worker` body
+# (`kvcot.discovery.b2a_workers.run_fullkv_worker`) wraps `before_model_load`
+# and `post_load_baseline` with `timer.measure` (via its own `measured()`
+# helper, which times AND memory-samples in one call), so they genuinely
+# appear in `timer.export()` -- the real TIMING stream -- not only in memory
+# evidence. The real worker also runs `answer_verification` INSIDE the
+# `run_natural_pass1` call that `fullkv_complete_natural_generation` wraps,
+# so its record is appended BEFORE (nested within), never after, the
+# enclosing phase's own record. This tuple is now the actual, complete,
+# ordered vocabulary the real worker produces -- independently verified
+# against `tests/unit/discovery/test_b2a_workers_real_bodies.py`'s real
+# (non-fake) `run_fullkv_worker` invocation. `FULLKV_REQUIRED_TIMING_PHASES`
+# itself is UNCHANGED, still used unmodified by the historical two-worker
+# `timing_contract_satisfied` gate below.
+_FULLKV_QUALIFICATION_PHASE_ORDER: tuple[str, ...] = (
+    "before_model_load",
+    "fullkv_worker_startup",
+    "snapshot_tokenizer_resolution",
+    "tokenizer_load",
+    "model_load",
+    "post_load_validation",
+    "post_load_baseline",
+    "fullkv_prefill",
+    "fullkv_decode",
+    "answer_verification",
+    "fullkv_complete_natural_generation",
+    "fullkv_complete_worker",
+)
+_FULLKV_QUALIFICATION_DECODE_INDEX: int = _FULLKV_QUALIFICATION_PHASE_ORDER.index("fullkv_decode")
 _FULLKV_QUALIFICATION_SINGLETON_PHASES: tuple[str, ...] = tuple(
-    phase for phase in FULLKV_REQUIRED_TIMING_PHASES if phase != "fullkv_decode"
+    phase for phase in _FULLKV_QUALIFICATION_PHASE_ORDER if phase != "fullkv_decode"
 )
 
 
@@ -261,10 +281,29 @@ def fullkv_qualification_timing_complete(
     return natural_duration == float(fullkv_wall_seconds)
 
 
-# Step 3R4 §4: memory-phase evidence is validated SEPARATELY from timing,
-# using the existing, unmodified `FULLKV_REQUIRED_MEMORY_PHASES`/
-# `FULLKV_MEMORY_EXACT_MULTIPLICITY` contract -- never spliced into the
-# timing vocabulary above.
+# Step 3R4-Repair-2 (repairs Blocking Finding 3): memory-phase evidence is
+# validated SEPARATELY from timing, but the qualification-only ALLOWED
+# phase set is its own constant, `_FULLKV_QUALIFICATION_MEMORY_PHASES` --
+# never the historical `FULLKV_REQUIRED_MEMORY_PHASES` (5 phases) directly.
+# The real `run_fullkv_worker` body's `measured()` helper calls
+# `memory_meter.observe(phase, ...)` for `tokenizer_load` and
+# `post_load_validation` too (in addition to the 5 historical phases), so
+# real memory evidence legitimately has 7 distinct phases, not 5.
+# `FULLKV_REQUIRED_MEMORY_PHASES`/`FULLKV_MEMORY_EXACT_MULTIPLICITY`
+# themselves are UNCHANGED, still used unmodified by the historical
+# two-worker `memory_contract_satisfied` gate below.
+_FULLKV_QUALIFICATION_MEMORY_PHASES: tuple[str, ...] = (
+    "before_model_load",
+    "tokenizer_load",
+    "model_load",
+    "post_load_validation",
+    "post_load_baseline",
+    "fullkv_complete_natural_generation",
+    "fullkv_complete_worker",
+)
+_FULLKV_QUALIFICATION_MEMORY_EXACT_MULTIPLICITY: dict[str, int] = {
+    phase: 1 for phase in _FULLKV_QUALIFICATION_MEMORY_PHASES
+}
 _FULLKV_QUALIFICATION_MEMORY_REQUIRED_FIELDS: frozenset[str] = frozenset({
     "allocated_before", "reserved_before", "peak_allocated", "peak_reserved",
     "allocated_after", "reserved_after", "reset_point", "synchronized_before",
@@ -289,14 +328,16 @@ def _valid_qualification_memory_record(record: Mapping[str, Any]) -> bool:
 
 def fullkv_qualification_memory_complete(records: Sequence[Mapping[str, Any]]) -> bool:
     """Strictly validate FullKV MEMORY-phase evidence, separately from
-    timing (Step 3R4 §4, repairs independent-audit Finding 2). Requires
-    exactly the phases/multiplicities in ``FULLKV_REQUIRED_MEMORY_PHASES``/
-    ``FULLKV_MEMORY_EXACT_MULTIPLICITY`` -- the same contract
-    ``memory_contract_satisfied`` already uses for the two-worker gate,
-    applied here to one worker's memory evidence alone. Rejects a missing
-    phase, a duplicate singleton, a phase outside the required set (in
-    particular, a TIMING phase smuggled into memory evidence), and a
-    non-finite/negative/boolean-as-int reading."""
+    timing (Step 3R4-Repair-2, repairs Blocking Finding 3). Requires
+    exactly the phases/multiplicities in
+    ``_FULLKV_QUALIFICATION_MEMORY_PHASES``/
+    ``_FULLKV_QUALIFICATION_MEMORY_EXACT_MULTIPLICITY`` -- the real
+    worker's own complete memory-phase vocabulary (7 phases; see the
+    constant's own docstring for why this is not the same 5-phase set
+    ``memory_contract_satisfied`` uses for the historical two-worker gate).
+    Rejects a missing phase, a duplicate singleton, a phase outside the
+    required set (in particular, a TIMING phase smuggled into memory
+    evidence), and a non-finite/negative/boolean-as-int reading."""
     if not isinstance(records, Sequence) or isinstance(records, (str, bytes)) or not records:
         return False
     counts: dict[str, int] = {}
@@ -304,13 +345,13 @@ def fullkv_qualification_memory_complete(records: Sequence[Mapping[str, Any]]) -
         if not _valid_qualification_memory_record(record):
             return False
         phase = record.get("phase")
-        if not isinstance(phase, str) or phase not in FULLKV_REQUIRED_MEMORY_PHASES:
+        if not isinstance(phase, str) or phase not in _FULLKV_QUALIFICATION_MEMORY_PHASES:
             return False
         counts[phase] = counts.get(phase, 0) + 1
-    for phase, expected in FULLKV_MEMORY_EXACT_MULTIPLICITY.items():
+    for phase, expected in _FULLKV_QUALIFICATION_MEMORY_EXACT_MULTIPLICITY.items():
         if counts.get(phase, 0) != expected:
             return False
-    if set(counts) != set(FULLKV_REQUIRED_MEMORY_PHASES):
+    if set(counts) != set(_FULLKV_QUALIFICATION_MEMORY_PHASES):
         return False
     return True
 

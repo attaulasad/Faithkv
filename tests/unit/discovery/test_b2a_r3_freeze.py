@@ -98,6 +98,10 @@ def _outcome_for(candidate_manifest, ordinal: int, *, qualified: bool):
 
 
 def _qualification_artifact(candidate_manifest, attempted, *, selection_status, first_ordinal, selected_unique_id):
+    from kvcot.discovery.b2a_r3_artifacts import (
+        STOPPED_REASON_ALL_CANDIDATES_EXHAUSTED,
+        STOPPED_REASON_FIRST_PASS,
+    )
     from kvcot.discovery.b2a_r3_contract import (
         BUDGET as C_BUDGET,
         CANDIDATE_MANIFEST_PATH,
@@ -111,6 +115,7 @@ def _qualification_artifact(candidate_manifest, attempted, *, selection_status, 
         MODEL_NAME as C_MODEL_NAME,
         MODEL_REVISION as C_MODEL_REVISION,
         QUALIFICATION_ARTIFACT_SCHEMA_VERSION,
+        QUALIFICATION_CANDIDATE_LIMIT,
         QUALIFICATION_PROTOCOL_VERSION,
         RUNTIME_PREDICTOR_VERSION,
         RUNTIME_SOURCE_ARTIFACT_PATH,
@@ -145,7 +150,12 @@ def _qualification_artifact(candidate_manifest, attempted, *, selection_status, 
         "first_passing_candidate_ordinal": first_ordinal,
         "selected_unique_id": selected_unique_id,
         "selection_status": selection_status,
-        "qualification_stopped_reason": "first_pass" if first_ordinal is not None else "all_candidates_exhausted",
+        "qualification_stopped_reason": (
+            STOPPED_REASON_FIRST_PASS if first_ordinal is not None else STOPPED_REASON_ALL_CANDIDATES_EXHAUSTED
+        ),
+        "authorized_maximum_candidates": (
+            QUALIFICATION_CANDIDATE_LIMIT if first_ordinal is not None else len(attempted)
+        ),
         "attempt_started_at_utc": "2026-07-23T00:00:00+00:00",
         "attempt_completed_at_utc": "2026-07-23T00:10:00+00:00",
     }

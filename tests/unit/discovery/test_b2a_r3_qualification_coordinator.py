@@ -23,7 +23,11 @@ from kvcot.discovery.b2a_r3_artifacts import (
     verify_qualification_artifact,
     write_qualification_artifact_atomic,
 )
-from kvcot.discovery.b2a_r3_contract import CANDIDATE_MANIFEST_PATH, PER_CANDIDATE_WORKER_TIMEOUT_SECONDS
+from kvcot.discovery.b2a_r3_contract import (
+    CANDIDATE_MANIFEST_PATH,
+    PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
+    QUALIFICATION_CANDIDATE_LIMIT,
+)
 from kvcot.discovery.b2a_r3_qualification import build_qualification_outcome
 from kvcot.discovery.b2a_r3_qualification_coordinator import (
     CandidateWorkerTimeout,
@@ -63,12 +67,16 @@ def _runner(qualifies: dict[int, bool] | None = None, calls: list[int] | None = 
     qualifies = qualifies or {}
     timeout_at = timeout_at or set()
 
-    def runner(ordinal: int, timeout_seconds: int) -> FullKVWorkerResultR3:
+    def runner(ordinal: int, timeout_seconds) -> FullKVWorkerResultR3:
         if calls is not None:
             calls.append(ordinal)
         if ordinal in timeout_at:
             raise CandidateWorkerTimeout(f"candidate {ordinal} timed out")
-        assert timeout_seconds == PER_CANDIDATE_WORKER_TIMEOUT_SECONDS
+        # Step 3R4-Repair-2 Finding 4: the coordinator now caps the timeout
+        # it hands the worker at whatever authorized phase-wide wall time
+        # actually remains -- it may be LESS than the frozen per-candidate
+        # constant, but must never exceed it.
+        assert timeout_seconds <= PER_CANDIDATE_WORKER_TIMEOUT_SECONDS
         overrides = {} if qualifies.get(ordinal, True) else {"natural_answer_status": "incorrect"}
         return _valid_worker_result(ordinal, **overrides)
 
@@ -247,6 +255,73 @@ def test_phase_wide_time_exhausted_before_next_candidate_no_additional_call(tmp_
     assert artifact["qualification_stopped_reason"] == STOPPED_REASON_PHASE_WALL_TIME_EXHAUSTED
 
 
+def test_effective_worker_timeout_capped_at_remaining_phase_time(tmp_path):
+    """Step 3R4-Repair-2 Finding 4's own example: authorized phase limit
+    600s, 590s already elapsed before this candidate launches -- the
+    worker must be capped at the 10s actually remaining, never the full
+    7200s frozen per-candidate timeout."""
+    _payload, context, _document, candidate_manifest, _git_state = _verified_stage_b(
+        tmp_path, document_overrides={"phase_wall_time_limit_seconds": 600}
+    )
+    timeouts: list[float] = []
+
+    def runner(ordinal, timeout_seconds):
+        timeouts.append(timeout_seconds)
+        return _valid_worker_result(ordinal, natural_answer_status="incorrect")
+
+    clock = _sequence_clock([0.0, 590.0, 601.0, 602.0])
+    artifact = run_b2a_r3_qualification_coordinator(
+        candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
+        verified_authorization_context=context, fullkv_worker_runner=runner,
+        clock=clock, per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
+    )
+    assert timeouts == [10.0]
+    assert artifact["qualification_stopped_reason"] == STOPPED_REASON_PHASE_WALL_TIME_EXHAUSTED
+
+
+def test_effective_worker_timeout_never_exceeds_the_frozen_per_candidate_cap(tmp_path):
+    """The other direction: when the remaining phase time is LARGER than
+    the frozen per-candidate timeout, the worker still gets only the
+    frozen cap, never the (larger) remaining phase time."""
+    _payload, context, _document, candidate_manifest, _git_state = _verified_stage_b(
+        tmp_path, document_overrides={"phase_wall_time_limit_seconds": 36000}
+    )
+    timeouts: list[float] = []
+
+    def runner(ordinal, timeout_seconds):
+        timeouts.append(timeout_seconds)
+        return _valid_worker_result(ordinal)  # qualifies immediately -- stop after one call
+
+    artifact = run_b2a_r3_qualification_coordinator(
+        candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
+        verified_authorization_context=context, fullkv_worker_runner=runner,
+        clock=_FakeClock(), per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
+    )
+    assert timeouts == [PER_CANDIDATE_WORKER_TIMEOUT_SECONDS]
+    assert artifact["qualification_stopped_reason"] == STOPPED_REASON_FIRST_PASS
+
+
+def test_post_worker_check_relabels_stop_reason_on_last_candidate(tmp_path):
+    """Finding 4: even when the single authorized candidate is the LAST
+    one the loop will ever run, a phase deadline blown during/after that
+    candidate must be reported as phase_wall_time_exhausted -- never
+    mislabeled as all_authorized_candidates_exhausted just because the
+    `for` loop also happened to run out of candidates at the same time."""
+    _payload, context, _document, candidate_manifest, _git_state = _verified_stage_b(
+        tmp_path, document_overrides={"maximum_candidates": 1, "phase_wall_time_limit_seconds": 600}
+    )
+    calls: list[int] = []
+    clock = _sequence_clock([0.0, 100.0, 601.0, 602.0])
+    artifact = run_b2a_r3_qualification_coordinator(
+        candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
+        verified_authorization_context=context,
+        fullkv_worker_runner=_runner(qualifies={0: False}, calls=calls),
+        clock=clock, per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
+    )
+    assert calls == [0]
+    assert artifact["qualification_stopped_reason"] == STOPPED_REASON_PHASE_WALL_TIME_EXHAUSTED
+
+
 def test_no_production_files_written(tmp_path):
     from kvcot.discovery.b2a_r3_contract import QUALIFICATION_ARTIFACT_PATH
 
@@ -342,7 +417,7 @@ def test_builder_produces_verifiable_artifact_on_first_pass():
     attempted = [_outcome(0, qualified=False), _outcome(1, qualified=True)]
     artifact = build_qualification_artifact(
         attempted_outcomes=attempted, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA,
-        stopped_reason=STOPPED_REASON_FIRST_PASS,
+        stopped_reason=STOPPED_REASON_FIRST_PASS, authorized_maximum_candidates=QUALIFICATION_CANDIDATE_LIMIT,
         attempt_started_at_utc="2026-07-23T00:00:00+00:00", attempt_completed_at_utc="2026-07-23T00:05:00+00:00",
     )
     verify_qualification_artifact(artifact, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA)
@@ -356,7 +431,7 @@ def test_builder_rejects_non_contiguous_ordinals():
     with pytest.raises(QualificationArtifactBuildRefused):
         build_qualification_artifact(
             attempted_outcomes=attempted, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA,
-            stopped_reason=STOPPED_REASON_ALL_CANDIDATES_EXHAUSTED,
+            stopped_reason=STOPPED_REASON_ALL_CANDIDATES_EXHAUSTED, authorized_maximum_candidates=len(attempted),
             attempt_started_at_utc="2026-07-23T00:00:00+00:00", attempt_completed_at_utc="2026-07-23T00:05:00+00:00",
         )
 
@@ -368,6 +443,7 @@ def test_builder_rejects_over_authorized_candidate_count():
         build_qualification_artifact(
             attempted_outcomes=attempted, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA,
             stopped_reason=STOPPED_REASON_ALL_CANDIDATES_EXHAUSTED,
+            authorized_maximum_candidates=QUALIFICATION_CANDIDATE_LIMIT,
             attempt_started_at_utc="2026-07-23T00:00:00+00:00", attempt_completed_at_utc="2026-07-23T00:05:00+00:00",
         )
 
@@ -379,6 +455,7 @@ def test_builder_rejects_stopped_reason_selection_disagreement():
         build_qualification_artifact(
             attempted_outcomes=attempted, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA,
             stopped_reason=STOPPED_REASON_ALL_CANDIDATES_EXHAUSTED,  # WRONG -- ordinal 0 qualified
+            authorized_maximum_candidates=len(attempted),
             attempt_started_at_utc="2026-07-23T00:00:00+00:00", attempt_completed_at_utc="2026-07-23T00:05:00+00:00",
         )
 
@@ -389,7 +466,36 @@ def test_builder_rejects_unknown_stopped_reason():
     with pytest.raises(QualificationArtifactBuildRefused):
         build_qualification_artifact(
             attempted_outcomes=attempted, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA,
-            stopped_reason="some_made_up_reason",
+            stopped_reason="some_made_up_reason", authorized_maximum_candidates=QUALIFICATION_CANDIDATE_LIMIT,
+            attempt_started_at_utc="2026-07-23T00:00:00+00:00", attempt_completed_at_utc="2026-07-23T00:05:00+00:00",
+        )
+
+
+def test_builder_rejects_unknown_authorized_maximum_candidates():
+    """Step 3R4-Repair-2 Finding 6: `authorized_maximum_candidates` itself
+    must be a valid int in 1..QUALIFICATION_CANDIDATE_LIMIT."""
+    manifest = _candidate_manifest()
+    attempted = [_outcome(0, qualified=True)]
+    for bad_value in (0, 9, -1, True):
+        with pytest.raises(QualificationArtifactBuildRefused):
+            build_qualification_artifact(
+                attempted_outcomes=attempted, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA,
+                stopped_reason=STOPPED_REASON_FIRST_PASS, authorized_maximum_candidates=bad_value,
+                attempt_started_at_utc="2026-07-23T00:00:00+00:00",
+                attempt_completed_at_utc="2026-07-23T00:05:00+00:00",
+            )
+
+
+def test_builder_rejects_exhausted_reason_when_count_disagrees_with_authorization():
+    """Finding 6: `stopped_reason='all_authorized_candidates_exhausted'` is
+    refused unless the attempted count equals the authorized limit exactly
+    -- neither fewer nor more."""
+    manifest = _candidate_manifest()
+    attempted = [_outcome(0, qualified=False)]
+    with pytest.raises(QualificationArtifactBuildRefused):
+        build_qualification_artifact(
+            attempted_outcomes=attempted, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA,
+            stopped_reason=STOPPED_REASON_ALL_CANDIDATES_EXHAUSTED, authorized_maximum_candidates=3,
             attempt_started_at_utc="2026-07-23T00:00:00+00:00", attempt_completed_at_utc="2026-07-23T00:05:00+00:00",
         )
 
@@ -402,7 +508,7 @@ def test_builder_rejects_tampered_outcome_via_semantic_rederivation():
     with pytest.raises(QualificationArtifactBuildRefused):
         build_qualification_artifact(
             attempted_outcomes=[tampered], candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA,
-            stopped_reason=STOPPED_REASON_FIRST_PASS,
+            stopped_reason=STOPPED_REASON_FIRST_PASS, authorized_maximum_candidates=QUALIFICATION_CANDIDATE_LIMIT,
             attempt_started_at_utc="2026-07-23T00:00:00+00:00", attempt_completed_at_utc="2026-07-23T00:05:00+00:00",
         )
 
@@ -415,11 +521,13 @@ def test_atomic_writer_writes_and_round_trips(tmp_path):
     attempted = [_outcome(0, qualified=True)]
     artifact = build_qualification_artifact(
         attempted_outcomes=attempted, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA,
-        stopped_reason=STOPPED_REASON_FIRST_PASS,
+        stopped_reason=STOPPED_REASON_FIRST_PASS, authorized_maximum_candidates=QUALIFICATION_CANDIDATE_LIMIT,
         attempt_started_at_utc="2026-07-23T00:00:00+00:00", attempt_completed_at_utc="2026-07-23T00:05:00+00:00",
     )
     output_path = tmp_path / "qualification.json"
-    write_qualification_artifact_atomic(artifact, output_path=output_path)
+    write_qualification_artifact_atomic(
+        artifact, output_path=output_path, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA,
+    )
     written = json.loads(output_path.read_text(encoding="utf-8"))
     assert written == artifact
 
@@ -429,19 +537,55 @@ def test_atomic_writer_refuses_overwrite(tmp_path):
     attempted = [_outcome(0, qualified=True)]
     artifact = build_qualification_artifact(
         attempted_outcomes=attempted, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA,
-        stopped_reason=STOPPED_REASON_FIRST_PASS,
+        stopped_reason=STOPPED_REASON_FIRST_PASS, authorized_maximum_candidates=QUALIFICATION_CANDIDATE_LIMIT,
         attempt_started_at_utc="2026-07-23T00:00:00+00:00", attempt_completed_at_utc="2026-07-23T00:05:00+00:00",
     )
     output_path = tmp_path / "qualification.json"
-    write_qualification_artifact_atomic(artifact, output_path=output_path)
+    write_qualification_artifact_atomic(
+        artifact, output_path=output_path, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA,
+    )
     with pytest.raises(QualificationArtifactWriteRefused):
-        write_qualification_artifact_atomic(artifact, output_path=output_path)
+        write_qualification_artifact_atomic(
+            artifact, output_path=output_path, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA,
+        )
 
 
 def test_atomic_writer_refuses_invalid_artifact(tmp_path):
+    manifest = _candidate_manifest()
     with pytest.raises(Exception):
-        write_qualification_artifact_atomic({"not": "a valid artifact"}, output_path=tmp_path / "x.json")
+        write_qualification_artifact_atomic(
+            {"not": "a valid artifact"}, output_path=tmp_path / "x.json",
+            candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA,
+        )
     assert not (tmp_path / "x.json").exists()
+
+
+def test_atomic_writer_refuses_semantically_fabricated_but_canonically_rehashed_artifact(tmp_path):
+    """Step 3R4-Repair-2 Finding 5: a canonically-rehashed artifact whose
+    outcome fields are internally self-consistent but semantically
+    fabricated (never actually reproducible from raw evidence) must be
+    rejected by the writer -- not just a shallow schema/self-hash check."""
+    manifest = _candidate_manifest()
+    attempted = [_outcome(0, qualified=True)]
+    artifact = build_qualification_artifact(
+        attempted_outcomes=attempted, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA,
+        stopped_reason=STOPPED_REASON_FIRST_PASS, authorized_maximum_candidates=QUALIFICATION_CANDIDATE_LIMIT,
+        attempt_started_at_utc="2026-07-23T00:00:00+00:00", attempt_completed_at_utc="2026-07-23T00:05:00+00:00",
+    )
+    tampered = dict(artifact)
+    tampered["attempted"] = [dict(tampered["attempted"][0])]
+    tampered["attempted"][0]["answer_verification_status"] = "incorrect"
+    tampered.pop("canonical_sha256")
+    from kvcot.utils.hashing import sha256_json
+
+    tampered["canonical_sha256"] = sha256_json(tampered)
+
+    with pytest.raises(Exception):
+        write_qualification_artifact_atomic(
+            tampered, output_path=tmp_path / "tampered.json",
+            candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA,
+        )
+    assert not (tmp_path / "tampered.json").exists()
 
 
 def test_atomic_writer_never_defaults_to_production_path():
@@ -449,6 +593,8 @@ def test_atomic_writer_never_defaults_to_production_path():
 
     signature = inspect.signature(write_qualification_artifact_atomic)
     assert signature.parameters["output_path"].default is inspect.Parameter.empty
+    assert signature.parameters["candidate_manifest"].default is inspect.Parameter.empty
+    assert signature.parameters["expected_config_sha256"].default is inspect.Parameter.empty
 
 
 def test_coordinator_module_import_never_touches_rkv_torch_or_transformers():

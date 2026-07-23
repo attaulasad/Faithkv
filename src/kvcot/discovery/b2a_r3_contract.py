@@ -44,14 +44,27 @@ CANDIDATE_MANIFEST_ARTIFACT_SCHEMA_VERSION: Final[str] = "faithkv-b2a-r3-candida
 CANDIDATE_ORDER_PROTOCOL_VERSION: Final[str] = "faithkv-b2a-r3-row-order-v1"
 
 # Step 3R4 (dated 2026-07-23,
-# docs/B2A_R3_STAGE_A_PROTOCOL_ALIGNMENT_AMENDMENT_2026-07-23.md) bumps
+# docs/B2A_R3_STAGE_A_PROTOCOL_ALIGNMENT_AMENDMENT_2026-07-23.md) bumped
 # these two exactly -- v1 to v2. No real qualification artifact has ever
 # been produced under v1 (protocol Sec 14.1 forbids it under Stage A), so
-# this version bump reinterprets nothing historical. Every other
+# that version bump reinterpreted nothing historical. Every other
 # per-artifact identity field below (candidate manifest, selection
 # provenance, authorization claim, runtime predictor, selection protocol)
-# is UNCHANGED by Step 3R4.
-QUALIFICATION_ARTIFACT_SCHEMA_VERSION: Final[str] = "faithkv-b2a-r3-qualification-artifact-v2"
+# was UNCHANGED by Step 3R4.
+#
+# Step 3R4-Repair-2 (dated 2026-07-23,
+# docs/B2A_R3_STEP3R4_REPAIR2_2026-07-23.md, repairs independent-re-audit
+# Blocking Finding 6) bumps `QUALIFICATION_ARTIFACT_SCHEMA_VERSION` again --
+# v2 to v3 -- because `QualificationArtifactR3` gained a new REQUIRED field,
+# `authorized_maximum_candidates`, so that `qualification_stopped_reason`
+# ("all_authorized_candidates_exhausted" in particular) can be
+# independently verified against the actual authorization limit rather than
+# trusted as a bare, unconstrained string. `QUALIFICATION_PROTOCOL_VERSION`
+# (the qualification EVALUATION protocol -- the 27 conditions and their
+# derivation) is UNCHANGED by this repair; no real qualification artifact
+# has ever been produced under v2 either (Stage B remains blocked), so this
+# bump likewise reinterprets nothing historical.
+QUALIFICATION_ARTIFACT_SCHEMA_VERSION: Final[str] = "faithkv-b2a-r3-qualification-artifact-v3"
 QUALIFICATION_PROTOCOL_VERSION: Final[str] = "faithkv-b2a-r3-qualification-v2"
 RUNTIME_PREDICTOR_VERSION: Final[str] = "faithkv-b2a-r3-runtime-predictor-v1"
 

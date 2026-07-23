@@ -324,7 +324,11 @@ def test_qualification_outcome_v2_rejects_v1_redundant_fields():
 def test_qualification_artifact_versions_are_v2():
     from kvcot.discovery.b2a_r3_contract import QUALIFICATION_ARTIFACT_SCHEMA_VERSION, QUALIFICATION_PROTOCOL_VERSION
 
-    assert QUALIFICATION_ARTIFACT_SCHEMA_VERSION == "faithkv-b2a-r3-qualification-artifact-v2"
+    # Step 3R4-Repair-2 (repairs Blocking Finding 6) bumped the ARTIFACT
+    # schema version again -- v2 to v3 -- for the new
+    # `authorized_maximum_candidates` required field. The qualification
+    # EVALUATION protocol version (the 27 conditions) is unchanged.
+    assert QUALIFICATION_ARTIFACT_SCHEMA_VERSION == "faithkv-b2a-r3-qualification-artifact-v3"
     assert QUALIFICATION_PROTOCOL_VERSION == "faithkv-b2a-r3-qualification-v2"
 
 

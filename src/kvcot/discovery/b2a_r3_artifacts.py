@@ -76,6 +76,24 @@ SELECTION_STATUS_SELECTED = "selected"
 SELECTION_STATUS_NONE_QUALIFIED = "no_candidate_qualified"
 _VALID_SELECTION_STATUSES = (SELECTION_STATUS_SELECTED, SELECTION_STATUS_NONE_QUALIFIED)
 
+# Step 3R4-Repair-2 (repairs independent-re-audit Blocking Finding 6): moved
+# above `QualificationArtifactR3` (from their original position further
+# below, alongside `build_qualification_artifact`) so the schema's own
+# field/model validators can reference them directly -- a stopped reason is
+# now validated at the SCHEMA level, never left as a bare, unconstrained
+# `str` a caller could set to anything and still pass
+# `QualificationArtifactR3.model_validate`.
+STOPPED_REASON_FIRST_PASS: Final[str] = "first_pass"
+STOPPED_REASON_ALL_CANDIDATES_EXHAUSTED: Final[str] = "all_authorized_candidates_exhausted"
+STOPPED_REASON_PHASE_WALL_TIME_EXHAUSTED: Final[str] = "phase_wall_time_exhausted"
+STOPPED_REASON_CANDIDATE_WORKER_TIMEOUT: Final[str] = "candidate_worker_timeout"
+ALLOWED_QUALIFICATION_STOPPED_REASONS: Final[frozenset[str]] = frozenset({
+    STOPPED_REASON_FIRST_PASS,
+    STOPPED_REASON_ALL_CANDIDATES_EXHAUSTED,
+    STOPPED_REASON_PHASE_WALL_TIME_EXHAUSTED,
+    STOPPED_REASON_CANDIDATE_WORKER_TIMEOUT,
+})
+
 
 class ArtifactVerificationRefused(ValueError):
     """Any hard rejection during qualification-artifact verification."""
@@ -120,6 +138,13 @@ class QualificationArtifactR3(BaseModel):
     selected_unique_id: str | None
     selection_status: str
     qualification_stopped_reason: str
+    # Step 3R4-Repair-2 Finding 6: the AUTHORIZED candidate limit this
+    # attempt actually ran under (`VerifiedAuthorizationContext
+    # .maximum_candidates`, sourced from the parsed authorization document),
+    # persisted so `qualification_stopped_reason ==
+    # "all_authorized_candidates_exhausted"` can be independently checked
+    # against it rather than trusted as a bare, self-reported string.
+    authorized_maximum_candidates: int
     attempt_started_at_utc: str
     attempt_completed_at_utc: str
     canonical_sha256: str
@@ -134,6 +159,25 @@ class QualificationArtifactR3(BaseModel):
     def _iso8601(cls, v: str, info: Any) -> str:
         if not _parseable_iso8601(v):
             raise ValueError(f"{info.field_name} must be a parseable ISO 8601 timestamp, got {v!r}")
+        return v
+
+    @field_validator("qualification_stopped_reason")
+    @classmethod
+    def _valid_stopped_reason(cls, v: str) -> str:
+        if v not in ALLOWED_QUALIFICATION_STOPPED_REASONS:
+            raise ValueError(
+                f"qualification_stopped_reason must be one of {sorted(ALLOWED_QUALIFICATION_STOPPED_REASONS)}, "
+                f"got {v!r}"
+            )
+        return v
+
+    @field_validator("authorized_maximum_candidates")
+    @classmethod
+    def _maximum_candidates_in_range(cls, v: int) -> int:
+        if isinstance(v, bool) or not (1 <= v <= QUALIFICATION_CANDIDATE_LIMIT):
+            raise ValueError(
+                f"authorized_maximum_candidates must be an int in 1..{QUALIFICATION_CANDIDATE_LIMIT}, got {v!r}"
+            )
         return v
 
     @model_validator(mode="after")
@@ -171,6 +215,25 @@ class QualificationArtifactR3(BaseModel):
             raise ValueError("attempted_candidate_count disagrees with len(attempted)")
         if self.selection_status not in _VALID_SELECTION_STATUSES:
             raise ValueError(f"selection_status must be one of {_VALID_SELECTION_STATUSES}")
+
+        # Step 3R4-Repair-2 Finding 6: never attempt more candidates than
+        # this attempt was actually authorized for, and "exhausted" must
+        # mean EXACTLY the authorized count was attempted -- never fewer
+        # (a stop for some other reason mislabeled as exhaustion) and never
+        # more (already impossible via the count check above, restated here
+        # for a defect that would otherwise only surface indirectly).
+        if self.attempted_candidate_count > self.authorized_maximum_candidates:
+            raise ValueError(
+                f"attempted_candidate_count={self.attempted_candidate_count} exceeds "
+                f"authorized_maximum_candidates={self.authorized_maximum_candidates}"
+            )
+        if self.qualification_stopped_reason == STOPPED_REASON_ALL_CANDIDATES_EXHAUSTED:
+            if self.attempted_candidate_count != self.authorized_maximum_candidates:
+                raise ValueError(
+                    "qualification_stopped_reason='all_authorized_candidates_exhausted' but "
+                    f"attempted_candidate_count={self.attempted_candidate_count} != "
+                    f"authorized_maximum_candidates={self.authorized_maximum_candidates}"
+                )
 
         attempted_dicts = [outcome.model_dump(mode="json") for outcome in self.attempted]
         try:
@@ -257,30 +320,19 @@ class QualificationArtifactWriteRefused(RuntimeError):
     existing (and therefore immutable) artifact file."""
 
 
-STOPPED_REASON_FIRST_PASS: Final[str] = "first_pass"
-STOPPED_REASON_ALL_CANDIDATES_EXHAUSTED: Final[str] = "all_authorized_candidates_exhausted"
-STOPPED_REASON_PHASE_WALL_TIME_EXHAUSTED: Final[str] = "phase_wall_time_exhausted"
-STOPPED_REASON_CANDIDATE_WORKER_TIMEOUT: Final[str] = "candidate_worker_timeout"
-ALLOWED_QUALIFICATION_STOPPED_REASONS: Final[frozenset[str]] = frozenset({
-    STOPPED_REASON_FIRST_PASS,
-    STOPPED_REASON_ALL_CANDIDATES_EXHAUSTED,
-    STOPPED_REASON_PHASE_WALL_TIME_EXHAUSTED,
-    STOPPED_REASON_CANDIDATE_WORKER_TIMEOUT,
-})
-
-
 def build_qualification_artifact(
     *,
     attempted_outcomes: list[dict[str, Any] | CandidateQualificationOutcomeR3],
     candidate_manifest: dict[str, Any],
     expected_config_sha256: str,
     stopped_reason: str,
+    authorized_maximum_candidates: int,
     attempt_started_at_utc: str,
     attempt_completed_at_utc: str,
 ) -> dict[str, Any]:
-    """Builds a complete, hash-verified, v2 qualification artifact
-    (protocol §12.6, Step 3R4 amendment §3.2) from a sequence of already-
-    produced attempted outcomes.
+    """Builds a complete, hash-verified, v3 qualification artifact
+    (protocol §12.6, Step 3R4-Repair-2) from a sequence of already-produced
+    attempted outcomes.
 
     Every outcome is independently semantically re-derived (never trusted
     as pre-validated); ordinals must be exactly `0..len(attempted)-1`
@@ -292,15 +344,43 @@ def build_qualification_artifact(
     tokenizer/budget/version) -- every one of those is populated here from
     the frozen contract constants and the independently-verified candidate
     manifest, never from a parameter.
+
+    Step 3R4-Repair-2 Finding 6: `authorized_maximum_candidates` is now a
+    REQUIRED parameter -- the caller (the qualification coordinator) must
+    supply the exact `VerifiedAuthorizationContext.maximum_candidates` this
+    attempt actually ran under, never an unconstrained value. Never more
+    outcomes than that limit may be attempted, and
+    `stopped_reason='all_authorized_candidates_exhausted'` is refused
+    outright unless `len(attempted_outcomes)` equals it exactly -- this is
+    the same invariant `QualificationArtifactR3`'s own schema validator
+    enforces on the constructed payload, checked here too so a caller gets
+    a clear `QualificationArtifactBuildRefused` instead of a raw pydantic
+    error.
     """
     if stopped_reason not in ALLOWED_QUALIFICATION_STOPPED_REASONS:
         raise QualificationArtifactBuildRefused(
             f"stopped_reason must be one of {sorted(ALLOWED_QUALIFICATION_STOPPED_REASONS)}, got {stopped_reason!r}"
         )
-    if len(attempted_outcomes) > QUALIFICATION_CANDIDATE_LIMIT:
+    if isinstance(authorized_maximum_candidates, bool) or not (
+        1 <= authorized_maximum_candidates <= QUALIFICATION_CANDIDATE_LIMIT
+    ):
         raise QualificationArtifactBuildRefused(
-            f"attempted {len(attempted_outcomes)} candidates, exceeding the "
-            f"{QUALIFICATION_CANDIDATE_LIMIT}-candidate protocol limit"
+            f"authorized_maximum_candidates must be an int in 1..{QUALIFICATION_CANDIDATE_LIMIT}, "
+            f"got {authorized_maximum_candidates!r}"
+        )
+    if len(attempted_outcomes) > authorized_maximum_candidates:
+        raise QualificationArtifactBuildRefused(
+            f"attempted {len(attempted_outcomes)} candidates, exceeding the authorized limit of "
+            f"{authorized_maximum_candidates}"
+        )
+    if (
+        stopped_reason == STOPPED_REASON_ALL_CANDIDATES_EXHAUSTED
+        and len(attempted_outcomes) != authorized_maximum_candidates
+    ):
+        raise QualificationArtifactBuildRefused(
+            "stopped_reason='all_authorized_candidates_exhausted' but "
+            f"len(attempted_outcomes)={len(attempted_outcomes)} != "
+            f"authorized_maximum_candidates={authorized_maximum_candidates}"
         )
 
     manifest = verify_candidate_manifest_structure(
@@ -377,6 +457,7 @@ def build_qualification_artifact(
         "selected_unique_id": selected_unique_id,
         "selection_status": selection_status,
         "qualification_stopped_reason": stopped_reason,
+        "authorized_maximum_candidates": authorized_maximum_candidates,
         "attempt_started_at_utc": attempt_started_at_utc,
         "attempt_completed_at_utc": attempt_completed_at_utc,
     }
@@ -385,20 +466,44 @@ def build_qualification_artifact(
     return payload
 
 
-def write_qualification_artifact_atomic(artifact: dict[str, Any], *, output_path: str | Path) -> None:
+def write_qualification_artifact_atomic(
+    artifact: dict[str, Any],
+    *,
+    output_path: str | Path,
+    candidate_manifest: dict[str, Any],
+    expected_config_sha256: str,
+) -> None:
     """Atomic write, following the same discipline as
-    `kvcot.discovery.b2a_r3_candidates.atomic_write_json`, plus two
+    `kvcot.discovery.b2a_r3_candidates.atomic_write_json`, plus three
     stricter rules specific to this immutable artifact: the artifact is
-    fully strictly re-validated before writing, and an existing file at
-    `output_path` is never overwritten -- the protocol treats a written
-    qualification artifact as immutable once it exists.
+    FULLY semantically re-verified (not just schema-validated) before
+    writing, byte-for-byte re-read and fully semantically re-verified again
+    after writing, and an existing file at `output_path` is never
+    overwritten -- the protocol treats a written qualification artifact as
+    immutable once it exists.
+
+    Step 3R4-Repair-2 Finding 5: the prior version of this function only
+    checked the canonical self-hash and top-level schema
+    (`QualificationArtifactR3.model_validate`) -- both are transport
+    integrity checks. A canonically-rehashed artifact with internally
+    self-consistent but semantically FABRICATED outcome fields (e.g. a
+    condition map that does not actually reproduce from its own raw
+    evidence) would satisfy that shallow check. `candidate_manifest`/
+    `expected_config_sha256` are now REQUIRED parameters so this function
+    can call the one authoritative semantic verifier,
+    `verify_qualification_artifact` (which independently re-derives every
+    attempted outcome's 27 conditions via
+    `kvcot.discovery.b2a_r3_qualification.rederive_and_verify_qualification_outcome`
+    and replays first-pass selection), both BEFORE writing and again on the
+    artifact actually read back from disk.
 
     Never defaults to the real production path -- `output_path` is always
     an explicit, caller-supplied argument; Stage-A tests always pass a
     `tmp_path`-rooted path.
     """
-    verify_canonical_sha256(artifact)
-    QualificationArtifactR3.model_validate(artifact)  # full schema verify before writing
+    verify_qualification_artifact(
+        artifact, candidate_manifest=candidate_manifest, expected_config_sha256=expected_config_sha256
+    )
 
     target = Path(output_path)
     if target.exists():
@@ -410,5 +515,6 @@ def write_qualification_artifact_atomic(artifact: dict[str, Any], *, output_path
     atomic_write_json(target, artifact)
 
     written = json.loads(target.read_text(encoding="utf-8"))
-    verify_canonical_sha256(written)
-    QualificationArtifactR3.model_validate(written)
+    verify_qualification_artifact(
+        written, candidate_manifest=candidate_manifest, expected_config_sha256=expected_config_sha256
+    )

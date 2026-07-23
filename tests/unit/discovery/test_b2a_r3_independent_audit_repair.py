@@ -73,17 +73,23 @@ def _rehash(payload: dict) -> dict:
 
 
 def _timing() -> list[dict]:
-    """Step 3R4 (repairs independent-audit Finding 2): the TIMING-only
-    canonical order (`FULLKV_REQUIRED_TIMING_PHASES`) -- no memory phase
-    (`before_model_load`/`post_load_baseline`) is ever mixed in here; see
-    `_memory()` below for those, validated separately."""
-    # Six singleton phases before the decode loop, one second apart.
+    """Step 3R4-Repair-2 (repairs independent-re-audit Blocking Finding 2):
+    the TIMING evidence the REAL `run_fullkv_worker` body actually emits --
+    `before_model_load` and `post_load_baseline` genuinely appear here (its
+    `measured()` helper times AND memory-samples in one call), and
+    `answer_verification` is nested BEFORE `fullkv_complete_natural_generation`
+    (called from inside the `run_natural_pass1` call that phase wraps),
+    never after. See `_memory()` below for memory-phase evidence, validated
+    separately."""
+    # Seven singleton phases before the decode loop, one second apart.
     phases = (
+        "before_model_load",
         "fullkv_worker_startup",
         "snapshot_tokenizer_resolution",
         "tokenizer_load",
         "model_load",
         "post_load_validation",
+        "post_load_baseline",
         "fullkv_prefill",
     )
     records = []
@@ -104,8 +110,8 @@ def _timing() -> list[dict]:
     records.append(
         {
             "phase": "fullkv_decode",
-            "started_at": 6.0,
-            "ended_at": 7.0,
+            "started_at": 8.0,
+            "ended_at": 9.0,
             "duration_seconds": 1.0,
             "synchronize_before_start": True,
             "synchronize_before_end": True,
@@ -116,6 +122,17 @@ def _timing() -> list[dict]:
     )
     records.extend(
         [
+            {
+                "phase": "answer_verification",
+                "started_at": 9.0,
+                "ended_at": 10.0,
+                "duration_seconds": 1.0,
+                "synchronize_before_start": True,
+                "synchronize_before_end": True,
+                "completed": True,
+                "failure_type": None,
+                "failure_message": None,
+            },
             {
                 "phase": "fullkv_complete_natural_generation",
                 "started_at": 7.0,
@@ -128,21 +145,10 @@ def _timing() -> list[dict]:
                 "failure_message": None,
             },
             {
-                "phase": "answer_verification",
-                "started_at": 10.0,
-                "ended_at": 11.0,
-                "duration_seconds": 1.0,
-                "synchronize_before_start": True,
-                "synchronize_before_end": True,
-                "completed": True,
-                "failure_type": None,
-                "failure_message": None,
-            },
-            {
                 "phase": "fullkv_complete_worker",
                 "started_at": 0.0,
-                "ended_at": 11.0,
-                "duration_seconds": 11.0,
+                "ended_at": 10.0,
+                "duration_seconds": 10.0,
                 "synchronize_before_start": True,
                 "synchronize_before_end": True,
                 "completed": True,
@@ -155,11 +161,16 @@ def _timing() -> list[dict]:
 
 
 def _memory() -> list[dict]:
-    """Step 3R4: the FullKV MEMORY-phase evidence, validated separately
+    """Step 3R4-Repair-2: the FullKV MEMORY-phase evidence the REAL
+    `run_fullkv_worker` body actually emits (7 phases -- `tokenizer_load`
+    and `post_load_validation` are genuinely memory-sampled too, not just
+    the 5 the historical two-worker gate requires), validated separately
     from timing above via `fullkv_qualification_memory_complete`."""
     phases = (
         "before_model_load",
+        "tokenizer_load",
         "model_load",
+        "post_load_validation",
         "post_load_baseline",
         "fullkv_complete_natural_generation",
         "fullkv_complete_worker",
@@ -278,6 +289,7 @@ def _artifact() -> dict:
         "selected_unique_id": outcome["unique_id"],
         "selection_status": SELECTION_STATUS_SELECTED,
         "qualification_stopped_reason": "first_pass",
+        "authorized_maximum_candidates": 8,
         "attempt_started_at_utc": "2026-07-23T00:00:00+00:00",
         "attempt_completed_at_utc": "2026-07-23T00:01:00+00:00",
     }

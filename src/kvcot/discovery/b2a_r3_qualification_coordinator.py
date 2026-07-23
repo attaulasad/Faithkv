@@ -161,12 +161,21 @@ def run_b2a_r3_qualification_coordinator(
 
     for ordinal in range(effective_limit):
         elapsed_seconds = clock() - started_at
-        if elapsed_seconds >= phase_wall_time_limit_seconds:
+        remaining_phase_seconds = phase_wall_time_limit_seconds - elapsed_seconds
+        if remaining_phase_seconds <= 0:
             stopped_reason = "phase_wall_time_exhausted"
             break
 
+        # Step 3R4-Repair-2 Finding 4: the worker is never handed the full
+        # frozen per-candidate timeout unconditionally -- it is capped at
+        # however much of the AUTHORIZED phase-wide wall time actually
+        # remains, so a candidate started near the end of the phase cannot
+        # run for up to `PER_CANDIDATE_WORKER_TIMEOUT_SECONDS` regardless of
+        # how little authorized time is left.
+        effective_worker_timeout = min(per_candidate_timeout_seconds, remaining_phase_seconds)
+
         try:
-            worker_result = fullkv_worker_runner(ordinal, per_candidate_timeout_seconds)
+            worker_result = fullkv_worker_runner(ordinal, effective_worker_timeout)
         except (CandidateWorkerTimeout, TimeoutError):
             stopped_reason = "candidate_worker_timeout"
             break
@@ -191,6 +200,17 @@ def run_b2a_r3_qualification_coordinator(
             stopped_reason = "first_pass"
             break
 
+        # Finding 4: also re-check elapsed phase-wide wall time immediately
+        # after every worker finishes -- never rely solely on the pre-launch
+        # check ahead of a NEXT candidate that may never come (e.g. this was
+        # already the last authorized candidate, in which case the loop
+        # would otherwise exit normally and mis-report
+        # "all_authorized_candidates_exhausted" even though the phase
+        # deadline had already passed).
+        if (clock() - started_at) >= phase_wall_time_limit_seconds:
+            stopped_reason = "phase_wall_time_exhausted"
+            break
+
     completed_at = clock()
 
     return build_qualification_artifact(
@@ -198,6 +218,7 @@ def run_b2a_r3_qualification_coordinator(
         candidate_manifest=candidate_manifest,
         expected_config_sha256=expected_config_sha256,
         stopped_reason=stopped_reason,
+        authorized_maximum_candidates=maximum_candidates,
         attempt_started_at_utc=_iso8601(started_at),
         attempt_completed_at_utc=_iso8601(completed_at),
     )
