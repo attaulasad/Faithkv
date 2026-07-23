@@ -2,32 +2,55 @@
 
 ## Current status (read this first)
 
-**B2A-R3 PROTOCOL: REPAIRED, INDEPENDENT RE-AUDIT PENDING (2026-07-22).**
-An independent audit of the protocol first frozen the same day found 18
-defects (contradictory authorization status, rounded runtime constants,
-several unfrozen ambiguities, inconsistent schema naming, and more). All
-are repaired. See:
+**B2A-R3 PROTOCOL: STEP 2B IMPLEMENTATION-CONTRACT CLOSED, INDEPENDENT
+RE-AUDIT REQUIRED (2026-07-22).** A second independent re-audit of the
+Step 2A repair commit (`81e11cb57202e0d4b434aabb347963ae3c34b80b`) found
+the original 18 defects materially repaired, but identified seven further
+implementation-level ambiguities (an unfrozen qualification-condition
+tuple, incomplete artifact schemas, unresolved selected-manifest hash
+semantics, an underspecified candidate-row freezing contract, a
+Markdown-vs-JSON hashing conflict, a non-atomic authorization-claim
+design, and conflated protocol-identity fields). All seven are repaired.
+All 25 findings across both rounds are now repaired. See:
 
-- `docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` — the repaired
-  protocol.
-- `docs/B2A_R3_PROTOCOL_AUDIT_REPAIR_2026-07-22.md` — the audit-finding
-  ledger.
+- `docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` — the
+  Step-2B-repaired protocol.
+- `docs/B2A_R3_PROTOCOL_AUDIT_REPAIR_2026-07-22.md` — the full
+  audit-finding ledger (Step 2A and Step 2B).
 
 ```text
 B2A-R3 STATUS:
-PROTOCOL REPAIRED — INDEPENDENT RE-AUDIT PENDING
+PROTOCOL IMPLEMENTATION CONTRACT REPAIRED (STEP 2B) — INDEPENDENT
+RE-AUDIT REQUIRED
 CPU IMPLEMENTATION BLOCKED
 GPU EXECUTION PROHIBITED
 ```
 
 The repairing author does not self-certify this protocol — a separate,
-genuinely independent re-audit of this repair is the next required action
-before any Stage A (CPU-only) implementation may begin (`CLAUDE.md` §1f).
-B2A-R2 (see "Historical status" below) remains a consumed experimental
-attempt, prohibited from rerun, its
+genuinely independent re-audit of this Step 2B repair is the next required
+action before any Stage A (CPU-only) implementation may begin (`CLAUDE.md`
+§1g). Stage B FullKV qualification, Stage C B2A-R3 execution, all GPU/CUDA
+activity, B2B, and FaithKV method implementation remain prohibited. B2A-R2
+(see "Historical status" below) remains a consumed experimental attempt,
+prohibited from rerun, its
 `B2A-R2 FINAL VERDICT: FAIL -- B2B BLOCKED` unchanged.
 
 ### Historical status
+
+#### Prior status: B2A-R3 protocol repaired (Step 2A); independent re-audit pending (2026-07-22)
+
+An independent audit of the protocol first frozen the same day found 18
+defects (contradictory authorization status, rounded runtime constants,
+several unfrozen ambiguities, inconsistent schema naming, and more). All
+were repaired (Step 2A) — see "Current status" above for the Step 2B
+follow-up repair.
+
+```text
+B2A-R3 STATUS (superseded, see "Current status" above):
+PROTOCOL REPAIRED — INDEPENDENT RE-AUDIT PENDING
+CPU IMPLEMENTATION BLOCKED
+GPU EXECUTION PROHIBITED
+```
 
 #### Prior status: B2A-R3 runtime-qualified protocol frozen (2026-07-22)
 

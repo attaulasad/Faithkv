@@ -274,6 +274,45 @@ gate frozen by §1/§1a-§1e/§4/§4a-§4c is changed by this subsection; no
 source code, test, or configuration file is modified by it;
 `configs/lock.yaml` and the pinned R-KV revision are unchanged.
 
+### Section 1g — B2A-R3 Step 2B implementation-contract closure (dated 2026-07-22)
+
+Added by
+`docs/B2A_R3_PROTOCOL_AUDIT_REPAIR_2026-07-22.md`'s "Step 2B" section,
+superseding nothing above. A second independent re-audit of §1f's repair
+commit (`81e11cb57202e0d4b434aabb347963ae3c34b80b`) found the original 18
+defects materially repaired, but identified seven remaining
+implementation-level ambiguities that could still have let Step 3 invent
+behavior the protocol never actually pinned down: an unfrozen
+qualification-condition tuple (R3-AUDIT-19); incomplete artifact
+provenance schemas (R3-AUDIT-20); unresolved selected-manifest hash
+semantics (R3-AUDIT-21); a candidate-row schema insufficient for
+deterministic freezing (R3-AUDIT-22); a Markdown authorization-document
+hash conflicting with the JSON self-hash rule (R3-AUDIT-23); an
+authorization-claim consumption design that was scan-then-write rather
+than globally atomic (R3-AUDIT-24); and protocol-identity fields conflated
+under one ambiguous `protocol_version` name (R3-AUDIT-25). All seven are
+repaired directly in
+`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` (§10.5, §12.1,
+§12.3-12.9, §13, §14.4, §22); the finding ledger is
+`docs/B2A_R3_PROTOCOL_AUDIT_REPAIR_2026-07-22.md`'s "Step 2B" section.
+
+```text
+Step 2B implementation-contract repairs committed.
+Independent re-audit required.
+Step 3 remains blocked.
+GPU remains prohibited.
+```
+
+This subsection does **not** authorize CPU implementation, Stage B FullKV
+qualification, Stage C B2A-R3 execution, B2B, or FaithKV method
+implementation. The repairing author does not self-certify this
+protocol — a separate, genuinely independent re-audit of this Step 2B
+commit is the next required action before Stage A (§1e) can begin. No
+threshold, budget, model, dataset, or gate frozen by
+§1/§1a-§1f/§4/§4a-§4c is changed by this subsection; no source code, test,
+or configuration file is modified by it; `configs/lock.yaml` and the
+pinned R-KV revision are unchanged.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

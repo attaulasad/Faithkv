@@ -1,23 +1,30 @@
 # B2A-R3 Runtime-Qualified Calibration Protocol (dated 2026-07-22)
 
-This document was frozen once (commit `93b6ba8`) and has since been
-**repaired** in response to an independent audit. This is the repaired
-version. See `docs/B2A_R3_PROTOCOL_AUDIT_REPAIR_2026-07-22.md` for the
-audit-finding ledger and §22 below for the repair disposition.
+This document was frozen once (commit `93b6ba8`), then **repaired** in
+response to a first independent audit (Step 2A, R3-AUDIT-01 through
+R3-AUDIT-18), then **repaired again** in response to a second independent
+re-audit of that repair (Step 2B, R3-AUDIT-19 through R3-AUDIT-25). This
+is the Step 2B-repaired version. See
+`docs/B2A_R3_PROTOCOL_AUDIT_REPAIR_2026-07-22.md` for the full
+audit-finding ledger (both rounds) and §22 below for the repair
+disposition.
 
 ## 1. Protocol identity and status
 
 ```text
 Protocol: B2A-R3 Runtime-Qualified Calibration
 Date frozen: 2026-07-22
-Date repaired: 2026-07-22 (same day, following independent audit)
+Date repaired (Step 2A): 2026-07-22 (same day, following first independent audit)
+Date repaired (Step 2B): 2026-07-22 (same day, following second independent re-audit)
 Branch: research/b2a-r3-runtime-qualified-calibration
 Parent closure commit: 0fa42a7edb88e766b5665547af15a5b52e823066
+Step 2A repair commit: 81e11cb57202e0d4b434aabb347963ae3c34b80b
 ```
 
 ```text
 B2A-R3 STATUS:
-PROTOCOL REPAIRED — INDEPENDENT RE-AUDIT PENDING
+PROTOCOL IMPLEMENTATION CONTRACT REPAIRED (STEP 2B) — INDEPENDENT
+RE-AUDIT REQUIRED
 CPU IMPLEMENTATION BLOCKED
 GPU EXECUTION PROHIBITED
 ```
@@ -29,10 +36,21 @@ PROHIBITED") was itself an audit finding (R3-AUDIT-02,
 unconditional grant while the surrounding paragraph gated it on an
 independent audit that had not happened. This status block is corrected
 to be unambiguous on its own: **no stage of this protocol is authorized
-yet.** CPU implementation, CPU tests, candidate-manifest generation, and
-every other Stage A activity (§14) become authorized only after a
-genuinely independent re-audit of this repaired document — a review pass
-by someone other than whoever wrote this repair — confirms the repair is
+yet.** A second independent re-audit of the Step 2A repair (commit
+`81e11cb57202e0d4b434aabb347963ae3c34b80b`) found the original 18 defects
+materially repaired, but identified seven further implementation-level
+ambiguities (R3-AUDIT-19 through R3-AUDIT-25) that could still have let
+Step 3 invent behavior the protocol never actually pinned down (an unfrozen
+qualification-condition tuple, incomplete artifact schemas, unresolved
+selected-manifest hash semantics, an underspecified candidate-row freezing
+contract, a Markdown-vs-JSON hashing conflict, a non-atomic authorization-
+claim design, and conflated protocol-identity fields). All seven are now
+repaired (§10.5, §12.1, §12.3-12.9, §13, §14.4; full ledger in
+`docs/B2A_R3_PROTOCOL_AUDIT_REPAIR_2026-07-22.md`'s "Step 2B" section).
+CPU implementation, CPU tests, candidate-manifest generation, and every
+other Stage A activity (§14) become authorized only after a genuinely
+independent re-audit of THIS Step 2B-repaired document — a review pass by
+someone other than whoever wrote this repair — confirms the repair is
 sound. **The repairing author does not self-certify this protocol** (§22).
 GPU activity remains prohibited regardless of any future CPU-stage
 authorization outcome, and requires its own separate, dated authorization
@@ -601,8 +619,16 @@ would defeat the fixed 8-and-8 level mixture).
 - **Canonical payload:** identity fields only, pipe-separated, UTF-8:
 
 ```text
-f"{protocol_version}|{dataset_revision}|{model_revision}|budget={budget}|{unique_id}"
+f"{candidate_order_protocol_version}|{dataset_revision}|{model_revision}|budget={budget}|{unique_id}"
 ```
+
+(repairs R3-AUDIT-25: this is `candidate_order_protocol_version`, §12.9's
+first identity field — never a generic, unqualified `protocol_version`.
+`src/kvcot/discovery/b2a_r2_candidates.py`'s existing `_ordering_hash`
+binds its own module-level `CANDIDATE_MANIFEST_PROTOCOL_VERSION` constant
+into this same payload position; Step 3's B2A-R3 version reuses that
+function parameterized by `candidate_order_protocol_version`'s value
+instead, per this section's own instruction below.)
 
   Deliberately excludes problem text, subject, level, or any other content
   that could correlate with expected difficulty or trace length.
@@ -755,6 +781,459 @@ Remaining 10.1 conditions (unchanged from the first-frozen protocol):
 - If all 8 candidates fail, no row is selected — qualification produces no
   selected row (§18, "No candidate qualifies").
 
+### 10.5 Frozen qualification-condition tuple (repairs R3-AUDIT-19)
+
+§10.1-10.4 above define the substantive rules; this subsection freezes the
+one CONTRACT Step 3's evaluator and any future verifier must implement
+against — an exact ordered tuple of condition names, an exact derivation
+of `qualified`/`failed_conditions` from it, and a complete boolean
+definition for every name. Before this repair, §10 was implementable in
+more than one way (different condition names, a different ordering inside
+`failed_conditions`, a missing condition) — exactly the defect R3-AUDIT-14
+already repaired for the *final* mechanical gate tuple (§16.1). This
+subsection is that same treatment applied to the *qualification* gate.
+
+This tuple is new and specific to B2A-R3. It is never confused with, and
+does not modify, B2A-R2's historical 10-name `QUALIFICATION_CONDITIONS`
+(`src/kvcot/discovery/b2a_qualification.py`) — B2A-R3's qualification
+gate is more granular (it adds explicit identity/hash-match and
+prompt-identity conditions B2A-R2's simpler qualifier never had) because
+it must qualify against the fuller runtime-predictor and cross-artifact
+binding machinery this protocol adds (§7, §9, §12).
+
+#### 10.5.1 Frozen exact ordered tuple
+
+```python
+B2A_R3_QUALIFICATION_CONDITIONS = (
+    "no_cap_hit",
+    "answer_verifiable",
+    "fullkv_answer_correct",
+    "thinking_span_valid",
+    "trace_complete",
+    "prompt_token_count_present",
+    "generated_token_count_present",
+    "fullkv_timing_complete",
+    "candidate_manifest_hash_match",
+    "config_hash_match",
+    "dataset_identity_match",
+    "model_identity_match",
+    "tokenizer_identity_match",
+    "generation_config_hash_match",
+    "prompt_identity_match",
+    "batch_size_is_one",
+    "all_parameters_on_requested_cuda",
+    "no_offload_verified",
+    "peak_memory_within_limit",
+    "sequence_exceeds_budget",
+    "predicted_compaction_present",
+    "predicted_event_count_at_least_six",
+    "at_least_three_events_have_49_future_tokens",
+    "runtime_inputs_complete",
+    "runtime_predictor_version_match",
+    "safety_multiplier_exact",
+    "projected_runtime_within_qualification_target",
+)
+```
+
+```text
+Exact count: 27 conditions. All 27 names are unique.
+```
+
+#### 10.5.2 Frozen derivation
+
+```python
+qualified = all(conditions[name] for name in B2A_R3_QUALIFICATION_CONDITIONS)
+
+failed_conditions = [
+    name
+    for name in B2A_R3_QUALIFICATION_CONDITIONS
+    if not conditions[name]
+]
+```
+
+`conditions` is a mapping from every name in the tuple to a concrete
+`bool` (never `None`, never a non-bool truthy/falsy value, never a string).
+`failed_conditions` preserves the tuple's own order, never an
+implementation-dependent iteration order (e.g. dict insertion order of a
+differently-constructed mapping).
+
+#### 10.5.3 Mandatory rejection rules
+
+The evaluator and any future verifier must reject, as a hard failure (not
+a warning, not a silent default):
+
+- A `conditions` mapping missing any of the 27 names.
+- A `conditions` mapping containing any name outside the 27.
+- Any condition value that is not a concrete Python `bool` (in particular,
+  `0`/`1`/`None`/a string is rejected, never coerced).
+- A qualification outcome whose named condition fields (§12.5) do not
+  exactly match its own `conditions` map (no condition may be "stored"
+  under a different field name than the one in the tuple).
+- A `failed_conditions` array that is not exactly `[name for name in
+  B2A_R3_QUALIFICATION_CONDITIONS if not conditions[name]]` (wrong order,
+  missing entry, or extra entry).
+- A `qualified` value that disagrees with `all(conditions.values())`.
+
+#### 10.5.4 Condition definitions
+
+Each condition below is fully and exactly defined. Where a condition
+reuses a predicate already frozen elsewhere in this protocol, this section
+cites that definition rather than restating it independently — there is
+exactly one authoritative definition per predicate anywhere in this
+document.
+
+**`no_cap_hit`**
+
+```text
+no_cap_hit = (cap_hit is False)
+```
+
+**`answer_verifiable`**
+
+```text
+answer_verifiable = (answer_verification_status != "unverifiable")
+```
+
+**`fullkv_answer_correct`**
+
+```text
+fullkv_answer_correct = (answer_verification_status == "correct")
+```
+
+Identical to §10.1's `fullkv_answer_correct`; not redefined, only listed
+here as a named member of the frozen tuple.
+
+**`thinking_span_valid`**
+
+The exact, unchanged §10.1 predicate:
+
+```text
+thinking_span_valid =
+    think_parse_status in THINK_PARSE_SUCCESS_STATUSES
+    and think_start_index is not None
+    and think_end_index is not None
+    and think_start_index >= 0
+    and think_end_index >= think_start_index
+    and think_end_index <= generated_token_count
+```
+
+**`trace_complete`**
+
+The exact, unchanged §10.1 predicate:
+
+```text
+trace_complete =
+    not generation_cap_hit
+    and thinking_span_valid
+    and answer_verification_status != "unverifiable"
+```
+
+**`prompt_token_count_present`**
+
+```text
+prompt_token_count_present =
+    type(prompt_token_count) is int
+    and prompt_token_count > 0
+```
+
+`type(x) is int`, never `isinstance(x, int)` — Python's `bool` is an `int`
+subclass, so `isinstance(True, int)` is `True`; `type(x) is int` is the
+one check that actually rejects a boolean masquerading as a count.
+
+**`generated_token_count_present`**
+
+```text
+generated_token_count_present =
+    type(generated_token_count) is int
+    and generated_token_count > 0
+    and generated_token_count == len(natural_generated_token_ids)
+```
+
+The qualification artifact (§12.5) may store only
+`generated_token_ids_sha256` rather than the complete token array, but
+this equality must be established by the worker/evaluator boundary code
+from the actual `natural_generated_token_ids` array BEFORE that array is
+discarded and only its count/hash persisted into the artifact — never
+trusted as a caller-supplied integer with no underlying array to check it
+against.
+
+**`fullkv_timing_complete`**
+
+```text
+fullkv_timing_complete =
+    type(fullkv_wall_seconds) in (int, float)
+    and type(fullkv_wall_seconds) is not bool
+    and math.isfinite(fullkv_wall_seconds)
+    and fullkv_wall_seconds >= 0.0
+    and fullkv_timing_evidence is present and complete,
+        per the existing FullKV worker timing-evidence contract
+        (the SAME `timing_evidence`/`FullKVWorkerResult` timing contract
+        `kvcot.discovery.b2a_workers.run_fullkv_worker` already produces
+        and `kvcot.discovery.attempt_verification` already cross-checks
+        via `{role}/timing.json` == `result.json`'s `timing_evidence` —
+        never a second, independently invented phase-timing list)
+```
+
+**`candidate_manifest_hash_match`**
+
+```text
+candidate_manifest_hash_match =
+    ( the qualification runner independently recomputed and verified
+      the candidate manifest's own canonical_sha256, per §12.1's
+      five-step verification procedure )
+    and ( qualification_artifact.candidate_manifest_canonical_sha256
+          == candidate_manifest.canonical_sha256 )
+```
+
+**`config_hash_match`**
+
+```text
+config_hash_match =
+    qualification_artifact.config_sha256
+    == config_identity("configs/discovery/llama8b_math500_b1024.yaml")
+```
+
+using the repository's existing `kvcot.config.config_identity` (itself
+`sha256_file`) — never a second, independently defined config-hash
+algorithm.
+
+**`dataset_identity_match`**
+
+```text
+dataset_identity_match = all of:
+    worker_dataset_repo    == "HuggingFaceH4/MATH-500"
+    worker_dataset_config  == "default"
+    worker_dataset_split   == "test"
+    worker_dataset_revision == "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be"
+    worker-reported unique_id        == candidate.unique_id
+    worker-reported source_example_index == candidate.source_example_index
+    candidate.raw_row_sha256   reproduces sha256_json(candidate.row)
+    candidate.problem_sha256   reproduces sha256_text(candidate.row["problem"])
+    candidate.gold_answer_sha256 reproduces sha256_text(candidate.row["answer"])
+```
+
+(the last three reuse §12.4's frozen verification formulas, not a second
+definition of them).
+
+**`model_identity_match`**
+
+```text
+model_identity_match =
+    worker_model_name     == "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+    and worker_model_revision == "6a6f4aa4197940add57724a7707d069478df56b1"
+```
+
+**`tokenizer_identity_match`**
+
+```text
+tokenizer_identity_match =
+    worker_tokenizer_name     == "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+    and worker_tokenizer_revision == "6a6f4aa4197940add57724a7707d069478df56b1"
+```
+
+**`generation_config_hash_match`**
+
+Frozen generation-configuration payload (byte-for-byte the `generation:`
+block of `configs/discovery/llama8b_math500_b1024.yaml`, confirmed by
+direct inspection during this repair):
+
+```json
+{
+  "generation_mode": "greedy",
+  "do_sample": false,
+  "temperature": null,
+  "top_p": null,
+  "batch_size": 1,
+  "max_new_tokens": 6144,
+  "framework_seed": 13,
+  "attention_backend": "flash_attention_2",
+  "cache_implementation": "DynamicCache",
+  "no_offload_required": true
+}
+```
+
+```text
+generation_config_sha256 = sha256_json(the exact object above)
+                          = b67ed818bb94e0a674e01c1400caf2e005c41c12203d6a29b0f0f5c69eef01a3
+```
+
+Computed twice during this repair, using the repository's actual
+`kvcot.utils.hashing.sha256_json`, from two independent calls — both
+calls returned this identical 64-lowercase-hex value. Never guessed, never
+manually calculated.
+
+```text
+generation_config_hash_match =
+    qualification_artifact.generation_config_sha256 == the frozen value above
+```
+
+**`prompt_identity_match`**
+
+```text
+prompt_identity_match =
+    observed_prompt_token_ids_sha256 == expected_prompt_token_ids_sha256
+
+where expected_prompt_token_ids_sha256 is derived by the canonical FullKV
+path from:
+    - the exact candidate raw row (candidate.row, §12.4)
+    - the frozen tokenizer revision (6a6f4aa4197940add57724a7707d069478df56b1)
+    - the canonical kvcot.discovery.manifest_prepare._render_and_tokenize
+      path (never a second, independently-invented rendering path)
+    - the frozen chat-template rendering arguments (one user-role message,
+      add_generation_prompt=True, tokenize=True — kvcot.discovery.manifest
+      .ChatTemplateRenderingConfig's existing frozen convention)
+
+and observed_prompt_token_ids_sha256 is the hash of the token IDs the
+FullKV worker actually used for inference.
+```
+
+Both `expected_prompt_token_ids_sha256` and `observed_prompt_token_ids_
+sha256` must be preserved on the qualification outcome (§12.5) so this
+condition is independently re-derivable — a bare caller-supplied
+`prompt_identity_match=True` boolean with no underlying hash pair is
+forbidden and must be rejected by the evaluator.
+
+**`batch_size_is_one`**
+
+```text
+batch_size_is_one = (actual_batch_size == 1)
+```
+
+**`all_parameters_on_requested_cuda`**
+
+Derived from raw `ParameterPlacementEvidence`
+(`src/kvcot/discovery/strict_device.py`'s
+`verify_placement_from_raw_evidence`/its per-worker `_ok` helper), never
+from only the legacy summary boolean `every_parameter_on_cuda` when the
+stricter raw fields are available:
+
+```text
+all_parameters_on_requested_cuda =
+    parameter_placement_evidence.requested_device == "cuda:0"
+    and parameter_placement_evidence.every_parameter_on_cuda is True
+    and parameter_placement_evidence.parameter_count > 0
+    and list(parameter_placement_evidence.unique_device_types) == ["cuda"]
+    and list(parameter_placement_evidence.unique_devices) == ["cuda:0"]
+```
+
+**`no_offload_verified`**
+
+```text
+no_offload_verified =
+    parameter_placement_evidence.no_offload_verified is True
+    and ( parameter_placement_evidence.hf_device_map is None
+          or every value in hf_device_map maps to cuda:0/"0"/"cuda",
+             never "cpu"/"disk"/"meta"/"auto" )
+```
+
+Rejects CPU placement, disk offload, meta-device placement, device-map
+offload, or any unverified placement — reusing
+`verify_placement_from_raw_evidence`'s existing per-worker rule, never a
+second, independently-written placement check.
+
+**`peak_memory_within_limit`**
+
+```text
+peak_memory_within_limit =
+    type(peak_cuda_allocated_bytes) is int
+    and type(peak_cuda_reserved_bytes) is int
+    and peak_cuda_allocated_bytes >= 0
+    and peak_cuda_reserved_bytes >= 0
+    and max(peak_cuda_allocated_bytes, peak_cuda_reserved_bytes)
+        <= 22 * 1024**3
+```
+
+**`sequence_exceeds_budget`**
+
+```text
+sequence_exceeds_budget = (total_processed_tokens > 1024)
+```
+
+**`predicted_compaction_present`**
+
+```text
+predicted_compaction_present =
+    len(predicted_compaction_event_positions) >= 1
+```
+
+**`predicted_event_count_at_least_six`**
+
+```text
+predicted_event_count_at_least_six =
+    predicted_event_count == len(predicted_compaction_event_positions)
+    and predicted_event_count >= 6
+```
+
+This is the total-predicted-events count (§10.2's raised-from-3-to-6
+minimum) — never conflated with the next condition's 3-eligible-event
+count.
+
+**`at_least_three_events_have_49_future_tokens`**
+
+Uses the existing, unchanged `eligible_event_positions`
+(`src/kvcot/discovery/pass1.py`) applied to the predicted schedule:
+
+```text
+eligible_event_count == len(eligible_event_indices)
+and at_least_three_events_have_49_future_tokens = (eligible_event_count >= 3)
+```
+
+The 6-event minimum above applies to TOTAL predicted compaction events;
+this 3-event minimum applies only to the subset of those events satisfying
+the exact bridge-token-plus-48-scored-future-token condition
+(`MINIMUM_FUTURE_TOKENS_AFTER_EVENT = 49`). These are two different counts
+over two different (nested) sets and must never be conflated or computed
+from the same variable.
+
+**`runtime_inputs_complete`**
+
+```text
+runtime_inputs_complete = all of:
+    every §7.3 reference constant is present and unmodified
+    candidate_total_tokens (= total_processed_tokens) is present
+    no NaN, no Infinity, anywhere in the above
+    no negative timing value anywhere in the above
+    no missing token count
+    no boolean value substituted for an integer/float input
+        (type(x) is bool is rejected wherever an int/float is required)
+    no manually overridden constant (every §7.3 constant matches its
+        frozen literal value exactly)
+```
+
+A candidate missing any required predictor input is rejected outright —
+never silently defaulted (§7.5's existing rule, restated here as a named
+condition rather than only prose).
+
+**`runtime_predictor_version_match`**
+
+```text
+runtime_predictor_version = "faithkv-b2a-r3-runtime-predictor-v1"
+
+runtime_predictor_version_match =
+    (the predictor implementation's own version string
+     == "faithkv-b2a-r3-runtime-predictor-v1")
+```
+
+**`safety_multiplier_exact`**
+
+```text
+safety_multiplier_exact = (safety_multiplier == 1.20)
+```
+
+Exact protocol equality (`==`) on the stored configuration value — `1.20`
+is exactly representable in IEEE-754 binary64 as literal `1.2`, so this is
+a genuine equality check, never a tolerance-based comparison.
+
+**`projected_runtime_within_qualification_target`**
+
+```text
+projected_runtime_within_qualification_target =
+    (projected_gpu_hours <= 3.60)
+```
+
+using §7.4's exact unrounded formula and §7.3's exact constants — never a
+rounded intermediate value (§7.3's existing rule).
+
 ## 11. Qualification wall-time and bounded execution (repairs R3-AUDIT-11)
 
 This section defines, but does **not** itself authorize, a bounded
@@ -836,8 +1315,38 @@ Verification procedure (frozen for Step 3):
 
 A payload must never be hashed while still containing its own hash field
 — this rule applies to the candidate manifest, the qualification artifact,
-the selected-row provenance artifact, and any authorization document or
-authorization-claim artifact (§14.4-14.5).
+the selection-provenance artifact, and the authorization-claim artifact
+(§14.4-14.5) — every one of which is a JSON object containing its own
+`canonical_sha256` field.
+
+**Scope boundary (repairs R3-AUDIT-23): this rule applies ONLY to JSON
+artifacts that actually contain a `canonical_sha256` field.** It does
+NOT apply to:
+
+- The dated Markdown authorization documents (§12.2's
+  `docs/B2A_R3_STAGE_{B,C}_..._AUTHORIZATION_<date>.md` pattern) — these
+  are Markdown files, not JSON objects, so `sha256_json`'s
+  self-referential-field-omission procedure cannot apply to them (there is
+  no JSON object to parse and no field to omit). Their hash is
+  `authorization_document_sha256 = sha256_file(the exact committed
+  Markdown document)` — a plain whole-file byte hash, using the
+  repository's existing `kvcot.utils.hashing.sha256_file` (the same
+  helper `kvcot.config.config_identity` already uses for config-file
+  hashing) — never `sha256_json`, and never a second, independently
+  invented hash function.
+- The selected one-example execution manifest
+  (`configs/discovery/b2a_one_example_manifest.json`,
+  `B2AOneExampleManifest`) — see §12.7/R3-AUDIT-21: this file has never
+  carried a `canonical_sha256` field and this protocol does not add one to
+  it. Its hash is the existing external `manifest_hash()` method
+  (`selected_manifest_sha256`, §12.7), never `canonical_sha256`.
+
+Every reference to "the canonical hashing rule" elsewhere in this document
+(§12.3, §12.5, §12.6, §12.7's `qualification_artifact_canonical_sha256`/
+`candidate_manifest_canonical_sha256` fields, §12.8's authorization-claim
+schema) means the JSON `canonical_sha256`/`sha256_json` rule above, applied
+only to the JSON artifact it is attached to — never applied to a Markdown
+document or to the selected one-example manifest.
 
 ### 12.2 Frozen exact artifact paths (repairs R3-AUDIT-10)
 
@@ -880,7 +1389,16 @@ Attempt directory root (Stage C execution, when authorized):
     fb6f5081d47f45f4b4f9258c25e6883d/ -- only the "b2a_" prefix becomes
     "b2a_r3_" to distinguish rounds)
 
-Authorization claim (inside the attempt directory, when authorized):
+Global authorization claim (repairs R3-AUDIT-24 — replaces the prior
+"inside the attempt directory" design; see §14.4):
+    results/decisions/b2a_r3_authorization_claims/<authorization_id>.json
+    (one deterministic path per authorization_id, created via an
+    exclusive-create filesystem primitive BEFORE the attempt directory
+    exists -- creation of THIS file is the consumption event, not a copy
+    later placed inside the attempt directory)
+
+Attempt-directory claim copy/reference (written only AFTER the global
+claim above already exists, never a second authorization-bearing claim):
     <attempt directory root>/authorization_claim.json
 
 Dated authorization documents (naming pattern, not a literal path -- the
@@ -892,15 +1410,24 @@ date is filled in at authorization time, never fabricated in advance):
 No path above is qualified with "recommended," "such as," or an
 alternative — each is the one path Step 3 must use.
 
-### 12.3 Candidate manifest schema
+### 12.3 Candidate manifest schema (repairs R3-AUDIT-20, R3-AUDIT-25)
 
 | Field | Type | Nullable/Required | Meaning | Hash inclusion | Source |
 |---|---|---|---|---|---|
-| `protocol_version` | string | required | `"faithkv-b2a-r3-row-order-v1"` (§9) | included | new |
-| `dataset_name` | string | required | `"MATH-500"` | included | mirrors `b2a_r2_candidates.build_candidate_manifest` |
-| `dataset_revision` | string | required | pinned revision (§4) | included | `configs/discovery/llama8b_math500_b1024.yaml` |
-| `model_revision` | string | required | pinned model revision (§4) | included | same config |
+| `artifact_schema_version` | string | required | `"faithkv-b2a-r3-candidate-manifest-v1"` | included | new (§12.9) |
+| `candidate_order_protocol_version` | string | required | `"faithkv-b2a-r3-row-order-v1"` (§9) | included | new (§12.9) |
+| `dataset_repo` | string | required | `"HuggingFaceH4/MATH-500"` | included | §4 |
+| `dataset_config` | string | required | `"default"` | included | §4 |
+| `dataset_split` | string | required | `"test"` | included | §4 |
+| `dataset_revision` | string | required | `"6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be"` (§4) | included | `configs/discovery/llama8b_math500_b1024.yaml` |
+| `model_name` | string | required | `"deepseek-ai/DeepSeek-R1-Distill-Llama-8B"` | included | same config |
+| `model_revision` | string | required | `"6a6f4aa4197940add57724a7707d069478df56b1"` (§4) | included | same config |
+| `tokenizer_name` | string | required | `"deepseek-ai/DeepSeek-R1-Distill-Llama-8B"` | included | same config |
+| `tokenizer_revision` | string | required | `"6a6f4aa4197940add57724a7707d069478df56b1"` | included | same config |
 | `budget` | integer | required | `1024` | included | same config |
+| `config_path` | string | required | `"configs/discovery/llama8b_math500_b1024.yaml"` | included | §12.2 |
+| `config_sha256` | string (64-hex) | required | `config_identity(config_path)` (`sha256_file`, §10.5) | included | `kvcot.config.config_identity` |
+| `generation_config_sha256` | string (64-hex) | required | §10.5's frozen `b67ed818bb94e0a674e01c1400caf2e005c41c12203d6a29b0f0f5c69eef01a3` | included | §10.5 |
 | `exclusion_set_sha256` | string (64-hex) | required | §8.1's `EXCLUSION_SET_SHA256` | included | §8.1 |
 | `candidate_count` | integer | required | `16` | included | §8.2 |
 | `qualification_limit` | integer | required | `8` | included | §8.2, §10.4 |
@@ -916,7 +1443,11 @@ alone. Any operational timestamp of interest may be recorded in a
 separate, noncanonical log file, never inside this manifest's hashed
 content.
 
-### 12.4 Candidate row schema (within the manifest's `candidates` array)
+The verifier must reject a manifest with a field name outside this table,
+a missing required field, or a `candidates` array whose length disagrees
+with `candidate_count`.
+
+### 12.4 Candidate row schema (repairs R3-AUDIT-20, R3-AUDIT-22)
 
 | Field | Type | Nullable/Required | Meaning | Hash inclusion | Source |
 |---|---|---|---|---|---|
@@ -925,33 +1456,95 @@ content.
 | `unique_id` | string | required | MATH-500 `unique_id` | included | mirrors `CandidateRow.unique_id` |
 | `subject` | string | required | MATH-500 `subject` column | included | mirrors `CandidateRow.subject` |
 | `level` | integer, 4 or 5 | required | MATH-500 `level` column | included | mirrors `CandidateRow.level` |
-| `problem_sha256` | string (64-hex) | required | hash of the problem text | included | mirrors `CandidateRow.problem_sha256` |
-| `gold_answer_sha256` | string (64-hex) | required | hash of the gold answer | included | mirrors `CandidateRow.gold_answer_sha256` |
+| `row` | object | required | the COMPLETE pinned MATH-500 row, embedded (never refetched — see below) | included | mirrors `CandidateRow.row` |
+| `raw_row_sha256` | string (64-hex) | required | `sha256_json(row)` | included | mirrors `CandidateRow.raw_row_sha256` |
+| `problem_sha256` | string (64-hex) | required | `sha256_text(row["problem"])` | included | mirrors `CandidateRow.problem_sha256` |
+| `gold_answer_sha256` | string (64-hex) | required | `sha256_text(row["answer"])` | included | mirrors `CandidateRow.gold_answer_sha256` |
 | `ordering_hash` | string (64-hex) | required | §9's per-row ordering key | included | mirrors `CandidateRow.ordering_hash` |
 
 No field on this row may carry a predicted or observed model outcome —
 mirrors B2A-R2's own `CandidateRow`, which stores only identity/content
 fields.
 
-### 12.5 Qualification outcome schema (per attempted candidate)
+**Frozen embedded-row columns (repairs R3-AUDIT-22):** `row` must have
+exactly the columns `("problem", "solution", "answer", "subject", "level",
+"unique_id")` — `src/kvcot/discovery/manifest_prepare.py`'s
+`EXPECTED_MATH500_COLUMNS`, reused unchanged.
+
+**Frozen verification formulas, mandatory for both the candidate generator
+and any future verifier:**
+
+```text
+sha256_json(row) == raw_row_sha256
+sha256_text(row["problem"]) == problem_sha256
+sha256_text(row["answer"]) == gold_answer_sha256
+
+row["unique_id"] == unique_id
+row["subject"] == subject
+int(row["level"]) == level
+```
+
+**Frozen embed-not-refetch rule (repairs R3-AUDIT-22):** the complete
+pinned row is embedded in `row` at manifest-construction time. The future
+selected-row freezer (§13) MUST use this embedded `row` and MUST NOT
+refetch the dataset during selected-row freezing — this is not left as an
+implementation choice. This mirrors
+`kvcot.discovery.b2a_r2_freeze.freeze_qualified_row`'s existing behavior
+exactly (it reads `candidate_row["row"]` and recomputes `sha256_json(row)`
+against the stored `raw_row_sha256`, never re-fetching from the network),
+and is required so freezing stays deterministic and immune to a
+since-changed live source. The candidate manifest's own top-level pinned
+dataset identity (`dataset_repo`/`dataset_config`/`dataset_split`/
+`dataset_revision`, §12.3) plus each row's own content hashes together
+bind every embedded row back to the frozen dataset-selection procedure
+(§8, §9) without requiring a second network fetch to verify it.
+
+### 12.5 Qualification outcome schema (repairs R3-AUDIT-19, R3-AUDIT-20)
+
+Per attempted candidate. Every field named in §10.5's condition
+definitions must be present so every one of the 27 conditions is
+independently re-derivable from this record alone (plus the candidate
+manifest and config file it is read against).
 
 | Field | Type | Nullable/Required | Meaning | Hash inclusion | Source |
 |---|---|---|---|---|---|
 | `candidate_ordinal` | integer | required | which manifest row this outcome is for | included | mirrors `CandidateQualificationOutcome.candidate_ordinal` |
-| `unique_id` | string | required | row identity, redundant with the manifest for audit convenience | included | new (standardized name, §16 of the repair ledger) |
+| `source_example_index` | integer | required | mirrors the manifest row's own field | included | §12.4 |
+| `unique_id` | string | required | row identity, redundant with the manifest for audit convenience | included | mirrors same-named field |
+| `raw_row_sha256` | string (64-hex) | required | echoes the candidate row's own hash (§12.4) | included | §12.4 |
+| `problem_sha256` | string (64-hex) | required | echoes the candidate row's own hash (§12.4) | included | §12.4 |
+| `gold_answer_sha256` | string (64-hex) | required | echoes the candidate row's own hash (§12.4) | included | §12.4 |
+| `worker_dataset_repo` | string | required | worker-reported, must equal `"HuggingFaceH4/MATH-500"` (§10.5) | included | new (§10.5) |
+| `worker_dataset_config` | string | required | worker-reported, must equal `"default"` | included | new (§10.5) |
+| `worker_dataset_split` | string | required | worker-reported, must equal `"test"` | included | new (§10.5) |
+| `worker_dataset_revision` | string | required | worker-reported, must equal §4's pinned revision | included | new (§10.5) |
+| `worker_model_name` | string | required | worker-reported, must equal §4's pinned model name | included | new (§10.5) |
+| `worker_model_revision` | string | required | worker-reported, must equal §4's pinned model revision | included | new (§10.5) |
+| `worker_tokenizer_name` | string | required | worker-reported, must equal §4's pinned tokenizer name | included | new (§10.5) |
+| `worker_tokenizer_revision` | string | required | worker-reported, must equal §4's pinned tokenizer revision | included | new (§10.5) |
+| `expected_prompt_token_ids_sha256` | string (64-hex) | required | derived via the canonical rendering path (§10.5's `prompt_identity_match`) | included | new (§10.5) |
+| `observed_prompt_token_ids_sha256` | string (64-hex) | required | the hash the FullKV worker actually used | included | new (§10.5) |
 | `prompt_token_count` | integer | required | mirrors `CandidateQualificationOutcome.prompt_token_count` | included | same |
-| `prompt_token_ids_sha256` | string | required | mirrors same-named field | included | same |
 | `generated_token_count` | integer | required | mirrors same-named field | included | same |
 | `generated_token_ids_sha256` | string | required | mirrors same-named field | included | same |
 | `total_processed_tokens` | integer | required | prompt + generated | included | same |
 | `cap_hit` | boolean | required | mirrors same-named field | included | same |
+| `extracted_answer` | string, nullable | nullable | mirrors same-named field | included | same |
 | `answer_verification_status` | string | required | `"correct"`/`"incorrect"`/`"unverifiable"` | included | same |
 | `think_parse_status` | string | required | §10.1 | included | new (§10.1) |
 | `think_start_index` | integer, nullable | nullable | §10.1 | included | new (§10.1) |
 | `think_end_index` | integer, nullable | nullable | §10.1 | included | new (§10.1) |
+| `generation_prompt_preopened_think` | boolean | required | §10.1 (`ThinkSpanResult` field, reused unchanged) | included | new (§10.1) |
 | `thinking_span_valid` | boolean | required | §10.1's derived predicate | included | new (§10.1) |
 | `trace_complete` | boolean | required | §10.1's derived predicate | included | new (§10.1) |
 | `fullkv_wall_seconds` | float | required | mirrors same-named field | included | same |
+| `fullkv_timing_evidence` | object | required | the existing FullKV worker timing-evidence contract, reused unchanged | included | new (§10.5) |
+| `requested_device` | string | required | must equal `"cuda:0"` | included | new (§10.5) |
+| `parameter_placement_evidence` | object | required | raw `ParameterPlacementEvidence` (`requested_device`, `every_parameter_on_cuda`, `no_offload_verified`, `parameter_count`, `unique_device_types`, `unique_devices`, `hf_device_map`) | included | `src/kvcot/discovery/strict_device.py` |
+| `actual_batch_size` | integer | required | mirrors same-named worker field | included | same |
+| `peak_cuda_allocated_bytes` | integer | required | mirrors same-named field | included | same |
+| `peak_cuda_reserved_bytes` | integer | required | mirrors same-named field | included | same |
+| `peak_cuda_tracked_bytes` | integer | required | `max(allocated, reserved)` | included | same |
 | `predicted_compaction_event_positions` | array of int | required | mirrors same-named field | included | same |
 | `predicted_event_count` | integer | required | mirrors same-named field | included | same |
 | `eligible_event_indices` | array of int | required | mirrors same-named field | included | same |
@@ -961,18 +1554,41 @@ fields.
 | `predicted_pair_seconds` | float | required | §7.4 intermediate | included | new (§7.4) |
 | `projected_total_seconds` | float | required | §7.4 output | included | new (§7.4) |
 | `projected_gpu_hours` | float | required | §7.4 output | included | new (§7.4) |
-| `conditions` | object (bool map) | required | every named gate in §10.1-10.4, by name, to its boolean result | included | mirrors `CandidateQualificationOutcome.conditions` |
-| `qualified` | boolean | required | AND of every condition in `conditions` | included | mirrors same-named field |
-| `failed_conditions` | array of string | required | names of every failing condition | included | mirrors same-named field |
+| `safety_multiplier` | float | required | must equal `1.20` exactly | included | §7.3 |
+| `runtime_predictor_version` | string | required | must equal `"faithkv-b2a-r3-runtime-predictor-v1"` | included | §10.5 |
+| `conditions` | object (bool map) | required | §10.5's 27 named conditions, by name, to a concrete `bool` | included | §10.5 |
+| `qualified` | boolean | required | §10.5.2's derivation | included | §10.5 |
+| `failed_conditions` | array of string | required | §10.5.2's derivation, tuple order preserved | included | §10.5 |
 
-### 12.6 Qualification artifact schema (top level)
+The verifier must reject an outcome record containing a field name outside
+this table, or missing any required field above.
+
+### 12.6 Qualification artifact schema (repairs R3-AUDIT-20, R3-AUDIT-25)
+
+Top level.
 
 | Field | Type | Nullable/Required | Meaning | Hash inclusion | Source |
 |---|---|---|---|---|---|
-| `protocol_version` | string | required | `"faithkv-b2a-r3-row-order-v1"` | included | §9 |
+| `artifact_schema_version` | string | required | `"faithkv-b2a-r3-qualification-artifact-v1"` | included | new (§12.9) |
+| `candidate_order_protocol_version` | string | required | `"faithkv-b2a-r3-row-order-v1"` (§9) | included | new (§12.9) |
+| `qualification_protocol_version` | string | required | `"faithkv-b2a-r3-qualification-v1"` | included | new (§12.9) |
+| `runtime_predictor_version` | string | required | `"faithkv-b2a-r3-runtime-predictor-v1"` | included | §10.5, §12.9 |
+| `candidate_manifest_path` | string | required | `"configs/discovery/b2a_r3_candidate_manifest.json"` | included | §12.2 |
 | `candidate_manifest_canonical_sha256` | string | required | §12.3's `canonical_sha256`, bound at read time | included | §12.1 |
-| `runtime_predictor_version` | string | required | identifies §7's exact formula/constant set | included | new |
-| `runtime_source_artifact_sha256` | string | required | hash of `docs/evidence/B2A_R2_ATTEMPT_INDEX_2026-07-22.json`, binding the `REFERENCE_*` constants to their exact source | included | §7.3 |
+| `config_path` | string | required | `"configs/discovery/llama8b_math500_b1024.yaml"` | included | §12.2 |
+| `config_sha256` | string (64-hex) | required | `config_identity(config_path)` | included | §10.5 |
+| `generation_config_sha256` | string (64-hex) | required | §10.5's frozen value | included | §10.5 |
+| `dataset_repo` | string | required | `"HuggingFaceH4/MATH-500"` | included | §4 |
+| `dataset_config` | string | required | `"default"` | included | §4 |
+| `dataset_split` | string | required | `"test"` | included | §4 |
+| `dataset_revision` | string | required | `"6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be"` | included | §4 |
+| `model_name` | string | required | `"deepseek-ai/DeepSeek-R1-Distill-Llama-8B"` | included | §4 |
+| `model_revision` | string | required | `"6a6f4aa4197940add57724a7707d069478df56b1"` | included | §4 |
+| `tokenizer_name` | string | required | `"deepseek-ai/DeepSeek-R1-Distill-Llama-8B"` | included | §4 |
+| `tokenizer_revision` | string | required | `"6a6f4aa4197940add57724a7707d069478df56b1"` | included | §4 |
+| `budget` | integer | required | `1024` | included | §4 |
+| `runtime_source_artifact_path` | string | required | `"docs/evidence/B2A_R2_ATTEMPT_INDEX_2026-07-22.json"` | included | §7.3 |
+| `runtime_source_artifact_sha256` | string (64-hex) | required | `f9eff6c1785df69406309157a6921a6fa7729dfb4fb5bfe43fa3401e0691443e` (`sha256_file` of the committed file, §7.3) | included | §7.3 |
 | `attempted` | array | required | one entry per §12.5 outcome, in attempt order | included | new |
 | `attempted_candidate_count` | integer | required | length of `attempted` | included | new |
 | `first_passing_candidate_ordinal` | integer, nullable | nullable | `null` if no candidate qualified | included | new |
@@ -989,35 +1605,144 @@ real future execution, not a reproducible-from-inputs-alone static
 manifest, so a timestamp here does not break determinism of the manifest
 itself.
 
-### 12.7 Selection provenance schema
+`runtime_source_artifact_sha256` above was computed twice during this
+repair using the repository's actual `kvcot.utils.hashing.sha256_file`
+against the committed `docs/evidence/B2A_R2_ATTEMPT_INDEX_2026-07-22.json`
+— both calls returned the identical value recorded above. Never guessed,
+never manually calculated.
+
+The verifier must reject an artifact with a field name outside this table,
+a missing required field, or an `attempted` array whose length disagrees
+with `attempted_candidate_count`.
+
+### 12.7 Selection provenance schema (repairs R3-AUDIT-20, R3-AUDIT-21, R3-AUDIT-25)
 
 | Field | Type | Nullable/Required | Meaning | Hash inclusion | Source |
 |---|---|---|---|---|---|
-| `qualification_artifact_path` | string | required | `results/decisions/b2a_r3_qualification.json` | included | mirrors `SelectionProvenance.qualification_artifact_path` |
-| `qualification_artifact_canonical_sha256` | string | required | mirrors `SelectionProvenance.qualification_artifact_hash` (renamed per §12.1) | included | same |
-| `candidate_manifest_path` | string | required | `configs/discovery/b2a_r3_candidate_manifest.json` | included | mirrors `SelectionProvenance.candidate_manifest_path` |
-| `candidate_manifest_canonical_sha256` | string | required | mirrors `SelectionProvenance.candidate_manifest_hash` (renamed per §12.1) | included | same |
+| `artifact_schema_version` | string | required | `"faithkv-b2a-r3-selection-provenance-v1"` | included | new (§12.9) |
+| `qualification_artifact_path` | string | required | `"results/decisions/b2a_r3_qualification.json"` | included | mirrors `SelectionProvenance.qualification_artifact_path` |
+| `qualification_artifact_canonical_sha256` | string | required | §12.6's `canonical_sha256` (renamed per §12.1) | included | same |
+| `candidate_manifest_path` | string | required | `"configs/discovery/b2a_r3_candidate_manifest.json"` | included | mirrors `SelectionProvenance.candidate_manifest_path` |
+| `candidate_manifest_canonical_sha256` | string | required | §12.3's `canonical_sha256` (renamed per §12.1) | included | same |
+| `selected_manifest_path` | string | required | `"configs/discovery/b2a_one_example_manifest.json"` | included | §12.2 |
+| `selected_manifest_sha256` | string (64-hex) | required | `B2AOneExampleManifest.manifest_hash()` — an EXTERNAL hash, never a field added to the manifest itself (repairs R3-AUDIT-21) | included | `src/kvcot/discovery/manifest.py` |
+| `selected_manifest_hash_algorithm` | string | required | `"B2AOneExampleManifest.manifest_hash-v1"` | included | new (repairs R3-AUDIT-21) |
 | `selected_ordinal` | integer | required | matches the qualification artifact's `first_passing_candidate_ordinal` | included | mirrors existing naming in `kvcot.discovery.b2a_r2_freeze` |
 | `selected_unique_id` | string | required | matches the candidate row at `selected_ordinal` | included | standardized name |
+| `selection_protocol_version` | string | required | `"faithkv-b2a-r3-selection-v1"` | included | new (§12.9) |
+| `row_raw_sha256` | string (64-hex) | required | echoes the selected candidate row's `raw_row_sha256` (§12.4) | included | mirrors `SelectionProvenance.row_raw_sha256` |
+| `prompt_token_ids_sha256` | string (64-hex) | required | mirrors same-named field | included | same |
+| `tokenizer_revision_used_for_prompt_hash` | string | required | mirrors same-named field | included | same |
 | `canonical_sha256` | string (64-hex) | required | this artifact's own self-hash | **excluded** | §12.1 |
 
-### 12.8 Authorization claim schema
+**Frozen rule (repairs R3-AUDIT-21):** `selected_manifest_sha256` is never
+named `selected_manifest_canonical_sha256` — the selected one-example
+manifest does not contain, and this protocol does not add, a
+`canonical_sha256` self-hash field, so §12.1's JSON self-hash rule never
+applies to it. `selected_manifest_sha256` is computed exactly as
+`B2AOneExampleManifest.manifest_hash()` already computes it today
+(`sha256_json(self.model_dump(mode="json"))`, an external hash over the
+manifest's own complete field set) — no change to `manifest.py`, no new
+field added to `B2AOneExampleManifest`.
 
-See §14.4 for the full lifecycle; schema:
+The verifier must reject a selection-provenance record with a field name
+outside this table, or missing any required field above.
+
+### 12.8 Authorization claim schema (repairs R3-AUDIT-20, R3-AUDIT-23, R3-AUDIT-24, R3-AUDIT-25)
+
+See §14.4 for the full atomic-claim lifecycle this schema is written
+under. This subsection is the one, complete, authoritative schema table
+`kvcot.discovery` code must implement — no other section restates or
+supersedes it:
 
 | Field | Type | Nullable/Required | Meaning | Hash inclusion | Source |
 |---|---|---|---|---|---|
-| `authorization_id` | string | required | matches the dated authorization document's `authorization_id` | included | §14.3 |
+| `artifact_schema_version` | string | required | `"faithkv-b2a-r3-authorization-claim-v1"` | included | new (§12.9) |
+| `authorization_id` | string | required | matches the dated authorization document's `authorization_id`; must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` | included | §14.3, §14.4 |
 | `authorization_stage` | string | required | `"fullkv_qualification"` or `"b2a_r3_execution"` | included | §14.3 |
 | `authorization_document_path` | string | required | e.g. `docs/B2A_R3_STAGE_B_QUALIFICATION_AUTHORIZATION_<date>.md` | included | §12.2 |
-| `authorization_document_sha256` | string | required | hash of that document's committed content | included | §14.3 |
+| `authorization_document_sha256` | string (64-hex) | required | `sha256_file` of that Markdown document's committed bytes (repairs R3-AUDIT-23 — never `sha256_json`) | included | §12.1, §14.3 |
+| `authorized_repository` | string | required | must equal `"asad073-ui/Faithkv"` (§21) | included | §14.4 |
+| `authorized_branch` | string | required | the authorization document's named branch | included | §14.3 |
 | `authorized_commit_sha` | string | required | commit the authorization document names | included | §14.3 |
+| `observed_repository` | string | required | actual repository at claim time | included | §14.4 |
+| `observed_branch` | string | required | actual branch at claim time | included | §14.4 |
 | `observed_commit_sha` | string | required | actual `HEAD` at claim time | included | §14.4 |
+| `required_ancestor_shas` | array of string | required | every ancestor commit verified per §14.5's `AttemptProvenancePolicy` | included | §14.5 |
+| `required_rkv_sha` | string | required | the R-KV submodule SHA the authorization document requires | included | §14.5 |
+| `observed_rkv_sha` | string | required | the R-KV submodule SHA actually observed at claim time | included | §14.5 |
 | `candidate_manifest_canonical_sha256` | string | required | binds the claim to one exact candidate manifest | included | §12.3 |
-| `qualification_artifact_canonical_sha256` | string, nullable | nullable (Stage C only) | binds a Stage C claim to one exact qualification outcome | included | §12.6 |
-| `selected_manifest_canonical_sha256` | string, nullable | nullable (Stage C only) | binds a Stage C claim to one exact selected row | included | §12.3 (selected one-example manifest's own hash, if that file gains one) |
+| `qualification_artifact_canonical_sha256` | string, nullable | `null` for Stage B; required for Stage C | binds a Stage C claim to one exact qualification outcome | included | §12.6 |
+| `selected_manifest_sha256` | string, nullable | `null` for Stage B; required for Stage C | binds a Stage C claim to one exact selected row (repairs R3-AUDIT-21 — never `selected_manifest_canonical_sha256`) | included | §12.7 |
+| `selected_manifest_hash_algorithm` | string, nullable | `null` for Stage B; `"B2AOneExampleManifest.manifest_hash-v1"` for Stage C | names the algorithm the previous field used | included | §12.7 |
 | `attempt_id` | string | required | this attempt's own identifier | included | mirrors B2A-R2's `attempt_id` convention |
+| `global_claim_path` | string | required | `"results/decisions/b2a_r3_authorization_claims/<authorization_id>.json"` (repairs R3-AUDIT-24) | included | §14.4 |
+| `attempt_directory_path` | string | required | the attempt directory this claim's execution proceeds into | included | §14.4 |
 | `claimed_at_utc` | string (ISO 8601) | required | operational timestamp — permitted (describes one real claim event) | included | new |
+| `canonical_sha256` | string (64-hex) | required | this claim's own self-hash | **excluded** | §12.1 |
+
+**Frozen claim-verifier rejection list.** The verifier must reject a claim
+that has: an unknown `authorization_stage`; a wrong `authorization_
+document_sha256` (recomputed via `sha256_file` against the committed
+document and compared); a wrong `authorized_repository`/`authorized_
+branch` vs. what is observed; a wrong `observed_commit_sha` (does not
+equal `authorized_commit_sha`); a missing required ancestor commit (any
+entry in `required_ancestor_shas` that does not verify as an ancestor of
+`observed_commit_sha`); a wrong R-KV SHA (`observed_rkv_sha !=
+required_rkv_sha`); a wrong `candidate_manifest_canonical_sha256`; for
+Stage C, a wrong `qualification_artifact_canonical_sha256` or a wrong
+`selected_manifest_sha256`/`selected_manifest_hash_algorithm`; any field
+name outside this table; any required field missing; an invalid
+`canonical_sha256` (§12.1's five-step verification failing); an invalid
+`authorization_id` (§14.4.1's pattern failing); or a `global_claim_path`/
+`attempt_directory_path` that disagrees with the deterministic paths
+§14.4.1/§14.4.2 derive.
+
+### 12.9 Frozen per-artifact protocol-identity fields (repairs R3-AUDIT-25)
+
+Four separate, independently-versioned identity concepts exist across the
+new B2A-R3 artifacts. None of them share a single ambiguous
+`protocol_version` field — each artifact names its own identity field(s)
+explicitly, and a bare `protocol_version` never appears in any new B2A-R3
+schema table (§12.3, §12.5, §12.6, §12.7, §12.8 above all already use the
+separated names; this subsection is the one place that states all four
+together for cross-reference).
+
+**Candidate manifest:**
+
+```text
+artifact_schema_version         = "faithkv-b2a-r3-candidate-manifest-v1"
+candidate_order_protocol_version = "faithkv-b2a-r3-row-order-v1"
+```
+
+**Qualification artifact:**
+
+```text
+artifact_schema_version   = "faithkv-b2a-r3-qualification-artifact-v1"
+qualification_protocol_version = "faithkv-b2a-r3-qualification-v1"
+runtime_predictor_version = "faithkv-b2a-r3-runtime-predictor-v1"
+```
+
+**Selection provenance:**
+
+```text
+artifact_schema_version    = "faithkv-b2a-r3-selection-provenance-v1"
+selection_protocol_version = "faithkv-b2a-r3-selection-v1"
+```
+
+**Authorization claim:**
+
+```text
+artifact_schema_version = "faithkv-b2a-r3-authorization-claim-v1"
+```
+
+(one concept only — no second sub-version is needed for the claim
+schema.)
+
+Historical B2A-R1/B2A-R2 artifacts retain their historical field names and
+meanings (e.g. `b2a_r2_candidates.CANDIDATE_MANIFEST_PROTOCOL_VERSION`'s
+single `protocol_version` field) — this standardization applies only to
+new B2A-R3 artifacts and never edits a historical schema.
 
 ## 13. Selected-row freeze contract
 
@@ -1035,10 +1760,18 @@ A future hash-verified freezer (Step 3) must:
 - Reject selection of a later passing row when an earlier one passed.
 - Reject manual artifact editing (any field mismatch against the
   regenerated hash is a hard failure).
+- Read the selected candidate's complete pinned row from the candidate
+  manifest's own embedded `row` field (§12.4) — **never refetch the
+  dataset during freezing** (R3-AUDIT-22's frozen embed-not-refetch rule).
 - Produce the one-row selected manifest
   (`configs/discovery/b2a_one_example_manifest.json`, §12.2) with full
   provenance hashes, and the companion selection-provenance artifact
-  (`results/decisions/b2a_r3_selection_provenance.json`, §12.7).
+  (`results/decisions/b2a_r3_selection_provenance.json`, §12.7), including
+  that artifact's `selected_manifest_sha256` field — computed as
+  `B2AOneExampleManifest.manifest_hash()` over the just-written selected
+  manifest, never named `selected_manifest_canonical_sha256` (§12.1,
+  R3-AUDIT-21: the selected manifest has no `canonical_sha256` field of
+  its own).
 
 This mirrors `kvcot.discovery.b2a_r2_freeze.freeze_qualified_row`'s
 existing behavior exactly (`docs/B2A_R2_RESULT_2026-07-22.md` §3).
@@ -1132,13 +1865,19 @@ Stage C does not authorize B2B.
 - No attempt reset after failure — a consumed attempt stays consumed,
   exactly as B2A-R1 and B2A-R2 remain consumed (`CLAUDE.md` §1c, §1d).
 
-### 14.4 Authorization document and claim lifecycle (repairs R3-AUDIT-12)
+### 14.4 Authorization document and claim lifecycle (repairs R3-AUDIT-12, R3-AUDIT-24)
 
 The first-frozen protocol required "an attempt-consumption guard" without
-defining its lifecycle. Frozen now, for Step 3 to implement — **not
-implemented by this task**, and this model deliberately avoids any
-mutable tracked authorization state that would dirty the repository
-worktree.
+defining its lifecycle; R3-AUDIT-12 froze a two-part model (a tracked
+authorization document plus a claim). A second independent re-audit found
+that model's claim step ("search the attempt root for any existing valid
+claim, then write a new one") was a scan-then-write pattern — inherently
+racy, since two concurrent processes could each complete the scan before
+either writes, both then proceeding toward CUDA/model activity under the
+same authorization. This subsection replaces the claim mechanism entirely
+with a **globally exclusive, atomically created claim at one
+deterministic path**, never a scan. **Not implemented by this task** —
+frozen now, for Step 3 to implement.
 
 **Tracked authorization document** (one per Stage B or Stage C grant,
 committed at the exact path pattern in §12.2, immutable after commit):
@@ -1149,42 +1888,118 @@ authorization_stage            (one of: "fullkv_qualification", "b2a_r3_executio
 authorized_repository
 authorized_branch
 authorized_commit_sha
-protocol_document_sha256
+authorization_document_sha256  (sha256_file of this document's own committed
+                                 bytes -- see §12.1's Markdown/JSON scope
+                                 boundary; the document cannot hash itself
+                                 before it is committed, so this field is
+                                 recorded by the claim, §12.8, not by the
+                                 document)
 candidate_manifest_canonical_sha256
 qualification_artifact_canonical_sha256   (Stage C only)
-selected_manifest_canonical_sha256        (Stage C only)
+selected_manifest_sha256                  (Stage C only; repairs R3-AUDIT-21
+                                            -- never "..._canonical_sha256")
+selected_manifest_hash_algorithm          (Stage C only:
+                                            "B2AOneExampleManifest.manifest_hash-v1")
 maximum_candidates                        (Stage B only)
 phase_wall_time_limit_seconds             (Stage B only)
 created_at_utc
 ```
 
-**Atomic claim means consumption.** Before any CUDA initialization, model
-loading, tokenizer loading for execution, or GPU worker launch:
+**14.4.1 Frozen global claim path (repairs R3-AUDIT-24)**
 
-1. Create a new immutable attempt directory (§12.2 path pattern).
-2. Search the attempt root for any existing valid claim using the same
-   `authorization_id`; if one exists, refuse.
-3. Atomically write `authorization_claim.json` (§12.8 schema) inside the
-   new attempt directory.
+```text
+results/decisions/b2a_r3_authorization_claims/<authorization_id>.json
+```
 
-The existence of one valid claim means the authorization is **permanently
-consumed**, even if the subsequent run fails preflight after the claim,
-crashes, times out, raises an exception, fails a gate, or produces
-incomplete artifacts. There is no retry after a claim. Terminal artifacts
-(`completion.json`, `final.json`) record the outcome, but never restore
-authorization.
+One deterministic path per `authorization_id` — never inside an attempt
+directory, never scanned for, always computed directly from the
+authorization document's own `authorization_id` field.
 
-**CPU dry-run behavior.** CPU-only planning, verification, synthetic
-tests, and dry-run commands must not create an attempt directory, must
-not write an authorization claim, must not consume authorization, and
-must report that no claim was made.
+**Frozen authorization-ID validation** (rejected values are a hard
+failure, never sanitized/coerced):
 
-**Clean-worktree compatibility.** The claim lives inside the attempt
-artifact root and must be handled by provenance collection as an
-authorized artifact-root path, not as an unexplained repository
-modification — exactly how B2A-R2's own attempt directories
-(`results/decisions/b2a_attempt_.../`) are already handled. The claim must
-never be placed in `configs/`.
+```text
+pattern: ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$
+```
+
+Rejects: any `/` or `\`, any `..` sequence, whitespace, control
+characters, an empty string, and any ID longer than 128 characters.
+
+**14.4.2 Frozen claim operation — creation IS consumption**
+
+Before any CUDA initialization, model loading, tokenizer loading for
+execution, or GPU worker launch, in this exact order:
+
+1. Complete every non-GPU pre-claim verification: authorization document
+   path and byte hash (`authorization_document_sha256`, §12.1's
+   `sha256_file` rule); authorization stage; repository; branch; exact
+   authorized commit; required ancestor commits (§14.5); the R-KV
+   submodule SHA; the candidate-manifest hash; the qualification-artifact
+   hash (Stage C only); the selected-manifest hash (Stage C only, §12.7);
+   a clean worktree.
+2. Compute the deterministic global claim path from `authorization_id`
+   (§14.4.1) — a pure function, never a filesystem scan.
+3. Create the claim path using exclusive-create semantics:
+   `os.open(claim_path, O_WRONLY | O_CREAT | O_EXCL, mode)` (or an
+   equivalent operation whose success is atomic across concurrent
+   processes on the host filesystem). **The success of this single
+   operation IS the consumption event** — not a subsequent successful
+   write, not a subsequent successful GPU run.
+4. Only after step 3 succeeds: write the complete canonical JSON claim
+   payload (§12.8 schema) to the exclusively created file descriptor,
+   flush it, and `fsync` it.
+5. Only after the global claim (steps 3-4) succeeds: create the new
+   immutable attempt directory (§12.2 path pattern).
+6. Store, inside the attempt directory, either a byte-identical copy of
+   the completed claim or an immutable reference recording the global
+   claim's own path and hash — never a second, independently-authoritative
+   claim.
+7. Only after both the global claim and the attempt-directory record exist
+   may execution proceed toward tokenizer/model/CUDA activity.
+
+**14.4.3 Frozen crash semantics**
+
+```text
+The existence of ANY filesystem entry at the deterministic global claim
+path means the authorization is permanently consumed.
+```
+
+This includes a complete valid claim, a partially written claim, an empty
+claim, a corrupt claim, a claim left by a crash, a claim left by a killed
+process, and a claim left by a failed preflight step that ran after step 3
+above already succeeded. A malformed claim means **consumed and
+corrupted**, never **available for retry**. No deletion, repair, or manual
+replacement of the claim file restores authorization. A later attempt
+requires a new authorization document carrying a new `authorization_id`
+— never reuse of an existing ID's claim path.
+
+**14.4.4 Mandatory concurrency test**
+
+A future CPU test must prove: two concurrent claim attempts for the same
+`authorization_id` produce exactly one successful exclusive creation and
+one refusal (e.g. by asserting `FileExistsError`/`OSError` on the loser of
+a race over the same path, or by direct simulation of the `O_EXCL`
+semantics). No scan-then-write design of any kind is permitted to pass
+this test.
+
+**14.4.5 Frozen dry-run behavior**
+
+CPU-only planning, verification, synthetic tests, and dry-run commands
+must not create the global claim directory, must not create a claim file
+at any path, must not create an attempt directory, must report
+`authorization_claim_created = false`, and must report
+`authorization_consumed = false`.
+
+**14.4.6 Worktree/provenance behavior**
+
+The future provenance verifier must: require a clean worktree BEFORE
+claim creation (never after); recognize only the exact active global
+claim path and the exact active attempt-directory root as expected
+post-claim artifacts (never a broader "anything under `results/decisions/`
+is fine" rule); reject any other dirty, staged, modified, or untracked
+path exactly as today; never place a claim anywhere under `configs/`; and
+never weaken historical B2A-R1/R2 clean-worktree verification in the
+course of adding this.
 
 ### 14.5 Versioned provenance policy (repairs R3-AUDIT-13)
 
@@ -1198,7 +2013,13 @@ policy object:
 
 ```text
 AttemptProvenancePolicy
-    protocol_version
+    provenance_policy_version   ("faithkv-b2a-r3-provenance-policy-v1" —
+                                 repairs R3-AUDIT-25: never a bare
+                                 "protocol_version"; this is a fifth,
+                                 distinct identity concept from the four
+                                 named in §12.9, versioning this in-memory
+                                 policy object itself, not a persisted
+                                 artifact)
     required_repository
     required_branch
     required_commit_sha
@@ -1637,6 +2458,22 @@ unauthorized further attempt is permitted.
 - [x] Repository identity resolved, not left as an open ambiguity (§21).
 - [x] GPU remains prohibited pending separate authorization (§14, §19).
 - [x] §22 (this repair's disposition) exists exactly once.
+- [x] Exact 27-condition qualification tuple frozen, with full condition
+      definitions and rejection rules (§10.5).
+- [x] Candidate manifest, per-candidate outcome, and qualification
+      artifact schemas completed with every field elsewhere required
+      (§12.3, §12.5, §12.6).
+- [x] Selected-manifest hash semantics resolved as an external
+      `manifest_hash()` call, never a new self-hash field (§12.1, §12.7).
+- [x] Candidate-row schema frozen with embedded `row`, verification
+      formulas, and an explicit embed-not-refetch rule (§12.4, §13).
+- [x] Markdown authorization-document hashing (`sha256_file`) frozen
+      separately from the JSON `canonical_sha256`/`sha256_json` rule
+      (§12.1, §12.8).
+- [x] Authorization-claim consumption replaced with a globally exclusive,
+      atomically created claim at one deterministic path (§14.4).
+- [x] Four separate per-artifact protocol-identity fields frozen; no new
+      B2A-R3 schema uses a bare `protocol_version` (§12.9).
 
 ## 21. Repository identity (repairs R3-AUDIT-18)
 
@@ -1659,9 +2496,12 @@ ambiguity requiring further action.
 ## 22. Independent protocol audit and repair disposition
 
 This section repairs R3-AUDIT-01 (the first-frozen protocol referenced
-"§22" in §1 without any such section existing).
+"§22" in §1 without any such section existing). It now records TWO repair
+rounds: Step 2A (R3-AUDIT-01 through R3-AUDIT-18, the first independent
+audit) and Step 2B (R3-AUDIT-19 through R3-AUDIT-25, a second independent
+re-audit of the Step 2A repair commit). All 25 findings are repaired.
 
-**Audit findings and repairs, summarized** (full detail:
+**Step 2A audit findings and repairs, summarized** (full detail:
 `docs/B2A_R3_PROTOCOL_AUDIT_REPAIR_2026-07-22.md`):
 
 | Finding | Issue | Repaired in |
@@ -1685,11 +2525,27 @@ This section repairs R3-AUDIT-01 (the first-frozen protocol referenced
 | R3-AUDIT-17 | CPU scope ambiguous about whether a real qualification artifact was authorized | §14.1 |
 | R3-AUDIT-18 | Repository identity left as an unresolved discrepancy | §21 |
 
+**Step 2B audit findings and repairs, summarized** (full detail:
+`docs/B2A_R3_PROTOCOL_AUDIT_REPAIR_2026-07-22.md`, "Step 2B" section):
+
+| Finding | Issue | Repaired in |
+|---|---|---|
+| R3-AUDIT-19 | Qualification-condition tuple not frozen (Step 3 could invent names/order) | §10.5 |
+| R3-AUDIT-20 | Artifact provenance schemas (candidate manifest, outcome, qualification artifact) incomplete | §12.3, §12.5, §12.6 |
+| R3-AUDIT-21 | Selected-manifest hash semantics unresolved ("if that file gains one") | §12.1, §12.7, §13 |
+| R3-AUDIT-22 | Candidate rows insufficient for deterministic freezing (embed-vs-refetch left open) | §12.4, §13 |
+| R3-AUDIT-23 | Markdown authorization hash conflicted with the JSON self-hash rule | §12.1, §12.8, §14.4 |
+| R3-AUDIT-24 | Authorization-claim consumption was scan-then-write, not globally atomic | §14.4 |
+| R3-AUDIT-25 | Protocol-identity fields conflated under one ambiguous `protocol_version` | §12.9, §12.3, §12.6, §12.7, §12.8, §14.5 |
+
 ```text
-INDEPENDENT AUDIT FINDINGS REPAIRED IN THIS COMMIT.
+ALL 25 FINDINGS (STEP 2A: 18, STEP 2B: 7) REPAIRED IN THIS COMMIT.
 
 The repairing author does not self-certify this protocol.
 
 STEP 3 CPU IMPLEMENTATION REMAINS BLOCKED UNTIL A SEPARATE
-INDEPENDENT RE-AUDIT VERIFIES THIS COMMIT.
+INDEPENDENT RE-AUDIT VERIFIES THIS STEP 2B COMMIT.
+
+STAGE B FULLKV QUALIFICATION, STAGE C B2A-R3 EXECUTION, ALL GPU/CUDA
+ACTIVITY, B2B, AND FAITHKV METHOD IMPLEMENTATION REMAIN PROHIBITED.
 ```

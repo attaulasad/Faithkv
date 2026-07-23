@@ -7,11 +7,24 @@ of the protocol — every repair's authoritative rule lives in the protocol
 document itself; this ledger records what was wrong, what evidence was
 used to fix it, and exactly where the fix now lives.
 
+This ledger now covers two repair rounds. **Step 2A** (findings
+R3-AUDIT-01 through R3-AUDIT-18, immediately below) repaired the original
+18 defects found by the first independent audit. **Step 2B** (findings
+R3-AUDIT-19 through R3-AUDIT-25, appended after R3-AUDIT-18) repairs seven
+further implementation-level ambiguities found by a second independent
+re-audit of the Step 2A repair commit (`81e11cb57202e0d4b434aabb
+347963ae3c34b80b`). Both rounds are documentation-only repairs to the
+same protocol document; neither authorizes any CPU implementation, GPU
+activity, or method work by itself.
+
 ```text
-STATUS: AUDIT FINDINGS REPAIRED IN THIS COMMIT.
+STATUS: STEP 2A AND STEP 2B AUDIT FINDINGS (25 TOTAL) REPAIRED IN THIS
+LEDGER AND IN THE PROTOCOL DOCUMENT.
 The repairing author does not self-certify this protocol.
 Step 3 CPU implementation remains blocked until a separate independent
-re-audit verifies this commit.
+re-audit verifies the Step 2B commit.
+Stage B FullKV qualification, Stage C B2A-R3 execution, all GPU/CUDA
+activity, B2B, and FaithKV method implementation remain prohibited.
 ```
 
 ---
@@ -522,3 +535,350 @@ prompt's own documentation mismatch, explicitly not an active ambiguity.
 
 **Remaining authorization state:** Unchanged — this is a documentation
 clarification with no bearing on any authorization gate.
+
+---
+
+# Step 2B — second independent re-audit repair (dated 2026-07-22)
+
+The Step 2A repair above (commit `81e11cb57202e0d4b434aabb347963ae3c34b80b`)
+was independently re-audited. The first-frozen protocol's 18 defects were
+materially repaired, but the re-audit found seven remaining
+implementation-level ambiguities that would still have let Step 3 invent
+behavior the protocol did not actually pin down. All seven are repaired
+below and in the protocol document. This closes Step 2B; it does not
+authorize Step 3 — a separate, further independent re-audit of this Step
+2B commit is still required first (§1g of `CLAUDE.md`; §1/§22 of the
+protocol document).
+
+```text
+STATUS: STEP 2B FINDINGS REPAIRED IN THIS COMMIT.
+The repairing author does not self-certify this protocol.
+Step 3 CPU implementation remains blocked until a separate independent
+re-audit verifies this Step 2B commit.
+```
+
+---
+
+## R3-AUDIT-19 — Qualification-condition tuple not frozen
+
+**Original defect:** §10 (§10.1-§10.4) described qualification gates as
+prose bullets and separate predicate definitions, but never froze one
+single, exact, ordered tuple of condition names Step 3 must implement —
+leaving Step 3 free to invent its own condition names, omit a condition,
+or order `failed_conditions` differently from another implementation.
+This mirrors the exact defect R3-AUDIT-14 already repaired for the
+*final* mechanical gate tuple (§16.1), but §10's *qualification* gate had
+never received the same treatment.
+
+**Evidence inspected:** `src/kvcot/discovery/b2a_qualification.py`
+(`QUALIFICATION_CONDITIONS`, a 10-name frozen tuple for B2A-R2's simpler
+qualifier, and `evaluate_candidate_qualification`/`build_candidate_outcome`,
+which compute `conditions`/`qualified`/`failed_conditions` from it — the
+existing pattern this repair generalizes, not invents);
+`src/kvcot/discovery/pass1.py` (`eligible_event_positions`, the exact
+eligible-event rule reused unchanged); `src/kvcot/probes/early_answering.py`
+(`find_think_span`/`ThinkSpanResult`, reused unchanged per R3-AUDIT-06/07);
+`src/kvcot/discovery/strict_device.py`
+(`verify_placement_from_raw_evidence`/`verify_device_gate_from_raw_evidence`,
+confirming that stricter raw `ParameterPlacementEvidence` fields
+— `requested_device`, `every_parameter_on_cuda`, `no_offload_verified`,
+`parameter_count`, `unique_device_types`, `unique_devices`, `hf_device_map`
+— already exist as a canonical source, so the frozen conditions must
+derive from these raw fields, never only a legacy summary boolean);
+`src/kvcot/utils/hashing.py` (`sha256_json`, `sha256_file`); `src/kvcot/
+config.py` (`config_identity = sha256_file`); `configs/discovery/
+llama8b_math500_b1024.yaml` (the exact `generation:` block, confirmed
+byte-for-byte identical to the frozen generation-configuration payload
+below).
+
+**Exact repair:** Added protocol §10.5, freezing
+`B2A_R3_QUALIFICATION_CONDITIONS`, an exact 27-name ordered tuple, its
+exact count (27), the `qualified`/`failed_conditions` derivation formulas
+(mirroring the existing `b2a_qualification.py` pattern exactly), and a
+complete, unambiguous boolean definition for every one of the 27 names —
+reusing already-frozen predicates where they exist (§10.1's
+`thinking_span_valid`/`trace_complete`, §7.4's runtime formula, §9's
+ordering hash) rather than redefining them a second time. This B2A-R3-only
+tuple is explicitly distinct from, and never confused with, B2A-R2's
+historical 10-name `QUALIFICATION_CONDITIONS` in `b2a_qualification.py`,
+which is not modified.
+
+**Files changed:**
+`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` new §10.5
+(cross-referenced from §10, §12.5, §12.6, §15).
+
+**Remaining authorization state:** Unchanged — no evaluator implemented in
+code; this is a frozen specification only.
+
+---
+
+## R3-AUDIT-20 — Artifact provenance schemas incomplete
+
+**Original defect:** §12.3-§12.8's schema tables (frozen by R3-AUDIT-08/
+09/10/16) named fields but omitted several that later sections implicitly
+required (e.g. `config_sha256`/`generation_config_sha256` binding, a
+runtime-source-artifact path/hash pair, per-candidate worker identity
+echoes, expected-vs-observed prompt-token-hash pairs, placement/timing
+evidence) — a Step 3 implementer following §12 alone could not actually
+reproduce the identity/hash bindings §4/§7/§9 elsewhere required.
+
+**Evidence inspected:** `src/kvcot/discovery/b2a_qualification.py`
+(`CandidateQualificationOutcome`, `QualificationArtifact` — the existing
+B2A-R2 field set this repair extends, never duplicates independently);
+`src/kvcot/discovery/b2a_r2_candidates.py` (`CandidateRow`, `build_
+candidate_manifest` — existing manifest-level field set); `src/kvcot/
+config.py` (`config_identity`); `docs/evidence/
+B2A_R2_ATTEMPT_INDEX_2026-07-22.json` (the file the runtime-source-artifact
+hash binds to); `configs/discovery/llama8b_math500_b1024.yaml` (the exact
+identity fields — dataset repo/config/split/revision, model/tokenizer
+name/revision, budget — every schema below must echo back).
+
+**Exact repair:** Replaced §12.3 (candidate manifest), §12.5 (per-candidate
+qualification outcome), and §12.6 (qualification artifact) with complete,
+exact field lists (protocol §12.3, §12.5, §12.6) — every field the
+protocol's own text elsewhere requires is now named, typed, and marked
+required/nullable in the schema it belongs to. No field may be added
+outside a future versioned schema revision.
+
+**Files changed:**
+`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` §12.3, §12.5, §12.6.
+
+**Remaining authorization state:** Unchanged — no schema implemented in
+code; documentation only.
+
+---
+
+## R3-AUDIT-21 — Selected-manifest hash semantics unresolved
+
+**Original defect:** §12.8's authorization-claim schema (frozen by
+R3-AUDIT-08/16) referenced `selected_manifest_canonical_sha256` with the
+parenthetical caveat "if that file gains one" — the historical
+`B2AOneExampleManifest` (`configs/discovery/b2a_one_example_manifest.json`)
+has never carried a `canonical_sha256` self-hash field, and this repair
+left it ambiguous whether Step 3 was expected to add one (which would
+silently reinterpret B2A-R1/R2's historical schema) or use some other
+mechanism.
+
+**Evidence inspected:** `src/kvcot/discovery/manifest.py`
+(`B2AOneExampleManifest.manifest_hash()` = `sha256_json(self.model_dump
+(mode="json"))` — an existing, already-implemented EXTERNAL hash method
+over the whole manifest, with no self-referential field inside the hashed
+payload; used today by `manifest_prepare.prepare_manifest`'s `--force`
+old/new hash printout). This is a hash the repository already computes,
+not a new field on the manifest schema.
+
+**Exact repair:** Froze `selected_manifest_sha256 =
+B2AOneExampleManifest.manifest_hash()` (an external hash, computed the
+same way the existing code already computes it — `sha256_json(model_dump
+(mode="json"))` — never a new field added to `B2AOneExampleManifest`
+itself), and `selected_manifest_hash_algorithm =
+"B2AOneExampleManifest.manifest_hash-v1"` as its named algorithm-version
+string. Renamed every reference from `selected_manifest_canonical_sha256`
+to `selected_manifest_sha256` throughout §12.7 (selection provenance) and
+§12.8/§M (authorization claim), with an explicit note that the
+`canonical_sha256` self-hash rule (§12.1) applies only to artifacts that
+actually contain a `canonical_sha256` field — the selected manifest does
+not, and this repair does not add one to it.
+
+**Files changed:**
+`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` §12.1 (scope note),
+§12.7, §12.8, §13.
+
+**Remaining authorization state:** Unchanged — `manifest.py` was
+inspected only, never modified (out of scope per Task B).
+
+---
+
+## R3-AUDIT-22 — Candidate rows insufficient for deterministic freezing
+
+**Original defect:** §12.4's candidate-row schema table (frozen by
+R3-AUDIT-16) listed identity/hash fields but did not explicitly freeze
+whether the complete pinned dataset row is embedded in the manifest or
+must be refetched at freeze time — leaving "embed or refetch" as an
+implementation choice, which would make freezing either non-deterministic
+(refetch could observe a since-changed live source) or silently dependent
+on an unstated convention.
+
+**Evidence inspected:** `src/kvcot/discovery/b2a_r2_candidates.py`
+(`CandidateRow.row: dict[str, Any]` — the existing B2A-R2 convention
+already embeds the complete row; `build_candidate_manifest` computes
+`raw_row_sha256=sha256_json(row)`, `problem_sha256=sha256_text(row
+["problem"])`, `gold_answer_sha256=sha256_text(row["answer"])` from the
+embedded row directly); `src/kvcot/discovery/b2a_r2_freeze.py`
+(`freeze_qualified_row` reads `candidate_row["row"]`, recomputes
+`sha256_json(row)`, and compares it against the stored `raw_row_sha256` —
+confirming the existing freezer already uses the embedded row and never
+refetches); `src/kvcot/discovery/manifest_prepare.py`
+(`EXPECTED_MATH500_COLUMNS = ("problem", "solution", "answer", "subject",
+"level", "unique_id")`).
+
+**Exact repair:** Froze the exact candidate-row schema (protocol §12.4)
+including the `row` field (the complete embedded pinned row, exact columns
+`("problem", "solution", "answer", "subject", "level", "unique_id")`), the
+three verification formulas (`sha256_json(row) == raw_row_sha256`,
+`sha256_text(row["problem"]) == problem_sha256`, `sha256_text(row
+["answer"]) == gold_answer_sha256`), the three identity cross-checks
+(`row["unique_id"] == unique_id`, `row["subject"] == subject`, `int(row
+["level"]) == level`), and an explicit, non-optional rule: the future
+freezer (§13) must use the embedded `row` and must NEVER refetch the
+dataset during selected-row freezing — mirroring
+`kvcot.discovery.b2a_r2_freeze.freeze_qualified_row`'s existing behavior
+exactly, not a new design.
+
+**Files changed:**
+`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` §12.4, §13.
+
+**Remaining authorization state:** Unchanged — no candidate generator or
+freezer implemented in code; documentation only.
+
+---
+
+## R3-AUDIT-23 — Markdown authorization hash conflicts with JSON self-hash rule
+
+**Original defect:** §12.1's canonical-hashing rule
+(`canonical_sha256 = sha256_json(payload with canonical_sha256 omitted)`)
+was written as applying to "any authorization document or authorization-
+claim artifact" — but the future dated authorization documents (§12.2)
+are Markdown files, not JSON objects, so `sha256_json`'s self-referential-
+field-omission procedure cannot apply to them at all (there is no JSON
+object to parse, no field to omit). The protocol never actually froze how
+a Markdown document's hash is computed, leaving Step 3 to guess.
+
+**Evidence inspected:** `docs/B2A_R3_STAGE_B_QUALIFICATION_AUTHORIZATION_
+<date>.md`/`docs/B2A_R3_STAGE_C_EXECUTION_AUTHORIZATION_<date>.md`'s naming
+pattern (§12.2, already frozen as Markdown, never JSON); `src/kvcot/utils/
+hashing.py` (`sha256_file`, the repository's one existing whole-file byte
+hash helper, already used for config-identity hashing via `kvcot.config
+.config_identity`).
+
+**Exact repair:** Froze `authorization_document_sha256 = sha256_file(the
+exact committed Markdown authorization document)` — a plain whole-file
+SHA-256 over committed bytes, with no self-referential-field procedure
+involved because a Markdown document has no such field. Clarified
+explicitly, in §12.1 and everywhere §12.1 was previously cross-referenced
+(§12.8, §14.4, §14.5, §M), that the `canonical_sha256`/`sha256_json`
+self-hash rule applies only to JSON artifacts that actually contain a
+`canonical_sha256` field (candidate manifest, qualification artifact,
+selection-provenance artifact, authorization-claim artifact) — never to
+the Markdown authorization documents themselves, which use
+`authorization_document_sha256`/`sha256_file` instead.
+
+**Files changed:**
+`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` §12.1, §14.4, §M
+(authorization claim schema).
+
+**Remaining authorization state:** Unchanged — no authorization document
+has been written yet; this is a hashing-rule clarification only.
+
+---
+
+## R3-AUDIT-24 — Authorization claim consumption not globally atomic
+
+**Original defect:** §14.4's claim lifecycle (frozen by R3-AUDIT-12)
+required Step 3 to "search the attempt root for any existing valid claim
+using the same `authorization_id`" before writing a new claim inside a
+freshly created attempt directory — a scan-then-write pattern that is
+inherently racy: two concurrent processes could each complete the scan
+(finding nothing) before either writes its claim, both then proceeding to
+launch CUDA/model activity under the same "consumed once" authorization.
+The consumption event was never tied to one single atomic filesystem
+operation with a fixed, precomputable path.
+
+**Evidence inspected:** `src/kvcot/discovery/attempt_verification.py`
+(the existing attempt-directory/provenance conventions this repair must
+stay compatible with — clean-worktree accounting, `dirty`/`staged_paths`/
+`unstaged_paths`); `docs/evidence/B2A_R2_ATTEMPT_INDEX_2026-07-22.json`
+(the existing `results/decisions/b2a_attempt_.../` directory-naming
+convention the new global-claim design must sit alongside without
+disturbing).
+
+**Exact repair:** Replaced the scan-then-write design entirely with a
+globally exclusive claim at one deterministic path,
+`results/decisions/b2a_r3_authorization_claims/<authorization_id>.json`,
+created via `os.open(claim_path, O_WRONLY | O_CREAT | O_EXCL, mode)` (or an
+equivalent atomic-across-processes primitive) — **creation of the
+filesystem entry, not a successful subsequent write, is the consumption
+event**. Froze: an authorization-ID validation pattern
+(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, rejecting path separators, `..`,
+whitespace, control characters); the exact seven-step claim sequence
+(pre-claim verification, path derivation, exclusive creation, payload
+write+flush+fsync, attempt-directory creation only after the global claim
+succeeds, an immutable copy/reference of the claim inside the attempt
+directory, execution only after both exist); explicit crash semantics
+(any filesystem entry at the deterministic path — complete, partial,
+empty, or corrupt — means permanently consumed, never available for
+retry, no repair or deletion restores it); a mandatory future CPU
+concurrency test (two concurrent claim attempts for one authorization ID
+must produce exactly one successful exclusive creation and one refusal);
+explicit dry-run behavior (no claim directory, no claim file, no attempt
+directory, `authorization_claim_created=false`, `authorization_consumed=
+false`); and worktree/provenance rules (clean worktree required before
+claim creation, only the exact active global claim path and active
+attempt root recognized as expected post-claim artifacts, never placed in
+`configs/`, historical B2A-R1/R2 clean-worktree verification never
+weakened).
+
+**Files changed:**
+`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` §14.4 (replaced),
+§12.2 (new global claim path), §M (authorization claim schema).
+
+**Remaining authorization state:** Unchanged — no claim mechanism
+implemented in code; this is a frozen specification only.
+
+---
+
+## R3-AUDIT-25 — Protocol-identity fields conflated across schemas
+
+**Original defect:** Several schema tables reused a single, ambiguous
+`protocol_version` field name for what are actually four distinct
+concepts (candidate ordering convention, qualification-artifact schema
+convention, runtime-predictor formula/constant version, selection
+convention) — a Step 3 implementer could not tell, from the field name
+alone, which of the four a given `protocol_version` string on a given
+artifact was actually versioning, or whether bumping one should ever bump
+another.
+
+**Evidence inspected:** `src/kvcot/discovery/b2a_r2_candidates.py`
+(`CANDIDATE_MANIFEST_PROTOCOL_VERSION = "faithkv-b2a-r2-row-order-v1"`,
+used both as the manifest's top-level `protocol_version` field AND inside
+`_ordering_hash`'s payload — confirming the historical B2A-R2 schema
+itself already conflates "artifact schema" and "ordering convention" under
+one name, a pattern this repair does not carry forward into new B2A-R3
+schemas); `src/kvcot/discovery/b2a_qualification.py`
+(`QUALIFICATION_PROTOCOL_VERSION = "faithkv-b2a-r2-qualification-v1"`, the
+qualification artifact's own separate, historical version string).
+
+**Exact repair:** Froze four separate, independently-versioned identity
+fields (protocol §12.9, and per-schema in §12.3/§12.6/§12.7/§M):
+`artifact_schema_version` + `candidate_order_protocol_version` for the
+candidate manifest; `artifact_schema_version` + `qualification_protocol_
+version` + `runtime_predictor_version` for the qualification artifact;
+`artifact_schema_version` + `selection_protocol_version` for the selection
+provenance; `artifact_schema_version` alone for the authorization claim
+(one concept, no second sub-version needed). Froze the exact string value
+for each. Historical B2A-R1/R2 artifacts keep their historical field names
+and meanings unchanged — this standardization applies only to new B2A-R3
+artifacts, and a bare `protocol_version` never appears in any new B2A-R3
+schema table.
+
+**Files changed:**
+`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` new §12.9; §12.3,
+§12.6, §12.7, §M updated to use the separated fields.
+
+**Remaining authorization state:** Unchanged — no schema implemented in
+code; documentation only.
+
+---
+
+```text
+STEP 2A AND STEP 2B FINDINGS (25 TOTAL) REPAIRED IN THIS LEDGER AND IN
+THE PROTOCOL DOCUMENT.
+
+The repairing author does not self-certify this protocol.
+
+STEP 3 CPU IMPLEMENTATION REMAINS BLOCKED UNTIL A SEPARATE INDEPENDENT
+RE-AUDIT VERIFIES THE STEP 2B COMMIT.
+
+STAGE B FULLKV QUALIFICATION, STAGE C B2A-R3 EXECUTION, ALL GPU/CUDA
+ACTIVITY, B2B, AND FAITHKV METHOD IMPLEMENTATION REMAIN PROHIBITED.
+```

@@ -1,5 +1,67 @@
 # Changelog
 
+## 2026-07-22 — B2A-R3 protocol Step 2B implementation-contract closure: 7 findings resolved (DOCUMENTATION ONLY; STEP 3 BLOCKED; GPU REMAINS PROHIBITED)
+
+A second independent re-audit of the Step 2A repair commit
+(`81e11cb57202e0d4b434aabb347963ae3c34b80b`) found the original 18 defects
+materially repaired, but identified seven remaining implementation-level
+ambiguities that would still have let a future implementer invent behavior
+the protocol never actually pinned down. All seven (R3-AUDIT-19 through
+R3-AUDIT-25) are repaired in
+`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md`; the ledger addition
+is in `docs/B2A_R3_PROTOCOL_AUDIT_REPAIR_2026-07-22.md`'s new "Step 2B"
+section. This is a documentation-only repair: no source, test, or
+configuration file changed; no GPU used; no candidate manifest,
+qualification artifact, selected manifest, or authorization claim
+generated.
+
+- **R3-AUDIT-19:** froze `B2A_R3_QUALIFICATION_CONDITIONS`, an exact
+  27-name ordered tuple with a complete boolean definition for every
+  condition, plus the `qualified`/`failed_conditions` derivation and
+  mandatory rejection rules (new §10.5) — the same treatment R3-AUDIT-14
+  already gave the final mechanical gate tuple, now applied to the
+  qualification gate.
+- **R3-AUDIT-20:** completed the candidate-manifest (§12.3), per-candidate
+  qualification-outcome (§12.5), and qualification-artifact (§12.6)
+  schemas with every field the protocol's own text elsewhere required
+  (config/generation-config hash bindings, worker identity echoes,
+  expected-vs-observed prompt-token hashes, placement/timing evidence).
+- **R3-AUDIT-21:** resolved the selected-manifest hash as the existing
+  external `B2AOneExampleManifest.manifest_hash()` call
+  (`selected_manifest_sha256`/`selected_manifest_hash_algorithm`), never a
+  new `canonical_sha256` field added to that historical schema.
+- **R3-AUDIT-22:** froze the candidate-row schema's embedded `row` field,
+  its three verification formulas, and an explicit embed-not-refetch rule
+  for the future selected-row freezer (§12.4, §13).
+- **R3-AUDIT-23:** froze `authorization_document_sha256 = sha256_file(...)`
+  for the Markdown authorization documents, distinguished from the JSON
+  `canonical_sha256`/`sha256_json` self-hash rule, which never applies to
+  a Markdown file or to the selected one-example manifest (§12.1).
+- **R3-AUDIT-24:** replaced the scan-then-write authorization-claim design
+  with a globally exclusive, atomically created claim at one deterministic
+  path (`results/decisions/b2a_r3_authorization_claims/<authorization_id>
+  .json`, `O_CREAT | O_EXCL` semantics) — creation of the filesystem entry
+  is the consumption event; any entry at that path, complete or corrupt,
+  means permanently consumed (new §14.4).
+- **R3-AUDIT-25:** froze four separate, independently-versioned
+  protocol-identity fields (candidate manifest, qualification artifact,
+  selection provenance, authorization claim) so no new B2A-R3 schema uses
+  one ambiguous `protocol_version` field (new §12.9).
+
+All two computed hashes this repair froze were computed twice, using the
+repository's actual `kvcot.utils.hashing` helpers, with identical results
+both times: `generation_config_sha256 =
+b67ed818bb94e0a674e01c1400caf2e005c41c12203d6a29b0f0f5c69eef01a3`;
+`runtime_source_artifact_sha256 =
+f9eff6c1785df69406309157a6921a6fa7729dfb4fb5bfe43fa3401e0691443e` (hash of
+`docs/evidence/B2A_R2_ATTEMPT_INDEX_2026-07-22.json`).
+
+`CLAUDE.md` §1g and `PLAN.md`/`README.md`'s current-status sections record
+the same disposition: Step 2B is closed; a separate, genuinely independent
+re-audit of this commit is the next required action before Stage A (CPU
+implementation) may begin. No threshold, budget, model, dataset, gate, or
+candidate ordering frozen by any prior section is changed by this repair.
+
 ## 2026-07-22 — B2A-R3 protocol audit repair: 18 findings resolved (DOCUMENTATION ONLY; STEP 3 BLOCKED; GPU REMAINS PROHIBITED)
 
 An independent audit of the B2A-R3 protocol frozen earlier the same day

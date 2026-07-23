@@ -1,6 +1,44 @@
 # Plan and status
 
-## Current status: B2A-R3 protocol repaired; independent re-audit pending (2026-07-22)
+## Current status: B2A-R3 Step 2B protocol implementation-contract repair complete; independent re-audit pending (2026-07-22)
+
+A second independent re-audit of the Step 2A repair commit
+(`81e11cb57202e0d4b434aabb347963ae3c34b80b`) found the original 18 defects
+materially repaired, but identified seven remaining implementation-level
+ambiguities: an unfrozen qualification-condition tuple; incomplete
+candidate-manifest/outcome/qualification-artifact schemas; unresolved
+selected-manifest hash semantics; a candidate-row schema insufficient for
+deterministic freezing (embed-vs-refetch left open); a Markdown
+authorization-document hash conflicting with the JSON `canonical_sha256`
+self-hash rule; a scan-then-write (not globally atomic) authorization-claim
+design; and protocol-identity fields conflated under one ambiguous
+`protocol_version` name. All seven (R3-AUDIT-19 through R3-AUDIT-25) are
+now repaired in
+`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md`; the full ledger is
+`docs/B2A_R3_PROTOCOL_AUDIT_REPAIR_2026-07-22.md`'s "Step 2B" section. All
+25 findings across both rounds are now repaired.
+
+```text
+B2A-R3 STATUS:
+PROTOCOL IMPLEMENTATION CONTRACT REPAIRED (STEP 2B) — INDEPENDENT
+RE-AUDIT REQUIRED
+CPU IMPLEMENTATION BLOCKED
+GPU EXECUTION PROHIBITED
+```
+
+This repair does not self-certify the protocol -- the repairing author
+cannot independently approve their own repair. `CLAUDE.md` §1g records the
+same dated authorization boundary. Stage B FullKV qualification, Stage C
+B2A-R3 execution, all GPU/CUDA activity, B2B, and FaithKV method
+implementation remain prohibited.
+
+Next action:
+
+```text
+Independent re-audit of the Step 2B documentation commit.
+```
+
+## Prior status: B2A-R3 protocol repaired; independent re-audit pending (2026-07-22)
 
 An independent audit of the B2A-R3 protocol first frozen at commit
 `93b6ba8` found 18 defects (missing §22; a contradictory "CPU
@@ -18,7 +56,7 @@ discrepancy). All 18 are now repaired in
 `docs/B2A_R3_PROTOCOL_AUDIT_REPAIR_2026-07-22.md`.
 
 ```text
-B2A-R3 STATUS:
+B2A-R3 STATUS (superseded, see "Current status" above):
 PROTOCOL REPAIRED — INDEPENDENT RE-AUDIT PENDING
 CPU IMPLEMENTATION BLOCKED
 GPU EXECUTION PROHIBITED
@@ -28,7 +66,7 @@ This repair does not self-certify the protocol -- the repairing author
 cannot independently approve their own repair. `CLAUDE.md` §1f records the
 same dated authorization boundary.
 
-Next action:
+Next action (superseded, see "Current status" above):
 
 ```text
 Independent review of the Step 2A repair commit.
