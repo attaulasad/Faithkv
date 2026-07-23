@@ -31,6 +31,11 @@ class FakeGitState:
     ancestors: frozenset[str] = frozenset({ANCESTOR_1, ANCESTOR_2})
     rkv_sha: str = RKV_SHA
     status: WorktreeStatus = WorktreeStatus(staged_paths=(), unstaged_paths=(), untracked_paths=())
+    # Step 3R4-Repair-2 (repairs independent-re-audit Blocking Finding 7):
+    # `GitStateProvider.repository_root` is now a required property --
+    # callers that verify authorization preconditions bind this against a
+    # separately-supplied `repository_root` argument and refuse a mismatch.
+    repository_root: str = "."
 
     def current_repository(self) -> str:
         return self.repository

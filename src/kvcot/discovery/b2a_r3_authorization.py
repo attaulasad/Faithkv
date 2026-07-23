@@ -40,6 +40,7 @@ from kvcot.discovery.b2a_r3_provenance import (
     AttemptProvenancePolicy,
     GitStateProvider,
     verify_attempt_provenance,
+    verify_git_state_bound_to_repository_root,
 )
 from kvcot.utils.hashing import sha256_file
 
@@ -216,6 +217,12 @@ def verify_authorization_preconditions(
         policy_from_authorization_document,
     )
 
+    # Step 3R4-Repair-2 Finding 7: bind `git_state` to the exact
+    # `repository_root` BEFORE any other verification -- otherwise Git
+    # state could be verified against one filesystem root while the
+    # authorization document/claim I/O below happens under a different one.
+    verify_git_state_bound_to_repository_root(git_state, repository_root)
+
     verify_canonical_sha256(claim_payload)
     claim = AuthorizationClaimR3.model_validate(claim_payload)
 
@@ -390,7 +397,14 @@ def claim_authorization(
     internally -- there is no `claims_root` parameter to override it.
     Returns `(typed_claim, claim_path)` on success; raises
     `AuthorizationAlreadyConsumed` if the deterministic path is already
-    occupied."""
+    occupied.
+
+    Step 3R4-Repair-2 Finding 7: `git_state` is bound to the exact
+    `repository_root` here too (not only in
+    `verify_authorization_preconditions`) -- the claim file is always
+    written under `repository_root`, so a `git_state` verifying a different
+    root must be refused before the exclusive-create call, never after."""
+    verify_git_state_bound_to_repository_root(git_state, repository_root)
     verify_canonical_sha256(payload)
     typed = AuthorizationClaimR3.model_validate(payload)
     if verified_context._verification_token is not _VERIFIED_CONTEXT_TOKEN:

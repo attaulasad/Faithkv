@@ -146,7 +146,7 @@ def _verified_stage_b(tmp_path, *, document_overrides=None, **payload_overrides)
         candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],
         **payload_overrides,
     )
-    git_state = FakeGitState(commit_sha="b" * 40, ancestors=frozenset({"c" * 40}))
+    git_state = FakeGitState(commit_sha="b" * 40, ancestors=frozenset({"c" * 40}), repository_root=str(tmp_path))
     context = verify_authorization_preconditions(
         payload,
         git_state=git_state,
@@ -196,7 +196,7 @@ def _stage_c_inputs(tmp_path, **payload_overrides):
     }
     payload_values.update(payload_overrides)
     payload = _stage_c_payload(**payload_values)
-    git_state = FakeGitState(commit_sha="b" * 40, ancestors=frozenset({"c" * 40}))
+    git_state = FakeGitState(commit_sha="b" * 40, ancestors=frozenset({"c" * 40}), repository_root=str(tmp_path))
     return {
         "claim_payload": payload,
         "git_state": git_state,
@@ -429,12 +429,56 @@ def test_preconditions_reject_missing_required_ancestor(tmp_path):
     with pytest.raises(Exception):
         verify_authorization_preconditions(
             payload,
-            git_state=FakeGitState(commit_sha="b" * 40, ancestors=frozenset()),
+            git_state=FakeGitState(commit_sha="b" * 40, ancestors=frozenset(), repository_root=str(tmp_path)),
             authorization_document_path=document,
             candidate_manifest=candidate_manifest,
             expected_config_sha256=candidate_manifest["config_sha256"],
             repository_root=tmp_path,
         )
+
+
+def test_git_state_repository_root_mismatch_rejected_by_preconditions(tmp_path):
+    """Step 3R4-Repair-2 Finding 7: a GitStateProvider whose own
+    `repository_root` disagrees with the separately-supplied
+    `repository_root` argument must be refused -- otherwise Git state could
+    be verified against one filesystem root while the authorization
+    document is read from (and a future claim written under) a different
+    one."""
+    from dataclasses import replace as _dc_replace
+
+    other_root = tmp_path / "elsewhere"
+    other_root.mkdir()
+    _payload, _context, document, candidate_manifest, git_state = _verified_stage_b(tmp_path)
+    mismatched_git_state = _dc_replace(git_state, repository_root=str(other_root))
+
+    with pytest.raises(Exception):
+        verify_authorization_preconditions(
+            _payload,
+            git_state=mismatched_git_state,
+            authorization_document_path=document,
+            candidate_manifest=candidate_manifest,
+            expected_config_sha256=candidate_manifest["config_sha256"],
+            repository_root=tmp_path,
+        )
+
+
+def test_git_state_repository_root_mismatch_rejected_by_claim_authorization(tmp_path):
+    """Same defect, checked again at `claim_authorization` -- consumption
+    must never proceed with a `git_state` bound to a different root than
+    the one the claim is actually written under."""
+    from dataclasses import replace as _dc_replace
+
+    other_root = tmp_path / "elsewhere"
+    other_root.mkdir()
+    payload, context, _document, _manifest, git_state = _verified_stage_b(tmp_path)
+    mismatched_git_state = _dc_replace(git_state, repository_root=str(other_root))
+
+    with pytest.raises(Exception):
+        claim_authorization(
+            payload, repository_root=tmp_path, verified_context=context, git_state=mismatched_git_state
+        )
+    claim_path = tmp_path / "results" / "decisions" / "b2a_r3_authorization_claims" / f"{payload['authorization_id']}.json"
+    assert not claim_path.exists()
 
 
 def test_stage_c_full_semantic_preconditions_succeed(tmp_path):

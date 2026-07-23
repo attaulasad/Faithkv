@@ -33,6 +33,8 @@ __all__ = [
     "ActiveAuthorizationPaths",
     "GitStateProvider",
     "SubprocessGitStateProvider",
+    "GitStateRepositoryRootMismatch",
+    "verify_git_state_bound_to_repository_root",
     "verify_attempt_provenance",
 ]
 
@@ -126,8 +128,19 @@ class GitStateProvider(Protocol):
     """The injection seam -- CPU tests implement this against a synthetic
     in-memory repository state; production would eventually implement it
     against real `git` subprocess calls, but no Stage-A code constructs a
-    real implementation or invokes one."""
+    real implementation or invokes one.
 
+    `repository_root` (Step 3R4-Repair-2, repairs independent-re-audit
+    Blocking Finding 7) is a REQUIRED property, not merely a constructor
+    convenience: `kvcot.discovery.b2a_r3_authorization
+    .verify_authorization_preconditions`/`claim_authorization` both bind
+    their separately-supplied `repository_root` argument against THIS
+    property before doing anything else, so a caller can never verify Git
+    state against one filesystem root while writing/reading claims under a
+    different one."""
+
+    @property
+    def repository_root(self) -> str: ...
     def current_repository(self) -> str: ...
     def current_branch(self) -> str: ...
     def current_commit_sha(self) -> str: ...
@@ -192,6 +205,33 @@ class SubprocessGitStateProvider:
 
     def is_path_committed(self, path: str) -> bool:
         return self._run("ls-files", "--error-unmatch", "--", path, check=False).returncode == 0
+
+
+class GitStateRepositoryRootMismatch(ValueError):
+    """Raised when a `GitStateProvider`'s own `repository_root` disagrees
+    with a separately-supplied `repository_root` argument (Step 3R4-Repair-2
+    Finding 7) -- verifying Git state against one filesystem root while a
+    claim/document is read from or written to a DIFFERENT root would let
+    the same authorization be consumed under more than one root."""
+
+
+def verify_git_state_bound_to_repository_root(git_state: GitStateProvider, repository_root: str | Path) -> None:
+    """The one place `git_state.repository_root` is checked against a
+    caller-supplied `repository_root` -- called by both
+    `kvcot.discovery.b2a_r3_authorization.verify_authorization_preconditions`
+    and `claim_authorization`, before either does anything else with either
+    argument. Uses `Path(...).resolve()` on both sides so equivalent but
+    differently-spelled paths (relative vs. absolute, trailing slash,
+    `.`/`..` segments) are correctly treated as the same root."""
+    from pathlib import Path as _Path
+
+    observed = _Path(git_state.repository_root).resolve()
+    expected = _Path(repository_root).resolve()
+    if observed != expected:
+        raise GitStateRepositoryRootMismatch(
+            f"git_state.repository_root {observed} does not match the supplied repository_root {expected} -- "
+            "Git state and claim/document I/O must both be bound to the exact same filesystem root"
+        )
 
 
 def verify_attempt_provenance(

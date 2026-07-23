@@ -123,7 +123,7 @@ def test_verify_b2a_r3_authorization_end_to_end(tmp_path, capsys, monkeypatch):
     )
     monkeypatch.setattr(
         "kvcot.discovery.b2a_r3_provenance.SubprocessGitStateProvider",
-        lambda _root: FakeGitState(commit_sha="b" * 40, ancestors=frozenset({"c" * 40})),
+        lambda _root: FakeGitState(commit_sha="b" * 40, ancestors=frozenset({"c" * 40}), repository_root=_root),
     )
 
     payload = {
