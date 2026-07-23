@@ -43,8 +43,16 @@ REQUIRED_REPOSITORY: Final[str] = "asad073-ui/Faithkv"
 CANDIDATE_MANIFEST_ARTIFACT_SCHEMA_VERSION: Final[str] = "faithkv-b2a-r3-candidate-manifest-v1"
 CANDIDATE_ORDER_PROTOCOL_VERSION: Final[str] = "faithkv-b2a-r3-row-order-v1"
 
-QUALIFICATION_ARTIFACT_SCHEMA_VERSION: Final[str] = "faithkv-b2a-r3-qualification-artifact-v1"
-QUALIFICATION_PROTOCOL_VERSION: Final[str] = "faithkv-b2a-r3-qualification-v1"
+# Step 3R4 (dated 2026-07-23,
+# docs/B2A_R3_STAGE_A_PROTOCOL_ALIGNMENT_AMENDMENT_2026-07-23.md) bumps
+# these two exactly -- v1 to v2. No real qualification artifact has ever
+# been produced under v1 (protocol Sec 14.1 forbids it under Stage A), so
+# this version bump reinterprets nothing historical. Every other
+# per-artifact identity field below (candidate manifest, selection
+# provenance, authorization claim, runtime predictor, selection protocol)
+# is UNCHANGED by Step 3R4.
+QUALIFICATION_ARTIFACT_SCHEMA_VERSION: Final[str] = "faithkv-b2a-r3-qualification-artifact-v2"
+QUALIFICATION_PROTOCOL_VERSION: Final[str] = "faithkv-b2a-r3-qualification-v2"
 RUNTIME_PREDICTOR_VERSION: Final[str] = "faithkv-b2a-r3-runtime-predictor-v1"
 
 SELECTION_PROVENANCE_ARTIFACT_SCHEMA_VERSION: Final[str] = "faithkv-b2a-r3-selection-provenance-v1"
@@ -398,6 +406,46 @@ def verify_qualification_conditions_tuple() -> None:
 QUALIFICATION_MEMORY_LIMIT_BYTES: Final[int] = 22 * 1024**3
 QUALIFICATION_MINIMUM_PREDICTED_EVENTS: Final[int] = 6
 QUALIFICATION_MINIMUM_ELIGIBLE_EVENTS: Final[int] = 3
+
+# --------------------------------------------------------------------------
+# Frozen v2 per-candidate qualification-outcome field set (Step 3R4,
+# docs/B2A_R3_STAGE_A_PROTOCOL_ALIGNMENT_AMENDMENT_2026-07-23.md Sec 3.2) --
+# the exact, complete field-name set `CandidateQualificationOutcomeR3` must
+# have, no more, no less. A test compares this frozen set directly against
+# the live pydantic model's own field names so the implementation and this
+# contract can never silently drift apart again.
+# --------------------------------------------------------------------------
+QUALIFICATION_OUTCOME_V2_FIELD_NAMES: Final[frozenset[str]] = frozenset({
+    # Candidate identity
+    "candidate_ordinal", "source_example_index", "unique_id",
+    "raw_row_sha256", "problem_sha256", "gold_answer_sha256",
+    # Worker identity
+    "worker_dataset_repo", "worker_dataset_config", "worker_dataset_split", "worker_dataset_revision",
+    "worker_model_name", "worker_model_revision", "worker_tokenizer_name", "worker_tokenizer_revision",
+    # Prompt identity
+    "expected_prompt_token_ids_sha256", "observed_prompt_token_ids_sha256", "prompt_token_count",
+    # Generated-trace evidence
+    "natural_generated_token_ids", "generated_token_count", "generated_token_ids_sha256",
+    "total_processed_tokens",
+    # Answer and thinking evidence
+    "cap_hit", "extracted_answer", "answer_verification_status",
+    "think_parse_status", "think_start_index", "think_end_index",
+    "generation_prompt_preopened_think", "thinking_span_valid", "trace_complete",
+    # FullKV execution evidence
+    "fullkv_wall_seconds", "fullkv_timing_evidence", "requested_device",
+    "parameter_placement_evidence", "actual_batch_size",
+    "peak_cuda_allocated_bytes", "peak_cuda_reserved_bytes", "peak_cuda_tracked_bytes",
+    # Static schedule evidence
+    "predicted_compaction_event_positions", "predicted_event_count",
+    "eligible_event_indices", "eligible_event_count",
+    # Runtime prediction evidence (flattened only)
+    "reference_seconds_per_token", "predicted_example_seconds", "predicted_pair_seconds",
+    "projected_total_seconds", "projected_gpu_hours", "safety_multiplier", "runtime_predictor_version",
+    # Generation configuration (worker-observed only)
+    "worker_generation_config_sha256",
+    # Qualification result
+    "conditions", "qualified", "failed_conditions",
+})
 
 # Run the frozen-constant self-checks once at import time -- a byte-level
 # drift in any literal above is a hard import-time failure, never a latent
