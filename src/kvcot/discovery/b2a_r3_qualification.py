@@ -52,7 +52,7 @@ from kvcot.discovery.b2a_r3_contract import (
 )
 from kvcot.analysis.rkv_schedule import predicted_compaction_event_positions
 from kvcot.discovery.b2a_r3_candidates import CandidateManifestR3, verify_candidate_manifest_structure
-from kvcot.discovery.b2a_r3_runtime import RuntimePredictionRefused, verify_runtime_prediction
+from kvcot.discovery.b2a_r3_runtime import RuntimePredictionRefused, predict_runtime, verify_runtime_prediction
 from kvcot.discovery.final_contract import fullkv_qualification_timing_complete
 from kvcot.discovery.pass1 import eligible_event_positions
 from kvcot.utils.hashing import sha256_int_ids, sha256_json, sha256_text
@@ -181,7 +181,11 @@ class B2AR3FullKVQualificationEvidence(BaseModel):
     budget: int = BUDGET
     divide_length: int = DIVIDE_LENGTH
 
-    generation_config_sha256: str
+    # Worker-observed value only (Step 3R4 rename -- never the ambiguous
+    # bare `generation_config_sha256` name this evidence class used before;
+    # that name is now reserved for the artifact-level EXPECTED value,
+    # protocol §12.6, unchanged by Step 3R4).
+    worker_generation_config_sha256: str
     runtime_prediction: RuntimePredictionRecordR3
 
     candidate_manifest_canonical_sha256: str
@@ -189,7 +193,7 @@ class B2AR3FullKVQualificationEvidence(BaseModel):
 
     @field_validator(
         "raw_row_sha256", "problem_sha256", "gold_answer_sha256", "expected_prompt_token_ids_sha256",
-        "observed_prompt_token_ids_sha256", "generated_token_ids_sha256", "generation_config_sha256",
+        "observed_prompt_token_ids_sha256", "generated_token_ids_sha256", "worker_generation_config_sha256",
         "candidate_manifest_canonical_sha256", "config_sha256",
     )
     @classmethod
@@ -345,7 +349,7 @@ def evaluate_b2a_r3_qualification_conditions(
         evidence.worker_tokenizer_name == TOKENIZER_NAME
         and evidence.worker_tokenizer_revision == TOKENIZER_REVISION
     )
-    generation_config_hash_match = evidence.generation_config_sha256 == GENERATION_CONFIG_SHA256
+    generation_config_hash_match = evidence.worker_generation_config_sha256 == GENERATION_CONFIG_SHA256
     prompt_identity_match = evidence.observed_prompt_token_ids_sha256 == evidence.expected_prompt_token_ids_sha256
 
     all_on_requested_cuda, no_offload_verified = _placement_conditions(evidence)
@@ -430,7 +434,20 @@ def evaluate_b2a_r3_qualification_conditions(
 
 
 class CandidateQualificationOutcomeR3(BaseModel):
-    """Protocol §12.5. The persisted, per-candidate outcome record."""
+    """Protocol §12.5, v2 (Step 3R4,
+    docs/B2A_R3_STAGE_A_PROTOCOL_ALIGNMENT_AMENDMENT_2026-07-23.md §3.2).
+    The persisted, per-candidate outcome record.
+
+    v1->v2: dropped `candidate_manifest_canonical_sha256`, `config_sha256`,
+    `budget`, `divide_length` (all artifact-level-only, protocol §12.6,
+    never duplicated per-outcome) and the nested `runtime_prediction`
+    object (redundant with the flattened runtime fields already present);
+    renamed `generation_config_sha256` to `worker_generation_config_sha256`
+    (the ambiguous "expected" meaning of the old name stays artifact-level
+    only, under its own unchanged name there). The exact field set below
+    must equal `kvcot.discovery.b2a_r3_contract
+    .QUALIFICATION_OUTCOME_V2_FIELD_NAMES` -- enforced by
+    `test_qualification_outcome_v2_field_set_matches_contract`."""
 
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
 
@@ -476,12 +493,7 @@ class CandidateQualificationOutcomeR3(BaseModel):
     predicted_event_count: int
     eligible_event_indices: list[int]
     eligible_event_count: int
-    budget: int
-    divide_length: int
-    generation_config_sha256: str
-    candidate_manifest_canonical_sha256: str
-    config_sha256: str
-    runtime_prediction: RuntimePredictionRecordR3
+    worker_generation_config_sha256: str
     reference_seconds_per_token: float
     predicted_example_seconds: float
     predicted_pair_seconds: float
@@ -500,9 +512,7 @@ class CandidateQualificationOutcomeR3(BaseModel):
         "expected_prompt_token_ids_sha256",
         "observed_prompt_token_ids_sha256",
         "generated_token_ids_sha256",
-        "generation_config_sha256",
-        "candidate_manifest_canonical_sha256",
-        "config_sha256",
+        "worker_generation_config_sha256",
     )
     @classmethod
     def _hex64(cls, v: str, info: Any) -> str:
@@ -539,20 +549,14 @@ class CandidateQualificationOutcomeR3(BaseModel):
             raise ValueError("generated_token_ids_sha256 does not reproduce from natural_generated_token_ids")
         if self.peak_cuda_tracked_bytes != max(self.peak_cuda_allocated_bytes, self.peak_cuda_reserved_bytes):
             raise ValueError("peak_cuda_tracked_bytes does not equal max(allocated, reserved)")
-        if self.budget != BUDGET or self.divide_length != DIVIDE_LENGTH:
-            raise ValueError("budget/divide_length do not match frozen values")
-        runtime = self.runtime_prediction.model_dump(mode="python")
-        for field_name in (
-            "reference_seconds_per_token",
-            "predicted_example_seconds",
-            "predicted_pair_seconds",
-            "projected_total_seconds",
-            "projected_gpu_hours",
-            "safety_multiplier",
-            "runtime_predictor_version",
-        ):
-            if getattr(self, field_name) != runtime[field_name]:
-                raise ValueError(f"flattened runtime field {field_name} disagrees with runtime_prediction")
+        # v2 (Step 3R4): no nested `runtime_prediction` object is persisted
+        # any more -- the flattened fields are the only stored copy, so
+        # there is nothing left to cross-check them against HERE. The
+        # authoritative independent check (recomputing a fresh
+        # `predict_runtime(total_processed_tokens)` and requiring exact
+        # field-by-field equality) lives in
+        # `rederive_and_verify_qualification_outcome`, which has the
+        # complete evidence context this schema-level validator does not.
         return self
 
 
@@ -617,12 +621,7 @@ def build_qualification_outcome(
         predicted_event_count=len(expected_positions),
         eligible_event_indices=expected_eligible_indices,
         eligible_event_count=len(expected_eligible_indices),
-        budget=BUDGET,
-        divide_length=DIVIDE_LENGTH,
-        generation_config_sha256=evidence.generation_config_sha256,
-        candidate_manifest_canonical_sha256=evidence.candidate_manifest_canonical_sha256,
-        config_sha256=evidence.config_sha256,
-        runtime_prediction=evidence.runtime_prediction,
+        worker_generation_config_sha256=evidence.worker_generation_config_sha256,
         reference_seconds_per_token=runtime["reference_seconds_per_token"],
         predicted_example_seconds=runtime["predicted_example_seconds"],
         predicted_pair_seconds=runtime["predicted_pair_seconds"],
@@ -710,12 +709,19 @@ def rederive_and_verify_qualification_outcome(
         predicted_event_count=typed.predicted_event_count,
         eligible_event_indices=typed.eligible_event_indices,
         eligible_event_count=typed.eligible_event_count,
-        budget=typed.budget,
-        divide_length=typed.divide_length,
-        generation_config_sha256=typed.generation_config_sha256,
-        runtime_prediction=typed.runtime_prediction,
-        candidate_manifest_canonical_sha256=typed.candidate_manifest_canonical_sha256,
-        config_sha256=typed.config_sha256,
+        # v2 (Step 3R4): budget/divide_length/candidate_manifest_canonical_sha256/
+        # config_sha256 are no longer stored per-outcome -- they are read
+        # back from the frozen contract constants and this function's own
+        # (already-verified) `candidate_manifest`/`expected_config_sha256`
+        # arguments instead of trusting a persisted echo.
+        budget=BUDGET,
+        divide_length=DIVIDE_LENGTH,
+        worker_generation_config_sha256=typed.worker_generation_config_sha256,
+        runtime_prediction=RuntimePredictionRecordR3.model_validate(
+            predict_runtime(typed.total_processed_tokens).to_json()
+        ),
+        candidate_manifest_canonical_sha256=manifest.canonical_sha256,
+        config_sha256=expected_config_sha256,
     )
 
     expected_positions, expected_eligible = _expected_schedule(evidence)
@@ -727,6 +733,26 @@ def rederive_and_verify_qualification_outcome(
         raise QualificationRefused("stored eligible event indices do not reproduce")
     if typed.eligible_event_count != len(expected_eligible):
         raise QualificationRefused("stored eligible_event_count does not reproduce")
+
+    # v2 (Step 3R4): rerun the runtime predictor fresh from
+    # `total_processed_tokens` and require exact equality for every
+    # flattened runtime field -- never trust the stored values as
+    # self-certifying (protocol amendment §3.4).
+    recomputed_runtime = predict_runtime(typed.total_processed_tokens).to_json()
+    for field_name in (
+        "reference_seconds_per_token",
+        "predicted_example_seconds",
+        "predicted_pair_seconds",
+        "projected_total_seconds",
+        "projected_gpu_hours",
+        "safety_multiplier",
+        "runtime_predictor_version",
+    ):
+        if getattr(typed, field_name) != recomputed_runtime[field_name]:
+            raise QualificationRefused(
+                f"stored flattened runtime field {field_name!r} does not reproduce from "
+                f"predict_runtime(total_processed_tokens)"
+            )
 
     conditions = evaluate_b2a_r3_qualification_conditions(
         evidence,

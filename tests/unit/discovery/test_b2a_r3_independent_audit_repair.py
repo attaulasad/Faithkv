@@ -184,7 +184,7 @@ def _evidence(**overrides) -> B2AR3FullKVQualificationEvidence:
         "predicted_event_count": len(positions),
         "eligible_event_indices": eligible,
         "eligible_event_count": len(eligible),
-        "generation_config_sha256": GENERATION_CONFIG_SHA256,
+        "worker_generation_config_sha256": GENERATION_CONFIG_SHA256,
         "runtime_prediction": predict_runtime(total_len).to_json(),
         "candidate_manifest_canonical_sha256": manifest["canonical_sha256"],
         "config_sha256": CONFIG_SHA,
@@ -360,7 +360,6 @@ def test_canonically_rehashed_raw_gate_contradictions_are_rejected(case):
         outcome["observed_prompt_token_ids_sha256"] = "2" * 64
     else:
         runtime = predict_runtime(2776).to_json()
-        outcome["runtime_prediction"] = runtime
         for field in (
             "reference_seconds_per_token",
             "predicted_example_seconds",

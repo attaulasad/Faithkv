@@ -167,7 +167,7 @@ def test_tokenizer_mismatch_fails():
 
 
 def test_runtime_generation_hash_mismatch_fails():
-    conditions = _evaluate(generation_config_sha256="0" * 64)
+    conditions = _evaluate(worker_generation_config_sha256="0" * 64)
     assert conditions["generation_config_hash_match"] is False
 
 
@@ -294,6 +294,38 @@ def test_build_qualification_outcome_round_trips_through_strict_schema():
     typed = CandidateQualificationOutcomeR3.model_validate(outcome)
     assert typed.qualified is True
     assert typed.failed_conditions == []
+
+
+def test_qualification_outcome_v2_field_set_matches_contract():
+    """Step 3R4 (docs/B2A_R3_STAGE_A_PROTOCOL_ALIGNMENT_AMENDMENT_2026-07-23.md
+    §3.2): the implementation and the frozen contract field set must never
+    silently drift apart again."""
+    from kvcot.discovery.b2a_r3_contract import QUALIFICATION_OUTCOME_V2_FIELD_NAMES
+
+    assert set(CandidateQualificationOutcomeR3.model_fields) == QUALIFICATION_OUTCOME_V2_FIELD_NAMES
+
+
+def test_qualification_outcome_v2_rejects_v1_redundant_fields():
+    """v1 duplicated artifact-level identity fields onto every outcome
+    (budget, divide_length, candidate_manifest_canonical_sha256,
+    config_sha256) and persisted a nested runtime_prediction object -- v2
+    must reject all five as unknown fields."""
+    outcome = _valid_outcome_dict()
+    for forbidden in (
+        "budget", "divide_length", "candidate_manifest_canonical_sha256", "config_sha256",
+        "runtime_prediction",
+    ):
+        assert forbidden not in outcome
+    tampered = dict(outcome, budget=1024)
+    with pytest.raises(Exception):
+        CandidateQualificationOutcomeR3.model_validate(tampered)
+
+
+def test_qualification_artifact_versions_are_v2():
+    from kvcot.discovery.b2a_r3_contract import QUALIFICATION_ARTIFACT_SCHEMA_VERSION, QUALIFICATION_PROTOCOL_VERSION
+
+    assert QUALIFICATION_ARTIFACT_SCHEMA_VERSION == "faithkv-b2a-r3-qualification-artifact-v2"
+    assert QUALIFICATION_PROTOCOL_VERSION == "faithkv-b2a-r3-qualification-v2"
 
 
 def test_qualified_candidate_ordinal_zero_through_seven_accepted():
