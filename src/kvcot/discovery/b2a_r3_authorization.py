@@ -2,10 +2,11 @@
 §14.4).
 
 Implements and tests the future authorization-consumption mechanism
-WITHOUT ever creating a real claim: `claims_root` is always an explicit
-caller-supplied argument (never a hard-coded default pointing at the real
-`results/decisions/b2a_r3_authorization_claims/` directory), and no CLI
-command in this repository calls `create_authorization_claim` or
+WITHOUT ever creating a real claim: `claim_authorization` (Step 3R4
+Finding 4) takes `repository_root` only, always deriving the exact claim
+path internally via `global_claim_path` -- there is no `claims_root`
+parameter a caller could point at an arbitrary directory. No CLI command
+in this repository calls `_create_authorization_claim` or
 `claim_authorization` at all -- Stage A exercises this module only against
 synthetic fixtures under `tmp_path`.
 
@@ -332,24 +333,31 @@ def verify_authorization_preconditions(
     )
 
 
-def _create_authorization_claim(payload: dict[str, Any], *, claims_root: str | Path) -> Path:
-    """Steps 2-4 of protocol §14.4.2: derive the deterministic claim path,
-    exclusively create it (`O_CREAT | O_EXCL`), then write + flush +
-    fsync the payload. The success of the exclusive-create call IS the
-    consumption event -- this function's caller must have already
-    completed every pre-claim verification (step 1) before calling this.
+def _create_authorization_claim(payload: dict[str, Any], *, claim_path: str | Path) -> Path:
+    """Steps 2-4 of protocol §14.4.2: exclusively create the EXACT supplied
+    claim path (`O_CREAT | O_EXCL`), then write + flush + fsync the
+    payload. The success of the exclusive-create call IS the consumption
+    event -- this function's caller must have already completed every
+    pre-claim verification (step 1) before calling this.
+
+    Low-level and private: accepts an explicit path so race/concurrency
+    tests can exercise the raw exclusive-create primitive directly.
+    Production code must never call this with an arbitrary path --
+    `claim_authorization` below is the only production entry point, and it
+    always derives this path itself via
+    `kvcot.discovery.b2a_r3_contract.global_claim_path`, never from a
+    caller-supplied root (Step 3R4 Finding 4).
 
     Raises `AuthorizationAlreadyConsumed` if a filesystem entry already
-    exists at the deterministic path -- complete, partial, or corrupt, it
-    is permanently consumed (protocol §14.4.3)."""
+    exists at the given path -- complete, partial, or corrupt, it is
+    permanently consumed (protocol §14.4.3)."""
     authorization_id = payload.get("authorization_id")
     if not isinstance(authorization_id, str):
         raise AuthorizationClaimRefused("payload has no string authorization_id")
     validate_authorization_id(authorization_id)
 
-    claims_root_path = Path(claims_root)
-    claims_root_path.mkdir(parents=True, exist_ok=True)
-    claim_path = claims_root_path / f"{authorization_id}.json"
+    claim_path = Path(claim_path)
+    claim_path.parent.mkdir(parents=True, exist_ok=True)
 
     text = json.dumps(payload, indent=2, ensure_ascii=True).encode("utf-8") + b"\n"
     try:
@@ -370,12 +378,17 @@ def _create_authorization_claim(payload: dict[str, Any], *, claims_root: str | P
 def claim_authorization(
     payload: dict[str, Any],
     *,
-    claims_root: str | Path,
+    repository_root: str | Path,
     verified_context: VerifiedAuthorizationContext,
+    git_state: GitStateProvider,
 ) -> tuple[AuthorizationClaimR3, Path]:
-    """Full-schema validation (including the payload's own
-    `canonical_sha256`) followed by the atomic claim operation. Returns
-    `(typed_claim, claim_path)` on success; raises
+    """Full-schema validation, exact global-path binding, an immediate
+    Git/worktree reverification, then the atomic claim operation (Step 3R4
+    Finding 4). No caller may direct consumption at an arbitrary
+    directory: the claim path is always
+    `repository_root / global_claim_path(authorization_id)`, derived
+    internally -- there is no `claims_root` parameter to override it.
+    Returns `(typed_claim, claim_path)` on success; raises
     `AuthorizationAlreadyConsumed` if the deterministic path is already
     occupied."""
     verify_canonical_sha256(payload)
@@ -384,7 +397,30 @@ def claim_authorization(
         raise AuthorizationClaimRefused("authorization context was not produced by semantic precondition verification")
     if typed != verified_context.claim:
         raise AuthorizationClaimRefused("verified context does not authorize this exact claim payload")
-    claim_path = _create_authorization_claim(payload, claims_root=claims_root)
+
+    relative_claim_path = global_claim_path(typed.authorization_id)
+    if typed.global_claim_path != relative_claim_path:
+        raise AuthorizationClaimRefused(
+            "payload global_claim_path does not match the deterministic path derived from authorization_id"
+        )
+    if verified_context.claim.global_claim_path != relative_claim_path:
+        raise AuthorizationClaimRefused(
+            "verified context's claim global_claim_path does not match the deterministic path"
+        )
+
+    # Step 3R4 Finding 4: reverify Git/worktree state immediately before
+    # the exclusive-create call -- this narrows the window between the
+    # earlier verify_authorization_preconditions call and actual
+    # consumption. No CUDA/model/tokenizer action may happen before this
+    # succeeds and the claim is created.
+    ok, reasons = verify_attempt_provenance(verified_context.policy, git_state)
+    if not ok:
+        raise AuthorizationClaimRefused(
+            f"pre-claim Git/worktree reverification failed immediately before consumption: {reasons}"
+        )
+
+    absolute_claim_path = Path(repository_root) / relative_claim_path
+    claim_path = _create_authorization_claim(payload, claim_path=absolute_claim_path)
     return typed, claim_path
 
 

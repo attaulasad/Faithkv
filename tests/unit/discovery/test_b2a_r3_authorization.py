@@ -284,31 +284,72 @@ def test_uppercase_hash_rejected():
 
 def test_first_claim_succeeds(tmp_path):
     payload = _stage_b_payload()
-    path = create_authorization_claim(payload, claims_root=tmp_path)
+    claim_path = tmp_path / f"{payload['authorization_id']}.json"
+    path = create_authorization_claim(payload, claim_path=claim_path)
     assert path.exists()
     assert path.name == "stage-b-2026-08-01.json"
 
 
 def test_second_claim_for_same_id_fails(tmp_path):
     payload = _stage_b_payload()
-    create_authorization_claim(payload, claims_root=tmp_path)
+    claim_path = tmp_path / f"{payload['authorization_id']}.json"
+    create_authorization_claim(payload, claim_path=claim_path)
     with pytest.raises(AuthorizationAlreadyConsumed):
-        create_authorization_claim(payload, claims_root=tmp_path)
+        create_authorization_claim(payload, claim_path=claim_path)
 
 
 def test_claim_authorization_full_validation_and_creation(tmp_path):
-    payload, context, _document, _manifest, _git_state = _verified_stage_b(tmp_path)
-    claims_root = tmp_path / "claims"
-    typed, path = claim_authorization(payload, claims_root=claims_root, verified_context=context)
+    payload, context, _document, _manifest, git_state = _verified_stage_b(tmp_path)
+    typed, path = claim_authorization(
+        payload, repository_root=tmp_path, verified_context=context, git_state=git_state
+    )
     assert isinstance(typed, AuthorizationClaimR3)
     assert path.exists() and path.stat().st_size > 0
+
+
+def test_claim_authorization_uses_exact_global_path_under_repository_root(tmp_path):
+    """Step 3R4 Finding 4: the actual created path equals
+    repository_root / claim.global_claim_path -- no arbitrary directory."""
+    payload, context, _document, _manifest, git_state = _verified_stage_b(tmp_path)
+    _typed, path = claim_authorization(
+        payload, repository_root=tmp_path, verified_context=context, git_state=git_state
+    )
+    expected = tmp_path / "results" / "decisions" / "b2a_r3_authorization_claims" / f"{payload['authorization_id']}.json"
+    assert path == expected
+    assert str(path.relative_to(tmp_path)).replace("\\", "/") == payload["global_claim_path"]
+
+
+def test_claim_authorization_no_longer_accepts_claims_root_parameter():
+    import inspect
+
+    assert "claims_root" not in inspect.signature(claim_authorization).parameters
+    assert "repository_root" in inspect.signature(claim_authorization).parameters
+    assert "git_state" in inspect.signature(claim_authorization).parameters
 
 
 def test_claim_authorization_rejects_invalid_payload_before_touching_disk(tmp_path):
     payload = _stage_b_payload(authorized_repository="wrong/repo")
     with pytest.raises(Exception):
-        claim_authorization(payload, claims_root=tmp_path, verified_context=object())
+        claim_authorization(payload, repository_root=tmp_path, verified_context=object(), git_state=object())
     assert list(tmp_path.iterdir()) == []
+
+
+def test_claim_authorization_reverifies_worktree_immediately_before_claim(tmp_path):
+    """A worktree that becomes dirty between the earlier
+    verify_authorization_preconditions call and claim_authorization's own
+    reverification must fail -- the claim must not be created."""
+    from dataclasses import replace as _dc_replace
+
+    from kvcot.discovery.b2a_r3_provenance import WorktreeStatus
+
+    payload, context, _document, _manifest, git_state = _verified_stage_b(tmp_path)
+    dirtied_git_state = _dc_replace(
+        git_state, status=WorktreeStatus(staged_paths=(), unstaged_paths=(), untracked_paths=("configs/smuggled.json",))
+    )
+    with pytest.raises(Exception):
+        claim_authorization(payload, repository_root=tmp_path, verified_context=context, git_state=dirtied_git_state)
+    claim_path = tmp_path / "results" / "decisions" / "b2a_r3_authorization_claims" / f"{payload['authorization_id']}.json"
+    assert not claim_path.exists()
 
 
 def test_preconditions_reject_authorization_document_byte_change(tmp_path):
@@ -434,7 +475,7 @@ def test_empty_partial_or_corrupt_claim_remains_consumed(tmp_path):
     claim_path.write_text("", encoding="utf-8")  # empty/corrupt claim, left by e.g. a crash
 
     with pytest.raises(AuthorizationAlreadyConsumed):
-        create_authorization_claim(payload, claims_root=tmp_path)
+        create_authorization_claim(payload, claim_path=claim_path)
 
 
 def test_dry_run_creates_no_claim_directory_or_file(tmp_path):
@@ -480,6 +521,7 @@ def test_concurrent_claim_exactly_one_winner_one_refusal(tmp_path, trial):
     `os.open(..., O_EXCL)` call as tightly as possible."""
     claims_root = tmp_path / f"trial-{trial}"
     payload = _stage_b_payload(authorization_id=f"race-{trial}", global_claim_path=global_claim_path(f"race-{trial}"))
+    claim_path = claims_root / f"{payload['authorization_id']}.json"
 
     barrier = threading.Barrier(2)
     outcomes: list[str] = []
@@ -488,7 +530,7 @@ def test_concurrent_claim_exactly_one_winner_one_refusal(tmp_path, trial):
     def attempt() -> None:
         barrier.wait()
         try:
-            create_authorization_claim(payload, claims_root=claims_root)
+            create_authorization_claim(payload, claim_path=claim_path)
             outcome = "won"
         except AuthorizationAlreadyConsumed:
             outcome = "lost"
@@ -502,13 +544,12 @@ def test_concurrent_claim_exactly_one_winner_one_refusal(tmp_path, trial):
         t.join()
 
     assert sorted(outcomes) == ["lost", "won"]
-    claim_path = claims_root / f"{payload['authorization_id']}.json"
     assert claim_path.exists()
     # No overwrite: exactly one claim file, with genuine content (not empty).
     assert claim_path.stat().st_size > 0
 
 
-def _multiprocess_claim_attempt(payload, claims_root, start_event, result_queue):
+def _multiprocess_claim_attempt(payload, claim_path, start_event, result_queue):
     """Top-level spawn target: must remain picklable on Windows."""
     from kvcot.discovery.b2a_r3_authorization import (
         AuthorizationAlreadyConsumed,
@@ -517,7 +558,7 @@ def _multiprocess_claim_attempt(payload, claims_root, start_event, result_queue)
 
     start_event.wait()
     try:
-        _create_authorization_claim(payload, claims_root=claims_root)
+        _create_authorization_claim(payload, claim_path=claim_path)
         result_queue.put("success")
     except AuthorizationAlreadyConsumed:
         result_queue.put("AuthorizationAlreadyConsumed")
@@ -532,12 +573,13 @@ def test_multiprocess_claim_exactly_one_winner_one_refusal(tmp_path, trial):
         authorization_id=authorization_id,
         global_claim_path=global_claim_path(authorization_id),
     )
+    claim_path = claims_root / f"{authorization_id}.json"
     start_event = ctx.Event()
     result_queue = ctx.Queue()
     processes = [
         ctx.Process(
             target=_multiprocess_claim_attempt,
-            args=(payload, str(claims_root), start_event, result_queue),
+            args=(payload, str(claim_path), start_event, result_queue),
         )
         for _ in range(2)
     ]

@@ -332,9 +332,16 @@ def test_claim_consumption_without_verified_preconditions_is_rejected(tmp_path):
 
     from kvcot.discovery.b2a_r3_authorization import claim_authorization
 
-    assert "verified_context" in inspect.signature(claim_authorization).parameters
+    signature = inspect.signature(claim_authorization)
+    assert "verified_context" in signature.parameters
+    # Step 3R4 Finding 4: claims_root no longer exists as a parameter at
+    # all -- the claim path is always derived internally from
+    # repository_root + the deterministic global_claim_path.
+    assert "claims_root" not in signature.parameters
+    assert "repository_root" in signature.parameters
+    assert "git_state" in signature.parameters
     with pytest.raises(TypeError):
-        claim_authorization({}, claims_root=tmp_path)
+        claim_authorization({}, repository_root=tmp_path)
     assert list(tmp_path.iterdir()) == []
 
 
