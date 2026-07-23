@@ -110,6 +110,55 @@ def _verified_stage_b(tmp_path, **payload_overrides):
     return payload, context, document, candidate_manifest, policy, git_state
 
 
+def _stage_c_inputs(tmp_path, **payload_overrides):
+    from tests.unit.discovery.test_b2a_r3_freeze import (
+        CONFIG_SHA,
+        _fake_renderer,
+        _valid_chain,
+    )
+    from tests.unit.discovery.test_b2a_r3_provenance import FakeGitState, _policy
+    from kvcot.discovery.b2a_r3_freeze import construct_selected_manifest_and_provenance
+
+    document_rel = "docs/B2A_R3_STAGE_C_EXECUTION_AUTHORIZATION_2026-08-05.md"
+    document = tmp_path / document_rel
+    document.parent.mkdir(parents=True, exist_ok=True)
+    document.write_text("synthetic Stage C authorization\n", encoding="utf-8")
+    candidate_manifest, qualification_artifact = _valid_chain()
+    selected_manifest, selection_provenance = construct_selected_manifest_and_provenance(
+        candidate_manifest=candidate_manifest,
+        qualification_artifact=qualification_artifact,
+        expected_config_sha256=CONFIG_SHA,
+        tokenizer_renderer=_fake_renderer,
+    )
+    payload_values = {
+        "authorization_document_sha256": sha256_file(document),
+        "candidate_manifest_canonical_sha256": candidate_manifest["canonical_sha256"],
+        "qualification_artifact_canonical_sha256": qualification_artifact["canonical_sha256"],
+        "selected_manifest_sha256": selected_manifest.manifest_hash(),
+    }
+    payload_values.update(payload_overrides)
+    payload = _stage_c_payload(**payload_values)
+    policy = _policy(
+        authorization_id=payload["authorization_id"],
+        required_commit_sha="b" * 40,
+        required_ancestor_shas=("c" * 40,),
+        authorization_document_sha256=payload["authorization_document_sha256"],
+    )
+    git_state = FakeGitState(commit_sha="b" * 40, ancestors=frozenset({"c" * 40}))
+    return {
+        "claim_payload": payload,
+        "policy": policy,
+        "git_state": git_state,
+        "authorization_document_path": document,
+        "candidate_manifest": candidate_manifest,
+        "expected_config_sha256": CONFIG_SHA,
+        "qualification_artifact": qualification_artifact,
+        "selected_manifest": selected_manifest,
+        "selection_provenance": selection_provenance,
+        "repository_root": tmp_path,
+    }
+
+
 def test_stage_b_payload_validates():
     payload = _stage_b_payload()
     typed = AuthorizationClaimR3.model_validate(payload)
@@ -231,6 +280,103 @@ def test_preconditions_reject_authorization_document_byte_change(tmp_path):
 def test_preconditions_reject_observed_repository_disagreement(tmp_path):
     with pytest.raises(Exception):
         _verified_stage_b(tmp_path, observed_repository="someone/else")
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("observed_branch", "main"),
+        ("observed_commit_sha", "0" * 40),
+        ("observed_rkv_sha", "0" * 40),
+        ("candidate_manifest_canonical_sha256", "0" * 64),
+    ],
+)
+def test_preconditions_reject_claim_identity_disagreements(tmp_path, field, value):
+    with pytest.raises(Exception):
+        _verified_stage_b(tmp_path, **{field: value})
+
+
+def test_preconditions_reject_missing_authorization_document(tmp_path):
+    payload, _context, document, candidate_manifest, policy, git_state = _verified_stage_b(tmp_path)
+    document.unlink()
+    with pytest.raises(Exception):
+        verify_authorization_preconditions(
+            payload,
+            policy=policy,
+            git_state=git_state,
+            authorization_document_path=document,
+            candidate_manifest=candidate_manifest,
+            expected_config_sha256=candidate_manifest["config_sha256"],
+            repository_root=tmp_path,
+        )
+
+
+def test_preconditions_reject_uncommitted_authorization_document(tmp_path):
+    payload, _context, document, candidate_manifest, policy, git_state = _verified_stage_b(tmp_path)
+
+    class UncommittedDocumentGitState:
+        def __getattr__(self, name):
+            return getattr(git_state, name)
+
+        def is_path_committed(self, path):
+            return False
+
+    with pytest.raises(Exception):
+        verify_authorization_preconditions(
+            payload,
+            policy=policy,
+            git_state=UncommittedDocumentGitState(),
+            authorization_document_path=document,
+            candidate_manifest=candidate_manifest,
+            expected_config_sha256=candidate_manifest["config_sha256"],
+            repository_root=tmp_path,
+        )
+
+
+def test_preconditions_reject_missing_required_ancestor(tmp_path):
+    from tests.unit.discovery.test_b2a_r3_provenance import FakeGitState
+
+    payload, _context, document, candidate_manifest, policy, _git_state = _verified_stage_b(tmp_path)
+    with pytest.raises(Exception):
+        verify_authorization_preconditions(
+            payload,
+            policy=policy,
+            git_state=FakeGitState(commit_sha="b" * 40, ancestors=frozenset()),
+            authorization_document_path=document,
+            candidate_manifest=candidate_manifest,
+            expected_config_sha256=candidate_manifest["config_sha256"],
+            repository_root=tmp_path,
+        )
+
+
+def test_stage_c_full_semantic_preconditions_succeed(tmp_path):
+    inputs = _stage_c_inputs(tmp_path)
+    context = verify_authorization_preconditions(**inputs)
+    assert context.claim.authorization_stage == AUTHORIZATION_STAGE_B2A_R3_EXECUTION
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("qualification_artifact_canonical_sha256", "0" * 64),
+        ("selected_manifest_sha256", "0" * 64),
+    ],
+)
+def test_stage_c_claim_hash_mismatches_are_rejected(tmp_path, field, value):
+    inputs = _stage_c_inputs(tmp_path, **{field: value})
+    with pytest.raises(Exception):
+        verify_authorization_preconditions(**inputs)
+
+
+def test_stage_c_selection_provenance_mismatch_is_rejected_after_rehash(tmp_path):
+    inputs = _stage_c_inputs(tmp_path)
+    provenance = dict(inputs["selection_provenance"])
+    provenance["selected_unique_id"] = "different-row"
+    provenance.pop("canonical_sha256")
+    provenance["canonical_sha256"] = sha256_json(provenance)
+    inputs["selection_provenance"] = provenance
+    with pytest.raises(Exception):
+        verify_authorization_preconditions(**inputs)
 
 
 def test_empty_partial_or_corrupt_claim_remains_consumed(tmp_path):

@@ -363,6 +363,14 @@ def verify_selection_provenance(
     prompt_hash = sha256_int_ids(list(selected_manifest.prompt_token_ids))
     if prompt_hash != selected_manifest.prompt_token_ids_sha256:
         raise RowFreezeRefusedR3("selected manifest prompt token hash does not reproduce")
+    if not (
+        selected_manifest.prompt_token_ids_sha256
+        == outcome.expected_prompt_token_ids_sha256
+        == outcome.observed_prompt_token_ids_sha256
+    ):
+        raise RowFreezeRefusedR3(
+            "selected manifest prompt token hash does not match the replayed qualification outcome"
+        )
     if selected_manifest.tokenizer_revision_used_for_prompt_hash != candidate_manifest["tokenizer_revision"]:
         raise RowFreezeRefusedR3("selected manifest tokenizer revision does not match the candidate manifest")
     config = selected_manifest.prompt_rendering_config

@@ -158,6 +158,19 @@ def test_post_claim_allowlist_rejects_any_other_path():
     assert any("configs/lock.yaml" in r for r in reasons)
 
 
+def test_post_claim_paths_cannot_be_forged_by_a_caller():
+    forged = ActiveAuthorizationPaths(
+        global_claim_path="configs/smuggled.json",
+        attempt_directory_root="results/decisions/b2a_r3_attempt_20260801T000000000000Z_deadbeef",
+        _derivation_token=object(),
+    )
+    dirty = WorktreeStatus((), (), ("configs/smuggled.json",))
+    with pytest.raises(ValueError, match="not derived from a verified claim"):
+        verify_attempt_provenance(
+            _policy(), FakeGitState(status=dirty), active_authorization_paths=forged
+        )
+
+
 def test_never_claims_configs_directory_as_expected():
     dirty = WorktreeStatus(staged_paths=(), unstaged_paths=(), untracked_paths=("configs/some_new_file.json",))
     ok, reasons = verify_attempt_provenance(

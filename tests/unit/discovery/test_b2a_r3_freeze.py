@@ -86,6 +86,8 @@ def _outcome_for(candidate_manifest, ordinal: int, *, qualified: bool):
         gold_answer_sha256=candidate["gold_answer_sha256"],
         candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],
         config_sha256=CONFIG_SHA,
+        expected_prompt_token_ids_sha256=sha256_int_ids(list(range(10))),
+        observed_prompt_token_ids_sha256=sha256_int_ids(list(range(10))),
     )
     if not qualified:
         overrides["answer_verification_status"] = "incorrect"
@@ -162,6 +164,13 @@ def _valid_chain():
         selected_unique_id=selected_unique_id,
     )
     return candidate_manifest, artifact
+
+
+def _rehash(payload: dict) -> dict:
+    payload = dict(payload)
+    payload.pop("canonical_sha256", None)
+    payload["canonical_sha256"] = sha256_json(payload)
+    return payload
 
 
 def test_construct_selected_manifest_and_provenance_succeeds():
@@ -323,3 +332,215 @@ def test_plan_freeze_dry_run_reports_would_freeze_false_when_unqualified():
     )
     assert plan["would_freeze"] is False
     assert "refusal_reason" in plan
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "wrong_hash",
+        "wrong_count",
+        "changed_token",
+        "bool_token",
+        "wrong_tokenizer_revision",
+        "wrong_roles",
+        "no_generation_prompt",
+        "no_tokenize",
+        "wrong_special_token_note",
+        "uppercase_hash",
+    ],
+)
+def test_prompt_renderer_output_is_strictly_validated(case):
+    candidate_manifest, artifact = _valid_chain()
+
+    def malformed_renderer(row):
+        values = _fake_renderer(row).model_dump(mode="python")
+        if case == "wrong_hash":
+            values["prompt_token_ids_sha256"] = "0" * 64
+        elif case == "wrong_count":
+            values["prompt_token_count"] += 1
+        elif case == "changed_token":
+            values["prompt_token_ids"] = (999, *values["prompt_token_ids"][1:])
+        elif case == "bool_token":
+            values["prompt_token_ids"] = (True, *values["prompt_token_ids"][1:])
+        elif case == "wrong_tokenizer_revision":
+            values["tokenizer_revision_used_for_prompt_hash"] = "0" * 40
+        elif case == "uppercase_hash":
+            values["rendered_user_message_sha256"] = "A" * 64
+        else:
+            config = dict(values["prompt_rendering_config"])
+            if case == "wrong_roles":
+                config["message_roles"] = ("system", "user")
+            elif case == "no_generation_prompt":
+                config["add_generation_prompt"] = False
+            elif case == "no_tokenize":
+                config["tokenize"] = False
+            else:
+                config["add_special_tokens_note"] = "different convention"
+            values["prompt_rendering_config"] = config
+        return values
+
+    with pytest.raises(Exception):
+        construct_selected_manifest_and_provenance(
+            candidate_manifest=candidate_manifest,
+            qualification_artifact=artifact,
+            expected_config_sha256=CONFIG_SHA,
+            tokenizer_renderer=malformed_renderer,
+        )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "provenance_ordinal",
+        "provenance_unique_id",
+        "selected_example_index",
+        "selected_unique_id",
+        "selected_gold_answer",
+        "selected_raw_hash",
+        "selected_prompt_hash",
+        "selected_tokenizer_revision",
+    ],
+)
+def test_canonically_rehashed_selection_chain_tampering_is_rejected(case):
+    candidate_manifest, artifact = _valid_chain()
+    selected, provenance = construct_selected_manifest_and_provenance(
+        candidate_manifest=candidate_manifest,
+        qualification_artifact=artifact,
+        expected_config_sha256=CONFIG_SHA,
+        tokenizer_renderer=_fake_renderer,
+    )
+    selected_values = selected.model_dump(mode="python")
+    provenance = dict(provenance)
+    if case == "provenance_ordinal":
+        provenance["selected_ordinal"] = 1
+    elif case == "provenance_unique_id":
+        provenance["selected_unique_id"] = "different-row"
+    elif case == "selected_example_index":
+        selected_values["example_index"] += 1
+    elif case == "selected_unique_id":
+        selected_values["unique_id"] = "different-row"
+    elif case == "selected_gold_answer":
+        selected_values["gold_answer"] = "different answer"
+    elif case == "selected_raw_hash":
+        selected_values["raw_content_hash"] = "0" * 64
+    elif case == "selected_prompt_hash":
+        token_ids = (999, *selected_values["prompt_token_ids"][1:])
+        selected_values["prompt_token_ids"] = token_ids
+        selected_values["prompt_token_ids_sha256"] = sha256_int_ids(list(token_ids))
+        provenance["prompt_token_ids_sha256"] = selected_values["prompt_token_ids_sha256"]
+    else:
+        selected_values["tokenizer_revision_used_for_prompt_hash"] = "0" * 40
+        provenance["tokenizer_revision_used_for_prompt_hash"] = "0" * 40
+
+    selected = B2AOneExampleManifest.model_validate(selected_values)
+    provenance["selected_manifest_sha256"] = selected.manifest_hash()
+    provenance = _rehash(provenance)
+    with pytest.raises(Exception):
+        verify_selection_provenance(
+            provenance,
+            selected_manifest=selected,
+            candidate_manifest=candidate_manifest,
+            qualification_artifact=artifact,
+            expected_config_sha256=CONFIG_SHA,
+        )
+
+
+def test_canonically_rehashed_valid_qualification_replacement_is_rejected():
+    candidate_manifest, artifact = _valid_chain()
+    selected, provenance = construct_selected_manifest_and_provenance(
+        candidate_manifest=candidate_manifest,
+        qualification_artifact=artifact,
+        expected_config_sha256=CONFIG_SHA,
+        tokenizer_renderer=_fake_renderer,
+    )
+    replacement = _qualification_artifact(
+        candidate_manifest,
+        [
+            _outcome_for(candidate_manifest, 0, qualified=False),
+            _outcome_for(candidate_manifest, 1, qualified=True),
+        ],
+        selection_status=SELECTION_STATUS_SELECTED,
+        first_ordinal=1,
+        selected_unique_id=candidate_manifest["candidates"][1]["unique_id"],
+    )
+    provenance["qualification_artifact_canonical_sha256"] = replacement["canonical_sha256"]
+    provenance = _rehash(provenance)
+    with pytest.raises(Exception):
+        verify_selection_provenance(
+            provenance,
+            selected_manifest=selected,
+            candidate_manifest=candidate_manifest,
+            qualification_artifact=replacement,
+            expected_config_sha256=CONFIG_SHA,
+        )
+
+
+def test_canonically_rehashed_valid_candidate_chain_replacement_is_rejected():
+    candidate_manifest, artifact = _valid_chain()
+    selected, provenance = construct_selected_manifest_and_provenance(
+        candidate_manifest=candidate_manifest,
+        qualification_artifact=artifact,
+        expected_config_sha256=CONFIG_SHA,
+        tokenizer_renderer=_fake_renderer,
+    )
+    alternate_population = [
+        dict(row, problem=f"alternate valid problem: {row['problem']}") for row in _population()
+    ]
+    replacement_manifest = build_candidate_manifest(
+        alternate_population,
+        dataset_repo=DATASET_REPO, dataset_config="default", dataset_split="test",
+        dataset_revision=DATASET_REVISION, model_name=MODEL_NAME, model_revision=MODEL_REVISION,
+        tokenizer_name=MODEL_NAME, tokenizer_revision=MODEL_REVISION, budget=BUDGET,
+        config_path="configs/discovery/llama8b_math500_b1024.yaml", config_sha256=CONFIG_SHA,
+    )
+    replacement_artifact = _qualification_artifact(
+        replacement_manifest,
+        [_outcome_for(replacement_manifest, 0, qualified=True)],
+        selection_status=SELECTION_STATUS_SELECTED,
+        first_ordinal=0,
+        selected_unique_id=replacement_manifest["candidates"][0]["unique_id"],
+    )
+    provenance["candidate_manifest_canonical_sha256"] = replacement_manifest["canonical_sha256"]
+    provenance["qualification_artifact_canonical_sha256"] = replacement_artifact["canonical_sha256"]
+    provenance = _rehash(provenance)
+    with pytest.raises(Exception):
+        verify_selection_provenance(
+            provenance,
+            selected_manifest=selected,
+            candidate_manifest=replacement_manifest,
+            qualification_artifact=replacement_artifact,
+            expected_config_sha256=CONFIG_SHA,
+        )
+
+
+def test_canonically_rehashed_earlier_qualifying_candidate_is_rejected():
+    candidate_manifest = _candidate_manifest()
+    attempted = [
+        _outcome_for(candidate_manifest, 0, qualified=False),
+        _outcome_for(candidate_manifest, 1, qualified=True),
+    ]
+    artifact = _qualification_artifact(
+        candidate_manifest,
+        attempted,
+        selection_status=SELECTION_STATUS_SELECTED,
+        first_ordinal=1,
+        selected_unique_id=attempted[1]["unique_id"],
+    )
+    selected, provenance = construct_selected_manifest_and_provenance(
+        candidate_manifest=candidate_manifest,
+        qualification_artifact=artifact,
+        expected_config_sha256=CONFIG_SHA,
+        tokenizer_renderer=_fake_renderer,
+    )
+    artifact["attempted"][0] = _outcome_for(candidate_manifest, 0, qualified=True)
+    artifact = _rehash(artifact)
+    provenance["qualification_artifact_canonical_sha256"] = artifact["canonical_sha256"]
+    provenance = _rehash(provenance)
+    with pytest.raises(Exception):
+        verify_selection_provenance(
+            provenance,
+            selected_manifest=selected,
+            candidate_manifest=candidate_manifest,
+            qualification_artifact=artifact,
+            expected_config_sha256=CONFIG_SHA,
+        )

@@ -28,6 +28,7 @@ from kvcot.discovery.b2a_r3_contract import (
     GENERATION_CONFIG_SHA256,
     MODEL_NAME,
     MODEL_REVISION,
+    QUALIFICATION_MEMORY_LIMIT_BYTES,
     QUALIFICATION_ARTIFACT_SCHEMA_VERSION,
     QUALIFICATION_PROTOCOL_VERSION,
     RUNTIME_PREDICTOR_VERSION,
@@ -327,4 +328,170 @@ def test_selection_provenance_semantic_ordinal_mismatch_is_rejected():
             candidate_manifest=candidate_manifest,
             qualification_artifact=artifact,
             expected_config_sha256=candidate_manifest["config_sha256"],
+        )
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["cap_hit", "batch_size", "peak_memory", "prompt_hash", "runtime_projection"],
+)
+def test_canonically_rehashed_raw_gate_contradictions_are_rejected(case):
+    artifact = _artifact()
+    outcome = artifact["attempted"][0]
+    if case == "cap_hit":
+        outcome["cap_hit"] = True
+    elif case == "batch_size":
+        outcome["actual_batch_size"] = 2
+    elif case == "peak_memory":
+        value = QUALIFICATION_MEMORY_LIMIT_BYTES + 1
+        outcome["peak_cuda_allocated_bytes"] = value
+        outcome["peak_cuda_tracked_bytes"] = value
+    elif case == "prompt_hash":
+        outcome["observed_prompt_token_ids_sha256"] = "2" * 64
+    else:
+        runtime = predict_runtime(2776).to_json()
+        outcome["runtime_prediction"] = runtime
+        for field in (
+            "reference_seconds_per_token",
+            "predicted_example_seconds",
+            "predicted_pair_seconds",
+            "projected_total_seconds",
+            "projected_gpu_hours",
+            "safety_multiplier",
+            "runtime_predictor_version",
+        ):
+            outcome[field] = runtime[field]
+    with pytest.raises(Exception):
+        verify_qualification_artifact(
+            _rehash(artifact), candidate_manifest=_manifest(), expected_config_sha256=CONFIG_SHA
+        )
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["changed", "reordered", "count", "fabricated_eligible", "ineligible_future", "alternate_consistent"],
+)
+def test_every_canonically_rehashed_schedule_corruption_is_rejected(case):
+    artifact = _artifact()
+    outcome = artifact["attempted"][0]
+    if case == "changed":
+        outcome["predicted_compaction_event_positions"][2] += 1
+    elif case == "reordered":
+        outcome["predicted_compaction_event_positions"][1:3] = reversed(
+            outcome["predicted_compaction_event_positions"][1:3]
+        )
+    elif case == "count":
+        outcome["predicted_event_count"] += 1
+    elif case == "fabricated_eligible":
+        outcome["eligible_event_indices"][0] = 0
+    elif case == "ineligible_future":
+        outcome["eligible_event_indices"].append(outcome["predicted_event_count"] - 1)
+        outcome["eligible_event_count"] += 1
+    else:
+        count = outcome["predicted_event_count"]
+        outcome["predicted_compaction_event_positions"] = list(range(2000, 2000 + count))
+    with pytest.raises(Exception):
+        verify_qualification_artifact(
+            _rehash(artifact), candidate_manifest=_manifest(), expected_config_sha256=CONFIG_SHA
+        )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "generic",
+        "missing",
+        "duplicate",
+        "negative",
+        "nan",
+        "infinity",
+        "backwards",
+        "duration",
+        "incomplete",
+        "failure",
+        "sync",
+        "order",
+        "wall",
+    ],
+)
+def test_canonically_rehashed_incomplete_or_corrupt_timing_is_rejected(case):
+    artifact = _artifact()
+    outcome = artifact["attempted"][0]
+    timing = outcome["fullkv_timing_evidence"]
+    if case == "generic":
+        timing[:] = [{**timing[0], "phase": "generation"}]
+    elif case == "missing":
+        timing[:] = [row for row in timing if row["phase"] != "model_load"]
+    elif case == "duplicate":
+        timing.insert(4, copy.deepcopy(next(row for row in timing if row["phase"] == "model_load")))
+    elif case == "negative":
+        timing[0]["duration_seconds"] = -1.0
+    elif case == "nan":
+        timing[0]["duration_seconds"] = float("nan")
+    elif case == "infinity":
+        timing[0]["duration_seconds"] = float("inf")
+    elif case == "backwards":
+        timing[0]["ended_at"] = timing[0]["started_at"] - 1.0
+    elif case == "duration":
+        timing[0]["duration_seconds"] = 0.5
+    elif case == "incomplete":
+        timing[0]["completed"] = False
+    elif case == "failure":
+        timing[0]["failure_type"] = "RuntimeError"
+        timing[0]["failure_message"] = "boom"
+    elif case == "sync":
+        timing[0]["synchronize_before_end"] = False
+    elif case == "order":
+        timing[1], timing[2] = timing[2], timing[1]
+    else:
+        outcome["fullkv_wall_seconds"] += 1.0
+    with pytest.raises(Exception):
+        verify_qualification_artifact(
+            _rehash(artifact), candidate_manifest=_manifest(), expected_config_sha256=CONFIG_SHA
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("dataset_repo", "alternate/example"),
+        ("dataset_revision", "0" * 40),
+        ("model_revision", "0" * 40),
+        ("tokenizer_revision", "0" * 40),
+        ("budget", 2048),
+        ("config_path", "configs/alternate.yaml"),
+        ("config_sha256", "0" * 64),
+        ("config_sha256", "A" * 64),
+        ("budget", "1024"),
+    ],
+)
+def test_canonically_rehashed_frozen_manifest_identity_substitution_is_rejected(field, value):
+    manifest = _manifest()
+    manifest[field] = value
+    with pytest.raises(Exception):
+        verify_candidate_manifest_structure(_rehash(manifest), expected_config_sha256=CONFIG_SHA)
+
+
+@pytest.mark.parametrize("case", ["id", "hash", "count", "reorder", "empty", "bool"])
+def test_canonically_rehashed_generated_token_corruption_is_rejected(case):
+    artifact = _artifact()
+    outcome = artifact["attempted"][0]
+    if case == "id":
+        outcome["natural_generated_token_ids"][0] += 1
+    elif case == "hash":
+        outcome["generated_token_ids_sha256"] = "0" * 64
+    elif case == "count":
+        outcome["generated_token_count"] += 1
+        outcome["total_processed_tokens"] += 1
+    elif case == "reorder":
+        outcome["natural_generated_token_ids"][0:2] = reversed(outcome["natural_generated_token_ids"][0:2])
+    elif case == "empty":
+        outcome["natural_generated_token_ids"] = []
+        outcome["generated_token_count"] = 0
+        outcome["total_processed_tokens"] = outcome["prompt_token_count"]
+    else:
+        outcome["natural_generated_token_ids"][0] = True
+    with pytest.raises(Exception):
+        verify_qualification_artifact(
+            _rehash(artifact), candidate_manifest=_manifest(), expected_config_sha256=CONFIG_SHA
         )

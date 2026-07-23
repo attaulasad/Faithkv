@@ -77,6 +77,7 @@ class WorktreeStatus:
 _ATTEMPT_PATH_RE = re.compile(
     r"^results/decisions/b2a_r3_attempt_[0-9]{8}T[0-9]{12}Z_([A-Za-z0-9][A-Za-z0-9._-]{0,127})$"
 )
+_ACTIVE_PATHS_TOKEN = object()
 
 
 def _normalized_repo_path(value: str, *, name: str) -> str:
@@ -94,6 +95,7 @@ class ActiveAuthorizationPaths:
 
     global_claim_path: str
     attempt_directory_root: str
+    _derivation_token: object
 
     @classmethod
     def from_verified_claim(cls, claim: Any) -> "ActiveAuthorizationPaths":
@@ -113,7 +115,11 @@ class ActiveAuthorizationPaths:
         validate_authorization_id(claim.attempt_id)
         if PurePosixPath(attempt_path).parent != PurePosixPath("results/decisions"):
             raise ValueError("attempt directory is outside results/decisions")
-        return cls(global_claim_path=claim_path, attempt_directory_root=attempt_path)
+        return cls(
+            global_claim_path=claim_path,
+            attempt_directory_root=attempt_path,
+            _derivation_token=_ACTIVE_PATHS_TOKEN,
+        )
 
 
 class GitStateProvider(Protocol):
@@ -226,6 +232,11 @@ def verify_attempt_provenance(
         reasons.append(f"observed R-KV submodule SHA {observed_rkv_sha!r} != required {policy.required_rkv_sha!r}")
 
     status = git_state.worktree_status()
+    if (
+        active_authorization_paths is not None
+        and active_authorization_paths._derivation_token is not _ACTIVE_PATHS_TOKEN
+    ):
+        raise ValueError("active authorization paths were not derived from a verified claim")
     unexpected: set[str] = set()
     for dirty_path in status.dirty_paths:
         try:
