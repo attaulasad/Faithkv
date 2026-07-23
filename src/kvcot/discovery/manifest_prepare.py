@@ -197,6 +197,34 @@ def build_plan(config: DiscoveryConfig, manifest_path: Path = DEFAULT_MANIFEST_P
     )
 
 
+def render_with_loaded_tokenizer(tokenizer: Any, row: dict[str, Any]) -> tuple[str, list[dict[str, str]], list[int]]:
+    """The exact frozen chat-template call, factored out of
+    `_render_and_tokenize` (Step 3R4-Repair-2 Finding 1) so a caller that
+    has ALREADY resolved/loaded a tokenizer -- the real B2A-R3 FullKV
+    qualification worker
+    (`kvcot.discovery.b2a_r3_qualification_worker.run_fullkv_r3_qualification_worker`),
+    reusing the SAME tokenizer instance it also passes into
+    `kvcot.discovery.b2a_workers.run_fullkv_worker`'s `_load_tokenizer` seam
+    -- can render the canonical prompt without a second, independent
+    tokenizer load. `_render_and_tokenize` below is now a thin wrapper:
+    load, then delegate here. Behavior is byte-for-byte identical to the
+    prior single-function version for both of that function's existing
+    callers."""
+    from kvcot.probes.templates import render_base_user_message
+
+    if tokenizer.chat_template is None:
+        raise ManifestPreparationError("tokenizer has no chat_template -- refusing to invent one.")
+
+    user_message = render_base_user_message(row["problem"])
+    messages = [{"role": "user", "content": user_message}]
+    token_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
+    token_ids = list(token_ids)
+    if len(token_ids) == 0:
+        raise ManifestPreparationError("apply_chat_template returned zero tokens -- refusing an empty prompt.")
+
+    return user_message, messages, token_ids
+
+
 def _render_and_tokenize(
     row: dict[str, Any], tokenizer_name: str, tokenizer_revision: str, *, local_only_path: str | None = None
 ):
@@ -232,8 +260,6 @@ def _render_and_tokenize(
     caller."""
     from transformers import AutoTokenizer
 
-    from kvcot.probes.templates import render_base_user_message
-
     if local_only_path is not None:
         tokenizer = AutoTokenizer.from_pretrained(local_only_path, local_files_only=True, use_fast=True)
     else:
@@ -244,13 +270,7 @@ def _render_and_tokenize(
             f"tokenizer {tokenizer_name}@{tokenizer_revision} has no chat_template -- refusing to invent one."
         )
 
-    user_message = render_base_user_message(row["problem"])
-    messages = [{"role": "user", "content": user_message}]
-    token_ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=True)
-    token_ids = list(token_ids)
-    if len(token_ids) == 0:
-        raise ManifestPreparationError("apply_chat_template returned zero tokens -- refusing an empty prompt.")
-
+    user_message, messages, token_ids = render_with_loaded_tokenizer(tokenizer, row)
     return tokenizer, user_message, messages, token_ids
 
 
