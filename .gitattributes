@@ -1,0 +1,4 @@
+# B2A-R3's frozen config identity is the SHA-256 of exact file bytes.  The
+# committed candidate manifest was frozen from CRLF bytes, so make that
+# checkout representation explicit and platform-independent.
+configs/discovery/llama8b_math500_b1024.yaml text eol=crlf

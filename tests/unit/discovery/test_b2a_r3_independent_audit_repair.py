@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from kvcot.config import config_identity
 from kvcot.analysis.rkv_schedule import predicted_compaction_event_positions
 from kvcot.discovery.b2a_r3_artifacts import SELECTION_STATUS_SELECTED, verify_qualification_artifact
 from kvcot.discovery.b2a_r3_candidates import verify_candidate_manifest_structure
@@ -49,6 +50,15 @@ from kvcot.utils.hashing import sha256_int_ids, sha256_json
 
 CONFIG_SHA = "de8ac65a348c307c4f00089da07914666332935981bcaa7c98a150a9e7e778b3"
 DIVIDE_LENGTH = 128
+
+
+def test_frozen_config_byte_identity_has_platform_independent_checkout_contract():
+    attributes = Path(".gitattributes").read_text(encoding="utf-8")
+    assert "configs/discovery/llama8b_math500_b1024.yaml text eol=crlf" in attributes.splitlines()
+    config_bytes = Path(CONFIG_PATH).read_bytes()
+    assert b"\r\n" in config_bytes
+    assert b"\n" not in config_bytes.replace(b"\r\n", b"")
+    assert config_identity(CONFIG_PATH) == CONFIG_SHA == _manifest()["config_sha256"]
 
 
 def _manifest() -> dict:
