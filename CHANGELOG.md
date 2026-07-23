@@ -1,5 +1,75 @@
 # Changelog
 
+## 2026-07-22 — B2A-R3 protocol audit repair: 18 findings resolved (DOCUMENTATION ONLY; STEP 3 BLOCKED; GPU REMAINS PROHIBITED)
+
+An independent audit of the B2A-R3 protocol frozen earlier the same day
+(commit `93b6ba869eb5e555684704a6d1f2250f16884768`) found 18 defects.
+Repaired in `docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md`; full
+ledger in the new `docs/B2A_R3_PROTOCOL_AUDIT_REPAIR_2026-07-22.md`
+(findings R3-AUDIT-01 through R3-AUDIT-18). No source, test, or
+configuration file changed; no GPU used; no candidate manifest,
+qualification artifact, or authorization claim generated.
+
+- **R3-AUDIT-01/02:** added the missing §22 disposition section; replaced
+  the contradictory "PROTOCOL FROZEN — CPU IMPLEMENTATION AUTHORIZED"
+  status (a bare declarative line next to audit-gated prose) with
+  "PROTOCOL REPAIRED — INDEPENDENT RE-AUDIT PENDING / CPU IMPLEMENTATION
+  BLOCKED / GPU EXECUTION PROHIBITED" everywhere it appeared.
+- **R3-AUDIT-03:** replaced rounded predictor constants (`10.25`, `~19.0`)
+  with exact values read from
+  `docs/evidence/B2A_R2_ATTEMPT_INDEX_2026-07-22.json` (`REFERENCE_
+  EXAMPLE_SECONDS = 1378.3004406290129`, `REFERENCE_PAIR_SECONDS =
+  10.247917714063078`, algebraically-derived `REFERENCE_SETUP_SECONDS =
+  19.298151996218968`), and froze the continuous token ceiling
+  (`2775.0857674895859...`) with an exact integer pass/fail boundary
+  (2775 passes, 2776 fails) -- both independently recomputed and verified
+  during this repair.
+- **R3-AUDIT-04/05:** froze the exact 12-step mixed-level candidate
+  construction (independent per-level sort, then strict level-4/level-5
+  interleave) and the exact 13-row prior-attempt exclusion list with a
+  verifiable `EXCLUSION_SET_SHA256`.
+- **R3-AUDIT-06/07:** froze exact `thinking_span_valid`/`trace_complete`
+  predicates sourced from `src/kvcot/probes/early_answering.py`'s actual
+  `think_parse_status` values.
+- **R3-AUDIT-08/09/10/16:** standardized all new-artifact hashing on
+  `canonical_sha256` (self-hash-exclusion rule frozen), removed the
+  nondeterministic `created_at` from the candidate-manifest schema, froze
+  one exact path per artifact (no more "recommended"), and standardized
+  every schema field name across six new schema tables.
+- **R3-AUDIT-11:** resolved the wall-time section's self-contradiction
+  (`VERIFY BEFORE FREEZE` next to a demand for a nonexistent formula) by
+  freezing the `8 x 7200 = 57600`-second mathematical envelope
+  (explicitly not an authorized budget) and deferring the real phase-wide
+  limit to a future Stage B authorization.
+- **R3-AUDIT-12/13:** froze an authorization-document-plus-atomic-claim
+  consumption lifecycle, and a separately-constructed
+  `AttemptProvenancePolicy` for B2A-R3 that never touches the historical
+  `REQUIRED_BRANCH` global in `attempt_verification.py`.
+- **R3-AUDIT-14:** copied both `FINAL_MANDATORY_GATE_CONDITIONS` (30
+  conditions) and `MANDATORY_GATE_CONDITIONS` (29 conditions) verbatim
+  into the protocol, each with source path, source commit, and blob
+  SHA-256 -- replacing "inherits whatever exists at Step 3 time."
+- **R3-AUDIT-15:** corrected no-op gate wording to distinguish the NLL
+  arrays' exact (zero-tolerance) equality from the derived `swap_gain`'s
+  `1e-9`-tolerance check -- two different checks, not one.
+- **R3-AUDIT-17:** clarified that Stage A may generate a real, committed
+  candidate manifest (no model involved) but never a real qualification
+  artifact (which requires FullKV inference).
+- **R3-AUDIT-18:** resolved the repository-identity discrepancy
+  (`asad073-ui/Faithkv`, verified against the configured remote) as a
+  closed historical note, not an active ambiguity.
+
+`CLAUDE.md` gains a dated §1f recording the same repaired-but-unaudited
+authorization boundary; `PLAN.md`/`README.md` current-status sections
+point to both the repaired protocol and the new audit ledger.
+
+```text
+B2A-R3 STATUS:
+PROTOCOL REPAIRED — INDEPENDENT RE-AUDIT PENDING
+CPU IMPLEMENTATION BLOCKED
+GPU EXECUTION PROHIBITED
+```
+
 ## 2026-07-22 — B2A-R3 runtime-qualified protocol frozen (DOCUMENTATION ONLY; GPU REMAINS PROHIBITED)
 
 Froze `docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` after

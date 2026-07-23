@@ -240,6 +240,40 @@ Step 3 will be permitted to do once that separate audit passes.
   by §1/§1a/§1b/§1c/§1d/§4/§4a/§4b/§4c.
 - Does **not** modify `configs/lock.yaml` or the pinned R-KV revision.
 
+### Section 1f — B2A-R3 protocol audit repair (dated 2026-07-22)
+
+Added by
+`docs/B2A_R3_PROTOCOL_AUDIT_REPAIR_2026-07-22.md`, superseding nothing
+above. An independent audit of the protocol §1e froze found 18 defects
+(missing §22; a contradictory "CPU IMPLEMENTATION AUTHORIZED" status line
+next to audit-gated prose; rounded runtime constants; an unfrozen
+mixed-level candidate ordering; an unfrozen exclusion set; undefined
+thinking-span/trace-completeness predicates; a self-referential hash
+ambiguity; a nondeterministic candidate-manifest timestamp; every
+artifact path left merely "recommended"; a self-contradictory wall-time
+section; an undefined attempt-consumption lifecycle; a historical
+branch-constant conflict; dynamic (unfrozen) final-gate inheritance;
+imprecise no-op tolerance wording; inconsistent schema field names; CPU
+scope ambiguous about authorizing a real qualification artifact; and an
+unresolved repository-identity discrepancy). All 18 are repaired directly
+in `docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md`; the finding
+ledger is `docs/B2A_R3_PROTOCOL_AUDIT_REPAIR_2026-07-22.md`.
+
+```text
+B2A-R3 protocol repairs are committed.
+Independent re-audit is pending.
+Step 3 remains blocked.
+GPU remains prohibited.
+```
+
+This subsection does **not** authorize CPU implementation. The repairing
+author does not self-certify this protocol — a separate, genuinely
+independent re-audit of this repair commit is the next required action
+before Stage A (§1e) can begin. No threshold, budget, model, dataset, or
+gate frozen by §1/§1a-§1e/§4/§4a-§4c is changed by this subsection; no
+source code, test, or configuration file is modified by it;
+`configs/lock.yaml` and the pinned R-KV revision are unchanged.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

@@ -1,34 +1,51 @@
 # Plan and status
 
-## Current status: B2A-R3 runtime-qualified protocol frozen (2026-07-22)
+## Current status: B2A-R3 protocol repaired; independent re-audit pending (2026-07-22)
 
-`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` is frozen: research
-question, outcome-blind qualification contract, deterministic candidate
-pool/ordering, the runtime predictor (with both mandatory ambiguities --
-the `10.25`s pair-time statistic and the meaningful-compression definition
--- resolved from repository evidence, never invented), mechanical and
-scientific acceptance gates, kill gates, and the three-stage
-authorization boundary (CPU implementation / bounded FullKV qualification
-/ one B2A-R3 execution, each requiring its own separate future
-authorization).
+An independent audit of the B2A-R3 protocol first frozen at commit
+`93b6ba8` found 18 defects (missing §22; a contradictory "CPU
+IMPLEMENTATION AUTHORIZED" status line; rounded runtime constants; an
+unfrozen mixed-level candidate ordering; an unfrozen exclusion set;
+undefined thinking-span/trace-completeness predicates; a self-referential
+hash ambiguity; a nondeterministic candidate-manifest timestamp; every
+artifact path left merely "recommended"; a self-contradictory wall-time
+section; an undefined attempt-consumption lifecycle; a historical
+branch-constant conflict; dynamic final-gate inheritance; imprecise no-op
+tolerance wording; inconsistent schema field names; CPU scope ambiguous
+about a real qualification artifact; an unresolved repository-identity
+discrepancy). All 18 are now repaired in
+`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md`; the full ledger is
+`docs/B2A_R3_PROTOCOL_AUDIT_REPAIR_2026-07-22.md`.
 
 ```text
 B2A-R3 STATUS:
-PROTOCOL FROZEN — CPU IMPLEMENTATION AUTHORIZED — GPU EXECUTION PROHIBITED
+PROTOCOL REPAIRED — INDEPENDENT RE-AUDIT PENDING
+CPU IMPLEMENTATION BLOCKED
+GPU EXECUTION PROHIBITED
 ```
 
-This status becomes valid only after protocol review, documentation
-validation, commit, push, and independent audit -- it does not itself
-authorize GPU activity of any kind, and does not authorize B2A-R3
-execution, B2B, or FaithKV method implementation. `CLAUDE.md` §1e records
-the same dated authorization boundary.
+This repair does not self-certify the protocol -- the repairing author
+cannot independently approve their own repair. `CLAUDE.md` §1f records the
+same dated authorization boundary.
 
-The next task is:
+Next action:
 
 ```text
-Independent audit of the frozen B2A-R3 protocol, followed by CPU-only
-implementation if the audit passes.
+Independent review of the Step 2A repair commit.
 ```
+
+## Prior status: B2A-R3 runtime-qualified protocol frozen (2026-07-22)
+
+`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` was first frozen:
+research question, outcome-blind qualification contract, deterministic
+candidate pool/ordering, the runtime predictor (with both mandatory
+ambiguities -- the pair-time statistic and the meaningful-compression
+definition -- resolved from repository evidence, never invented),
+mechanical and scientific acceptance gates, kill gates, and the
+three-stage authorization boundary. The active status this section
+recorded ("PROTOCOL FROZEN — CPU IMPLEMENTATION AUTHORIZED") was itself
+found to be an audit finding (R3-AUDIT-02) and is corrected above -- see
+"Current status" above for the repair.
 
 ## Prior status: B2A-R2 forensic closure -- merged into main (2026-07-22)
 

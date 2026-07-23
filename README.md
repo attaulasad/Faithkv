@@ -2,31 +2,48 @@
 
 ## Current status (read this first)
 
-**B2A-R3 RUNTIME-QUALIFIED PROTOCOL: FROZEN (2026-07-22).** Full protocol:
-`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` (research question,
-outcome-blind qualification contract, deterministic candidate pool, the
-runtime predictor, mechanical/scientific/kill gates, and a three-stage
-authorization boundary). This document does not restate the protocol --
-see the frozen file itself.
+**B2A-R3 PROTOCOL: REPAIRED, INDEPENDENT RE-AUDIT PENDING (2026-07-22).**
+An independent audit of the protocol first frozen the same day found 18
+defects (contradictory authorization status, rounded runtime constants,
+several unfrozen ambiguities, inconsistent schema naming, and more). All
+are repaired. See:
+
+- `docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` — the repaired
+  protocol.
+- `docs/B2A_R3_PROTOCOL_AUDIT_REPAIR_2026-07-22.md` — the audit-finding
+  ledger.
 
 ```text
 B2A-R3 STATUS:
-PROTOCOL FROZEN — CPU IMPLEMENTATION AUTHORIZED — GPU EXECUTION PROHIBITED
+PROTOCOL REPAIRED — INDEPENDENT RE-AUDIT PENDING
+CPU IMPLEMENTATION BLOCKED
+GPU EXECUTION PROHIBITED
 ```
 
-This status is valid only after protocol review, documentation
-validation, commit, push, and independent audit -- it does **not**
-authorize GPU activity, B2A-R3 execution, B2B, or FaithKV method
-implementation of any kind (`CLAUDE.md` §1e). B2A-R2 (see "Historical
-status" below) remains a consumed experimental attempt, prohibited from
-rerun, its `B2A-R2 FINAL VERDICT: FAIL -- B2B BLOCKED` unchanged.
-
-The next required action is an independent audit of the frozen protocol,
-followed by CPU-only implementation (candidate manifest, runtime
-predictor, qualification evaluator, selected-row freezer, CPU tests, and a
-dry-run CLI) if that audit passes.
+The repairing author does not self-certify this protocol — a separate,
+genuinely independent re-audit of this repair is the next required action
+before any Stage A (CPU-only) implementation may begin (`CLAUDE.md` §1f).
+B2A-R2 (see "Historical status" below) remains a consumed experimental
+attempt, prohibited from rerun, its
+`B2A-R2 FINAL VERDICT: FAIL -- B2B BLOCKED` unchanged.
 
 ### Historical status
+
+#### Prior status: B2A-R3 runtime-qualified protocol frozen (2026-07-22)
+
+`docs/B2A_R3_RUNTIME_QUALIFIED_PROTOCOL_2026-07-22.md` was first frozen
+(research question, outcome-blind qualification contract, deterministic
+candidate pool, the runtime predictor, mechanical/scientific/kill gates,
+and a three-stage authorization boundary). Its active status line read
+"PROTOCOL FROZEN — CPU IMPLEMENTATION AUTHORIZED — GPU EXECUTION
+PROHIBITED" — an independent audit found this contradicted the
+surrounding audit-gated prose, among 17 other defects, all now repaired.
+See "Current status" above.
+
+```text
+B2A-R3 STATUS (superseded, see "Current status" above):
+PROTOCOL FROZEN — CPU IMPLEMENTATION AUTHORIZED — GPU EXECUTION PROHIBITED
+```
 
 #### Prior status: B2A-R2 forensic closure -- merged into main (2026-07-22)
 
