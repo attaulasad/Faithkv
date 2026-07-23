@@ -51,6 +51,7 @@ __all__ = [
     "AUTHORIZATION_STAGE_B2A_R3_EXECUTION",
     "AuthorizationClaimR3",
     "VerifiedAuthorizationContext",
+    "ConsumedAuthorizationContext",
     "verify_authorization_preconditions",
     "claim_authorization",
     "plan_authorization_claim_dry_run",
@@ -173,6 +174,7 @@ class AuthorizationClaimR3(BaseModel):
 
 
 _VERIFIED_CONTEXT_TOKEN = object()
+_CONSUMED_CONTEXT_TOKEN = object()
 
 
 @dataclass(frozen=True)
@@ -188,6 +190,24 @@ class VerifiedAuthorizationContext:
     maximum_candidates: int | None
     phase_wall_time_limit_seconds: int | None
     _verification_token: object
+
+
+@dataclass(frozen=True)
+class ConsumedAuthorizationContext:
+    """Proof that semantic authorization preconditions were verified and
+    the deterministic global claim file was exclusively created before any
+    execution action. Iterates as `(claim, claim_path)` for compatibility
+    with older call sites that unpacked `claim_authorization` directly."""
+
+    claim: AuthorizationClaimR3
+    verified_context: VerifiedAuthorizationContext
+    claim_path: Path
+    authorization_claim_canonical_sha256: str
+    _consumption_token: object
+
+    def __iter__(self):
+        yield self.claim
+        yield self.claim_path
 
 
 def verify_authorization_preconditions(
@@ -388,7 +408,7 @@ def claim_authorization(
     repository_root: str | Path,
     verified_context: VerifiedAuthorizationContext,
     git_state: GitStateProvider,
-) -> tuple[AuthorizationClaimR3, Path]:
+) -> ConsumedAuthorizationContext:
     """Full-schema validation, exact global-path binding, an immediate
     Git/worktree reverification, then the atomic claim operation (Step 3R4
     Finding 4). No caller may direct consumption at an arbitrary
@@ -435,7 +455,13 @@ def claim_authorization(
 
     absolute_claim_path = Path(repository_root) / relative_claim_path
     claim_path = _create_authorization_claim(payload, claim_path=absolute_claim_path)
-    return typed, claim_path
+    return ConsumedAuthorizationContext(
+        claim=typed,
+        verified_context=verified_context,
+        claim_path=claim_path,
+        authorization_claim_canonical_sha256=typed.canonical_sha256,
+        _consumption_token=_CONSUMED_CONTEXT_TOKEN,
+    )
 
 
 def plan_authorization_claim_dry_run(payload: dict[str, Any]) -> dict[str, Any]:

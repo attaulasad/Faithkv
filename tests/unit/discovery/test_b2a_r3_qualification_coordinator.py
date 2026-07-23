@@ -37,8 +37,20 @@ from kvcot.discovery.b2a_r3_qualification_coordinator import (
 from kvcot.discovery.b2a_r3_worker_adapter import FullKVWorkerResultR3, adapt_fullkv_worker_result_to_r3_evidence
 from kvcot.discovery.b2a_workers import FullKVWorkerResult
 
-from tests.unit.discovery.test_b2a_r3_authorization import _verified_stage_b
+from kvcot.discovery.b2a_r3_authorization import claim_authorization
+from tests.unit.discovery.test_b2a_r3_authorization import _verified_stage_b as _build_verified_stage_b
 from tests.unit.discovery.test_b2a_r3_worker_adapter import CONFIG_SHA, _candidate_manifest, _valid_worker_result
+
+
+def _verified_stage_b(*args, **kwargs):
+    payload, verified, document, candidate_manifest, git_state = _build_verified_stage_b(*args, **kwargs)
+    consumed = claim_authorization(
+        payload,
+        repository_root=Path(document).parents[1],
+        verified_context=verified,
+        git_state=git_state,
+    )
+    return payload, consumed, document, candidate_manifest, git_state
 
 
 class _FakeClock:
@@ -88,7 +100,7 @@ def test_candidate_zero_passes_exactly_one_worker_call(tmp_path):
     calls: list[int] = []
     artifact = run_b2a_r3_qualification_coordinator(
         candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
-        verified_authorization_context=context, fullkv_worker_runner=_runner(calls=calls),
+        consumed_authorization_context=context, fullkv_worker_runner=_runner(calls=calls),
         clock=_FakeClock(), per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
     )
     assert calls == [0]
@@ -105,7 +117,7 @@ def test_candidate_zero_fails_candidate_one_passes_exactly_two_calls(tmp_path):
     calls: list[int] = []
     artifact = run_b2a_r3_qualification_coordinator(
         candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
-        verified_authorization_context=context,
+        consumed_authorization_context=context,
         fullkv_worker_runner=_runner(qualifies={0: False}, calls=calls),
         clock=_FakeClock(), per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
     )
@@ -119,7 +131,7 @@ def test_all_eight_fail_exactly_eight_calls(tmp_path):
     calls: list[int] = []
     artifact = run_b2a_r3_qualification_coordinator(
         candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
-        verified_authorization_context=context,
+        consumed_authorization_context=context,
         fullkv_worker_runner=_runner(qualifies={i: False for i in range(8)}, calls=calls),
         clock=_FakeClock(), per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
     )
@@ -136,7 +148,7 @@ def test_authorization_maximum_candidates_three_never_calls_a_fourth(tmp_path):
     calls: list[int] = []
     artifact = run_b2a_r3_qualification_coordinator(
         candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
-        verified_authorization_context=context,
+        consumed_authorization_context=context,
         fullkv_worker_runner=_runner(qualifies={0: False, 1: False, 2: False}, calls=calls),
         clock=_FakeClock(), per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
     )
@@ -149,7 +161,7 @@ def test_pass_at_ordinal_two_never_evaluates_three_through_seven(tmp_path):
     calls: list[int] = []
     artifact = run_b2a_r3_qualification_coordinator(
         candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
-        verified_authorization_context=context,
+        consumed_authorization_context=context,
         fullkv_worker_runner=_runner(qualifies={0: False, 1: False, 2: True}, calls=calls),
         clock=_FakeClock(), per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
     )
@@ -168,7 +180,7 @@ def test_worker_returns_wrong_candidate_evidence_hard_refusal(tmp_path):
     with pytest.raises(QualificationCoordinatorRefused):
         run_b2a_r3_qualification_coordinator(
             candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
-            verified_authorization_context=context, fullkv_worker_runner=bad_runner,
+            consumed_authorization_context=context, fullkv_worker_runner=bad_runner,
             clock=_FakeClock(), per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
         )
 
@@ -190,7 +202,7 @@ def test_worker_returns_legacy_result_hard_refusal(tmp_path):
     with pytest.raises(QualificationCoordinatorRefused):
         run_b2a_r3_qualification_coordinator(
             candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
-            verified_authorization_context=context, fullkv_worker_runner=legacy_runner,
+            consumed_authorization_context=context, fullkv_worker_runner=legacy_runner,
             clock=_FakeClock(), per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
         )
 
@@ -200,12 +212,12 @@ def test_candidate_timeout_exact_stopping_behavior(tmp_path):
     calls: list[int] = []
     artifact = run_b2a_r3_qualification_coordinator(
         candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
-        verified_authorization_context=context,
+        consumed_authorization_context=context,
         fullkv_worker_runner=_runner(qualifies={0: False}, calls=calls, timeout_at={1}),
         clock=_FakeClock(), per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
     )
     assert calls == [0, 1]
-    assert artifact["qualification_stopped_reason"] == STOPPED_REASON_CANDIDATE_WORKER_TIMEOUT
+    assert artifact["qualification_stopped_reason"] == STOPPED_REASON_PHASE_WALL_TIME_EXHAUSTED
     assert artifact["attempted_candidate_count"] == 1
     assert artifact["selection_status"] == SELECTION_STATUS_NONE_QUALIFIED
 
@@ -218,10 +230,10 @@ def test_stdlib_timeout_error_also_stops_cleanly(tmp_path):
 
     artifact = run_b2a_r3_qualification_coordinator(
         candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
-        verified_authorization_context=context, fullkv_worker_runner=runner,
+        consumed_authorization_context=context, fullkv_worker_runner=runner,
         clock=_FakeClock(), per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
     )
-    assert artifact["qualification_stopped_reason"] == STOPPED_REASON_CANDIDATE_WORKER_TIMEOUT
+    assert artifact["qualification_stopped_reason"] == STOPPED_REASON_PHASE_WALL_TIME_EXHAUSTED
     assert artifact["attempted_candidate_count"] == 0
 
 
@@ -247,7 +259,7 @@ def test_phase_wide_time_exhausted_before_next_candidate_no_additional_call(tmp_
 
     artifact = run_b2a_r3_qualification_coordinator(
         candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
-        verified_authorization_context=context,
+        consumed_authorization_context=context,
         fullkv_worker_runner=_runner(qualifies={0: False}, calls=calls),
         clock=clock, per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
     )
@@ -272,7 +284,7 @@ def test_effective_worker_timeout_capped_at_remaining_phase_time(tmp_path):
     clock = _sequence_clock([0.0, 590.0, 601.0, 602.0])
     artifact = run_b2a_r3_qualification_coordinator(
         candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
-        verified_authorization_context=context, fullkv_worker_runner=runner,
+        consumed_authorization_context=context, fullkv_worker_runner=runner,
         clock=clock, per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
     )
     assert timeouts == [10.0]
@@ -294,7 +306,7 @@ def test_effective_worker_timeout_never_exceeds_the_frozen_per_candidate_cap(tmp
 
     artifact = run_b2a_r3_qualification_coordinator(
         candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
-        verified_authorization_context=context, fullkv_worker_runner=runner,
+        consumed_authorization_context=context, fullkv_worker_runner=runner,
         clock=_FakeClock(), per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
     )
     assert timeouts == [PER_CANDIDATE_WORKER_TIMEOUT_SECONDS]
@@ -314,7 +326,7 @@ def test_post_worker_check_relabels_stop_reason_on_last_candidate(tmp_path):
     clock = _sequence_clock([0.0, 100.0, 601.0, 602.0])
     artifact = run_b2a_r3_qualification_coordinator(
         candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
-        verified_authorization_context=context,
+        consumed_authorization_context=context,
         fullkv_worker_runner=_runner(qualifies={0: False}, calls=calls),
         clock=clock, per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
     )
@@ -328,7 +340,7 @@ def test_no_production_files_written(tmp_path):
     _payload, context, _document, candidate_manifest, _git_state = _verified_stage_b(tmp_path)
     run_b2a_r3_qualification_coordinator(
         candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
-        verified_authorization_context=context, fullkv_worker_runner=_runner(),
+        consumed_authorization_context=context, fullkv_worker_runner=_runner(),
         clock=_FakeClock(), per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
     )
     assert not Path(QUALIFICATION_ARTIFACT_PATH).exists()
@@ -339,7 +351,7 @@ def test_wrong_per_candidate_timeout_refused(tmp_path):
     with pytest.raises(QualificationCoordinatorRefused):
         run_b2a_r3_qualification_coordinator(
             candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
-            verified_authorization_context=context, fullkv_worker_runner=_runner(),
+            consumed_authorization_context=context, fullkv_worker_runner=_runner(),
             clock=_FakeClock(), per_candidate_timeout_seconds=1,
         )
 
@@ -355,7 +367,7 @@ def test_unverified_context_object_refused(tmp_path):
     with pytest.raises(QualificationCoordinatorRefused):
         run_b2a_r3_qualification_coordinator(
             candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
-            verified_authorization_context=FakeContext(), fullkv_worker_runner=_runner(),
+            consumed_authorization_context=FakeContext(), fullkv_worker_runner=_runner(),
             clock=_FakeClock(), per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
         )
 
@@ -374,7 +386,7 @@ def test_mismatched_candidate_manifest_hash_refused(tmp_path):
     with pytest.raises(QualificationCoordinatorRefused):
         run_b2a_r3_qualification_coordinator(
             candidate_manifest=swapped_manifest, expected_config_sha256=swapped_manifest["config_sha256"],
-            verified_authorization_context=context, fullkv_worker_runner=_runner(),
+            consumed_authorization_context=context, fullkv_worker_runner=_runner(),
             clock=_FakeClock(), per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
         )
 
@@ -391,12 +403,64 @@ def test_final_artifact_passes_full_semantic_verification_every_scenario(tmp_pat
         _payload, context, _document, candidate_manifest, _git_state = _verified_stage_b(sub_tmp)
         artifact = run_b2a_r3_qualification_coordinator(
             candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"],
-            verified_authorization_context=context, fullkv_worker_runner=_runner(**scenario),
+            consumed_authorization_context=context, fullkv_worker_runner=_runner(**scenario),
             clock=_FakeClock(), per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
         )
         verify_qualification_artifact(
-            artifact, candidate_manifest=candidate_manifest, expected_config_sha256=candidate_manifest["config_sha256"]
+            artifact,
+            candidate_manifest=candidate_manifest,
+            expected_config_sha256=candidate_manifest["config_sha256"],
+            consumed_authorization_context=context,
         )
+
+
+def test_late_qualified_worker_result_is_not_accepted(tmp_path):
+    _payload, context, _document, candidate_manifest, _git_state = _verified_stage_b(
+        tmp_path, document_overrides={"phase_wall_time_limit_seconds": 5}
+    )
+    calls: list[int] = []
+
+    def runner(ordinal, timeout_seconds):
+        calls.append(ordinal)
+        return _valid_worker_result(ordinal)
+
+    clock = _sequence_clock([0.0, 1.0, 6.0, 7.0])
+    artifact = run_b2a_r3_qualification_coordinator(
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=candidate_manifest["config_sha256"],
+        consumed_authorization_context=context,
+        fullkv_worker_runner=runner,
+        clock=clock,
+        per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
+    )
+    assert calls == [0]
+    assert artifact["attempted_candidate_count"] == 0
+    assert artifact["qualification_stopped_reason"] == STOPPED_REASON_PHASE_WALL_TIME_EXHAUSTED
+
+
+def test_artifact_is_bound_to_consumed_stage_b_authorization(tmp_path):
+    _payload, context, _document, candidate_manifest, _git_state = _verified_stage_b(
+        tmp_path, document_overrides={"maximum_candidates": 3, "phase_wall_time_limit_seconds": 600}
+    )
+    artifact = run_b2a_r3_qualification_coordinator(
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=candidate_manifest["config_sha256"],
+        consumed_authorization_context=context,
+        fullkv_worker_runner=_runner(),
+        clock=_FakeClock(),
+        per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
+    )
+    assert artifact["stage_b_authorization_id"] == context.claim.authorization_id
+    assert artifact["authorization_document_sha256"] == context.claim.authorization_document_sha256
+    assert artifact["authorization_claim_canonical_sha256"] == context.claim.canonical_sha256
+    assert artifact["authorized_maximum_candidates"] == 3
+    assert artifact["authorized_phase_wall_time_limit_seconds"] == 600
+    verify_qualification_artifact(
+        artifact,
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=candidate_manifest["config_sha256"],
+        consumed_authorization_context=context,
+    )
 
 
 # --------------------------------------------------------------------- builder
@@ -548,6 +612,32 @@ def test_atomic_writer_refuses_overwrite(tmp_path):
         write_qualification_artifact_atomic(
             artifact, output_path=output_path, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA,
         )
+
+
+def test_atomic_writer_refuses_raced_existing_file_even_if_precheck_misses(tmp_path, monkeypatch):
+    manifest = _candidate_manifest()
+    attempted = [_outcome(0, qualified=True)]
+    artifact = build_qualification_artifact(
+        attempted_outcomes=attempted, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA,
+        stopped_reason=STOPPED_REASON_FIRST_PASS, authorized_maximum_candidates=QUALIFICATION_CANDIDATE_LIMIT,
+        attempt_started_at_utc="2026-07-23T00:00:00+00:00", attempt_completed_at_utc="2026-07-23T00:05:00+00:00",
+    )
+    output_path = tmp_path / "qualification.json"
+    output_path.write_text('{"already": true}\n', encoding="utf-8")
+
+    real_exists = Path.exists
+
+    def false_for_target(path):
+        if path == output_path:
+            return False
+        return real_exists(path)
+
+    monkeypatch.setattr(Path, "exists", false_for_target)
+    with pytest.raises(QualificationArtifactWriteRefused):
+        write_qualification_artifact_atomic(
+            artifact, output_path=output_path, candidate_manifest=manifest, expected_config_sha256=CONFIG_SHA,
+        )
+    assert json.loads(output_path.read_text(encoding="utf-8")) == {"already": True}
 
 
 def test_atomic_writer_refuses_invalid_artifact(tmp_path):

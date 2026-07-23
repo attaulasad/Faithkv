@@ -124,9 +124,9 @@ def run_fullkv_r3_qualification_worker(
     _device: str = "cuda:0",
     _clock: Callable[[], float] | None = None,
     _progress: Callable[[str, str, dict[str, Any] | None], None] | None = None,
-) -> dict[str, Any]:
+) -> Any:
     """Runs ONE R3 candidate through the canonical FullKV natural-run loop
-    and returns a dict already validated against
+    and returns a typed object validated against
     `kvcot.discovery.b2a_r3_worker_adapter.FullKVWorkerResultR3`.
 
     Same internal, underscore-prefixed dependency-injection seams as
@@ -154,6 +154,7 @@ def run_fullkv_r3_qualification_worker(
         FULLKV_WORKER_RESULT_R3_SCHEMA_VERSION,
         FullKVWorkerResultR3,
     )
+    from kvcot.discovery.discovery_config import canonical_config_hash
     from kvcot.discovery.b2a_workers import run_fullkv_worker
     from kvcot.discovery.manifest_prepare import _render_and_tokenize, render_with_loaded_tokenizer
     from kvcot.probes.early_answering import find_think_span
@@ -163,8 +164,16 @@ def run_fullkv_r3_qualification_worker(
         tokenizer = _load_tokenizer()
         user_message, messages, prompt_token_ids = render_with_loaded_tokenizer(tokenizer, candidate.row)
     else:
+        from kvcot.discovery.snapshot_boundary import resolve_local_snapshot
+
+        tokenizer_snapshot = resolve_local_snapshot(
+            config.model.tokenizer_name, config.model.tokenizer_revision, "tokenizer"
+        )
         tokenizer, user_message, messages, prompt_token_ids = _render_and_tokenize(
-            candidate.row, config.model.tokenizer_name, config.model.tokenizer_revision,
+            candidate.row,
+            config.model.tokenizer_name,
+            config.model.tokenizer_revision,
+            local_only_path=tokenizer_snapshot.local_path,
         )
 
     expected_prompt_token_ids_sha256 = sha256_int_ids(prompt_token_ids)
@@ -197,7 +206,16 @@ def run_fullkv_r3_qualification_worker(
         _progress=_progress,
     )
 
-    observed_prompt_token_ids_sha256 = sha256_int_ids(manifest.prompt_token_ids)
+    observed_prompt_token_ids_sha256 = result.get("prefill_token_ids_sha256")
+    if observed_prompt_token_ids_sha256 is None:
+        raise ValueError("canonical FullKV worker did not export observed prefill_token_ids_sha256")
+    runtime_identity = result.get("runtime_identity")
+    if not isinstance(runtime_identity, dict):
+        raise ValueError("canonical FullKV worker did not export runtime_identity")
+    resolved_model_revision = runtime_identity.get("resolved_model_revision")
+    resolved_tokenizer_revision = runtime_identity.get("resolved_tokenizer_revision")
+    if not isinstance(resolved_model_revision, str) or not isinstance(resolved_tokenizer_revision, str):
+        raise ValueError("canonical FullKV worker did not resolve model/tokenizer revisions")
 
     open_marker_ids = tokenizer.encode("<think>", add_special_tokens=False)
     close_marker_ids = tokenizer.encode("</think>", add_special_tokens=False)
@@ -210,9 +228,13 @@ def run_fullkv_r3_qualification_worker(
         "worker_result_schema_version": FULLKV_WORKER_RESULT_R3_SCHEMA_VERSION,
         "role": "fullkv",
         "model_name": config.model.name,
-        "model_revision": result["model_revision"],
+        "model_revision": resolved_model_revision,
+        "requested_model_revision": runtime_identity["requested_model_revision"],
+        "model_revision_match": runtime_identity["model_revision_match"],
         "tokenizer_name": config.model.tokenizer_name,
-        "tokenizer_revision": result["tokenizer_revision"],
+        "tokenizer_revision": resolved_tokenizer_revision,
+        "requested_tokenizer_revision": runtime_identity["requested_tokenizer_revision"],
+        "tokenizer_revision_match": runtime_identity["tokenizer_revision_match"],
         "dataset_repo": DATASET_REPO,
         "dataset_config": DATASET_CONFIG,
         "dataset_split": DATASET_SPLIT,
@@ -242,7 +264,8 @@ def run_fullkv_r3_qualification_worker(
         "wall_seconds": result["wall_seconds"],
         "runtime_generation_config": runtime_generation_config,
         "worker_generation_config_sha256": sha256_json(runtime_generation_config),
+        "worker_config_sha256": canonical_config_hash(config),
         "software_versions": result["software_versions"],
     }
 
-    return FullKVWorkerResultR3.model_validate(payload).model_dump(mode="python")
+    return FullKVWorkerResultR3.model_validate(payload)

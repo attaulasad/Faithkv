@@ -51,8 +51,12 @@ def _valid_worker_result(ordinal: int = 0, **overrides) -> FullKVWorkerResultR3:
         role="fullkv",
         model_name=MODEL_NAME,
         model_revision=MODEL_REVISION,
+        requested_model_revision=MODEL_REVISION,
+        model_revision_match=True,
         tokenizer_name=TOKENIZER_NAME,
         tokenizer_revision=TOKENIZER_REVISION,
+        requested_tokenizer_revision=TOKENIZER_REVISION,
+        tokenizer_revision_match=True,
         dataset_repo=DATASET_REPO,
         dataset_config="default",
         dataset_split="test",
@@ -90,9 +94,14 @@ def _valid_worker_result(ordinal: int = 0, **overrides) -> FullKVWorkerResultR3:
         wall_seconds=3.0,
         runtime_generation_config=FROZEN_GENERATION_CONFIG,
         worker_generation_config_sha256=GENERATION_CONFIG_SHA256,
+        worker_config_sha256=CONFIG_SHA,
         software_versions={"transformers": "4.55.4"},
     )
     fields.update(overrides)
+    if "model_revision" in overrides and "requested_model_revision" not in overrides:
+        fields["requested_model_revision"] = overrides["model_revision"]
+    if "tokenizer_revision" in overrides and "requested_tokenizer_revision" not in overrides:
+        fields["requested_tokenizer_revision"] = overrides["tokenizer_revision"]
     if "natural_generated_token_ids" in overrides and "generated_token_ids_sha256" not in overrides:
         fields["generated_token_ids_sha256"] = sha256_int_ids(overrides["natural_generated_token_ids"])
     return FullKVWorkerResultR3.model_validate(fields)

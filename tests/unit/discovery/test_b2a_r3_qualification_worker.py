@@ -59,6 +59,7 @@ class _FakeQualificationTokenizer:
 
     chat_template = "{{ messages }}"
     eos_token_id = 999
+    _commit_hash = TOKENIZER_REVISION
 
     def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True):
         return [1, 2, 3, 4, 5]
@@ -99,6 +100,7 @@ def _run_worker():
     config = _config()
     candidate = _candidate()
     model = _FakeModel()
+    model.config._commit_hash = config.model.revision
     fake_cuda = _FakeCudaFacade()
 
     return run_fullkv_r3_qualification_worker(
@@ -115,7 +117,8 @@ def _run_worker():
 def test_real_worker_produces_schema_valid_r3_result():
     result = _run_worker()
 
-    typed = FullKVWorkerResultR3.model_validate(result)
+    assert isinstance(result, FullKVWorkerResultR3)
+    typed = result
     assert typed.role == "fullkv"
     assert typed.model_name == MODEL_NAME
     assert typed.model_revision == MODEL_REVISION
@@ -140,6 +143,7 @@ def test_worker_generation_config_matches_frozen_value_for_the_real_frozen_confi
     )
     candidate = _candidate()
     model = _FakeModel()
+    model.config._commit_hash = config.model.revision
     fake_cuda = _FakeCudaFacade()
 
     result = run_fullkv_r3_qualification_worker(
@@ -160,8 +164,7 @@ def test_real_worker_output_adapts_into_qualification_evidence():
     worker's own output through the existing adapter -- never a hand-built
     FullKVWorkerResultR3."""
     candidate_manifest = _candidate_manifest()
-    result = _run_worker()
-    worker_result = FullKVWorkerResultR3.model_validate(result)
+    worker_result = _run_worker()
 
     evidence = adapt_fullkv_worker_result_to_r3_evidence(
         worker_result=worker_result,
@@ -181,5 +184,5 @@ def test_no_hand_built_worker_result_used():
     `run_fullkv_worker`, not a fixture -- there must be more than one
     `fullkv_decode` timing record for a multi-token generation."""
     result = _run_worker()
-    decode_records = [r for r in result["timing_evidence"] if r["phase"] == "fullkv_decode"]
+    decode_records = [r for r in result.timing_evidence if r["phase"] == "fullkv_decode"]
     assert len(decode_records) == _config().generation.max_new_tokens

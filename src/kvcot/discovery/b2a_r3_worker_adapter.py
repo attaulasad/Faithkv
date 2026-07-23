@@ -93,8 +93,12 @@ class FullKVWorkerResultR3(BaseModel):
 
     model_name: str
     model_revision: str
+    requested_model_revision: str
+    model_revision_match: bool
     tokenizer_name: str
     tokenizer_revision: str
+    requested_tokenizer_revision: str
+    tokenizer_revision_match: bool
 
     dataset_repo: str
     dataset_config: str
@@ -132,13 +136,14 @@ class FullKVWorkerResultR3(BaseModel):
 
     runtime_generation_config: dict[str, Any]
     worker_generation_config_sha256: str
+    worker_config_sha256: str
 
     software_versions: dict[str, str]
 
     @field_validator(
         "raw_row_sha256", "problem_sha256", "gold_answer_sha256",
         "expected_prompt_token_ids_sha256", "observed_prompt_token_ids_sha256",
-        "generated_token_ids_sha256", "worker_generation_config_sha256",
+        "generated_token_ids_sha256", "worker_generation_config_sha256", "worker_config_sha256",
     )
     @classmethod
     def _hex64(cls, v: str, info: Any) -> str:
@@ -163,6 +168,14 @@ class FullKVWorkerResultR3(BaseModel):
             raise ValueError("generated_token_ids_sha256 does not reproduce from natural_generated_token_ids")
         if sha256_json(self.runtime_generation_config) != self.worker_generation_config_sha256:
             raise ValueError("worker_generation_config_sha256 does not reproduce sha256_json(runtime_generation_config)")
+        if self.model_revision_match is not True:
+            raise ValueError("model_revision_match must be true for the resolved runtime model revision")
+        if self.tokenizer_revision_match is not True:
+            raise ValueError("tokenizer_revision_match must be true for the resolved runtime tokenizer revision")
+        if self.model_revision != self.requested_model_revision:
+            raise ValueError("resolved model_revision must equal requested_model_revision")
+        if self.tokenizer_revision != self.requested_tokenizer_revision:
+            raise ValueError("resolved tokenizer_revision must equal requested_tokenizer_revision")
         if self.think_start_index is not None and self.think_start_index < 0:
             raise ValueError("think_start_index must be >= 0 when present")
         if self.think_end_index is not None and self.think_end_index < 0:
@@ -280,5 +293,5 @@ def adapt_fullkv_worker_result_to_r3_evidence(
         worker_generation_config_sha256=worker_result.worker_generation_config_sha256,
         runtime_prediction=runtime.to_json(),
         candidate_manifest_canonical_sha256=manifest.canonical_sha256,
-        config_sha256=expected_config_sha256,
+        config_sha256=worker_result.worker_config_sha256,
     )

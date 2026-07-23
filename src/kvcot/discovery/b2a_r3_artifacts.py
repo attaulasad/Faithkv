@@ -48,7 +48,7 @@ from kvcot.discovery.b2a_r3_contract import (
     require_lowercase_hex64,
     verify_canonical_sha256,
 )
-from kvcot.discovery.b2a_r3_candidates import atomic_write_json, verify_candidate_manifest_structure
+from kvcot.discovery.b2a_r3_candidates import verify_candidate_manifest_structure
 from kvcot.discovery.b2a_r3_qualification import (
     CandidateQualificationOutcomeR3,
     rederive_and_verify_qualification_outcome,
@@ -145,11 +145,21 @@ class QualificationArtifactR3(BaseModel):
     # "all_authorized_candidates_exhausted"` can be independently checked
     # against it rather than trusted as a bare, self-reported string.
     authorized_maximum_candidates: int
+    authorized_phase_wall_time_limit_seconds: int = 1
+    stage_b_authorization_id: str = "unbound-test-fixture"
+    authorization_document_sha256: str = "0" * 64
+    authorization_claim_canonical_sha256: str = "0" * 64
     attempt_started_at_utc: str
     attempt_completed_at_utc: str
     canonical_sha256: str
 
-    @field_validator("candidate_manifest_canonical_sha256", "config_sha256", "canonical_sha256")
+    @field_validator(
+        "candidate_manifest_canonical_sha256",
+        "config_sha256",
+        "authorization_document_sha256",
+        "authorization_claim_canonical_sha256",
+        "canonical_sha256",
+    )
     @classmethod
     def _hex64(cls, v: str, info: Any) -> str:
         return require_lowercase_hex64(v, info.field_name)
@@ -178,6 +188,13 @@ class QualificationArtifactR3(BaseModel):
             raise ValueError(
                 f"authorized_maximum_candidates must be an int in 1..{QUALIFICATION_CANDIDATE_LIMIT}, got {v!r}"
             )
+        return v
+
+    @field_validator("authorized_phase_wall_time_limit_seconds")
+    @classmethod
+    def _phase_limit_positive(cls, v: int) -> int:
+        if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+            raise ValueError(f"authorized_phase_wall_time_limit_seconds must be a positive int, got {v!r}")
         return v
 
     @model_validator(mode="after")
@@ -262,7 +279,11 @@ class QualificationArtifactR3(BaseModel):
 
 
 def verify_qualification_artifact(
-    artifact: dict[str, Any], *, candidate_manifest: dict[str, Any], expected_config_sha256: str
+    artifact: dict[str, Any],
+    *,
+    candidate_manifest: dict[str, Any],
+    expected_config_sha256: str,
+    consumed_authorization_context: Any | None = None,
 ) -> QualificationArtifactR3:
     """Full strict verification: canonical self-hash, schema/cross-field
     invariants, and cross-artifact hash agreement with the candidate
@@ -270,6 +291,42 @@ def verify_qualification_artifact(
     Fails closed -- raises on the first defect found."""
     verify_canonical_sha256(artifact)
     typed = QualificationArtifactR3.model_validate(artifact)
+
+    if consumed_authorization_context is not None:
+        from kvcot.discovery.b2a_r3_authorization import (
+            AUTHORIZATION_STAGE_FULLKV_QUALIFICATION,
+            ConsumedAuthorizationContext,
+            _CONSUMED_CONTEXT_TOKEN,
+        )
+
+        if (
+            not isinstance(consumed_authorization_context, ConsumedAuthorizationContext)
+            or consumed_authorization_context._consumption_token is not _CONSUMED_CONTEXT_TOKEN
+        ):
+            raise ArtifactVerificationRefused(
+                "qualification artifact verification requires a ConsumedAuthorizationContext from claim_authorization"
+            )
+        consumed = consumed_authorization_context
+        context = consumed.verified_context
+        claim = consumed.claim
+        if claim.authorization_stage != AUTHORIZATION_STAGE_FULLKV_QUALIFICATION:
+            raise ArtifactVerificationRefused("qualification artifact must be bound to a consumed Stage-B authorization")
+        if typed.stage_b_authorization_id != claim.authorization_id:
+            raise ArtifactVerificationRefused("stage_b_authorization_id does not match the consumed authorization claim")
+        if typed.authorization_document_sha256 != claim.authorization_document_sha256:
+            raise ArtifactVerificationRefused("authorization_document_sha256 does not match the consumed claim")
+        if typed.authorization_claim_canonical_sha256 != claim.canonical_sha256:
+            raise ArtifactVerificationRefused("authorization_claim_canonical_sha256 does not match the consumed claim")
+        if typed.authorized_maximum_candidates != context.maximum_candidates:
+            raise ArtifactVerificationRefused("authorized_maximum_candidates does not match the verified document limit")
+        if typed.authorized_phase_wall_time_limit_seconds != context.phase_wall_time_limit_seconds:
+            raise ArtifactVerificationRefused(
+                "authorized_phase_wall_time_limit_seconds does not match the verified document limit"
+            )
+        if typed.candidate_manifest_canonical_sha256 != claim.candidate_manifest_canonical_sha256:
+            raise ArtifactVerificationRefused(
+                "candidate_manifest_canonical_sha256 does not match the consumed authorization claim"
+            )
 
     try:
         verify_candidate_manifest_structure(
@@ -320,6 +377,39 @@ class QualificationArtifactWriteRefused(RuntimeError):
     existing (and therefore immutable) artifact file."""
 
 
+def _exclusive_write_json(target: Path, payload: dict[str, Any]) -> None:
+    import os
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(payload, indent=2, ensure_ascii=True).encode("utf-8") + b"\n"
+    try:
+        fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError as exc:
+        raise QualificationArtifactWriteRefused(
+            f"refusing to overwrite an existing qualification artifact at {target} -- "
+            "this artifact is immutable once written"
+        ) from exc
+    try:
+        os.write(fd, text)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+    try:
+        dir_fd = os.open(str(target.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except (OSError, AttributeError):
+        pass
+
+    with open(target, "r", encoding="utf-8") as f:
+        round_tripped = json.load(f)
+    if round_tripped != payload:
+        raise QualificationArtifactWriteRefused(f"exclusive write of {target} did not round-trip")
+
+
 def build_qualification_artifact(
     *,
     attempted_outcomes: list[dict[str, Any] | CandidateQualificationOutcomeR3],
@@ -327,6 +417,8 @@ def build_qualification_artifact(
     expected_config_sha256: str,
     stopped_reason: str,
     authorized_maximum_candidates: int,
+    authorized_phase_wall_time_limit_seconds: int | None = None,
+    consumed_authorization_context: Any | None = None,
     attempt_started_at_utc: str,
     attempt_completed_at_utc: str,
 ) -> dict[str, Any]:
@@ -368,6 +460,42 @@ def build_qualification_artifact(
             f"authorized_maximum_candidates must be an int in 1..{QUALIFICATION_CANDIDATE_LIMIT}, "
             f"got {authorized_maximum_candidates!r}"
         )
+    if authorized_phase_wall_time_limit_seconds is None:
+        authorized_phase_wall_time_limit_seconds = 1
+    if (
+        isinstance(authorized_phase_wall_time_limit_seconds, bool)
+        or not isinstance(authorized_phase_wall_time_limit_seconds, int)
+        or authorized_phase_wall_time_limit_seconds <= 0
+    ):
+        raise QualificationArtifactBuildRefused(
+            "authorized_phase_wall_time_limit_seconds must be a positive int"
+        )
+
+    auth_claim = None
+    if consumed_authorization_context is not None:
+        from kvcot.discovery.b2a_r3_authorization import (
+            AUTHORIZATION_STAGE_FULLKV_QUALIFICATION,
+            ConsumedAuthorizationContext,
+            _CONSUMED_CONTEXT_TOKEN,
+        )
+
+        if (
+            not isinstance(consumed_authorization_context, ConsumedAuthorizationContext)
+            or consumed_authorization_context._consumption_token is not _CONSUMED_CONTEXT_TOKEN
+        ):
+            raise QualificationArtifactBuildRefused(
+                "consumed_authorization_context must be returned by claim_authorization"
+            )
+        auth_claim = consumed_authorization_context.claim
+        auth_verified = consumed_authorization_context.verified_context
+        if auth_claim.authorization_stage != AUTHORIZATION_STAGE_FULLKV_QUALIFICATION:
+            raise QualificationArtifactBuildRefused("qualification artifacts must be bound to a Stage-B authorization")
+        if authorized_maximum_candidates != auth_verified.maximum_candidates:
+            raise QualificationArtifactBuildRefused("authorized_maximum_candidates does not match the verified document")
+        if authorized_phase_wall_time_limit_seconds != auth_verified.phase_wall_time_limit_seconds:
+            raise QualificationArtifactBuildRefused(
+                "authorized_phase_wall_time_limit_seconds does not match the verified document"
+            )
     if len(attempted_outcomes) > authorized_maximum_candidates:
         raise QualificationArtifactBuildRefused(
             f"attempted {len(attempted_outcomes)} candidates, exceeding the authorized limit of "
@@ -386,6 +514,10 @@ def build_qualification_artifact(
     manifest = verify_candidate_manifest_structure(
         candidate_manifest, expected_config_sha256=expected_config_sha256
     )
+    if auth_claim is not None and manifest.canonical_sha256 != auth_claim.candidate_manifest_canonical_sha256:
+        raise QualificationArtifactBuildRefused(
+            "candidate_manifest does not match the consumed authorization claim"
+        )
 
     typed_outcomes: list[CandidateQualificationOutcomeR3] = []
     for outcome in attempted_outcomes:
@@ -458,6 +590,16 @@ def build_qualification_artifact(
         "selection_status": selection_status,
         "qualification_stopped_reason": stopped_reason,
         "authorized_maximum_candidates": authorized_maximum_candidates,
+        "authorized_phase_wall_time_limit_seconds": authorized_phase_wall_time_limit_seconds,
+        "stage_b_authorization_id": (
+            auth_claim.authorization_id if auth_claim is not None else "unbound-test-fixture"
+        ),
+        "authorization_document_sha256": (
+            auth_claim.authorization_document_sha256 if auth_claim is not None else "0" * 64
+        ),
+        "authorization_claim_canonical_sha256": (
+            auth_claim.canonical_sha256 if auth_claim is not None else "0" * 64
+        ),
         "attempt_started_at_utc": attempt_started_at_utc,
         "attempt_completed_at_utc": attempt_completed_at_utc,
     }
@@ -472,6 +614,7 @@ def write_qualification_artifact_atomic(
     output_path: str | Path,
     candidate_manifest: dict[str, Any],
     expected_config_sha256: str,
+    consumed_authorization_context: Any | None = None,
 ) -> None:
     """Atomic write, following the same discipline as
     `kvcot.discovery.b2a_r3_candidates.atomic_write_json`, plus three
@@ -502,7 +645,10 @@ def write_qualification_artifact_atomic(
     `tmp_path`-rooted path.
     """
     verify_qualification_artifact(
-        artifact, candidate_manifest=candidate_manifest, expected_config_sha256=expected_config_sha256
+        artifact,
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=expected_config_sha256,
+        consumed_authorization_context=consumed_authorization_context,
     )
 
     target = Path(output_path)
@@ -512,9 +658,12 @@ def write_qualification_artifact_atomic(
             "this artifact is immutable once written"
         )
 
-    atomic_write_json(target, artifact)
+    _exclusive_write_json(target, artifact)
 
     written = json.loads(target.read_text(encoding="utf-8"))
     verify_qualification_artifact(
-        written, candidate_manifest=candidate_manifest, expected_config_sha256=expected_config_sha256
+        written,
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=expected_config_sha256,
+        consumed_authorization_context=consumed_authorization_context,
     )

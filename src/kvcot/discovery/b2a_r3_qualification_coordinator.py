@@ -19,7 +19,9 @@ from typing import Any, Callable
 from kvcot.discovery.b2a_r3_artifacts import build_qualification_artifact
 from kvcot.discovery.b2a_r3_authorization import (
     AUTHORIZATION_STAGE_FULLKV_QUALIFICATION,
+    ConsumedAuthorizationContext,
     VerifiedAuthorizationContext,
+    _CONSUMED_CONTEXT_TOKEN,
     _VERIFIED_CONTEXT_TOKEN,
 )
 from kvcot.discovery.b2a_r3_candidates import verify_candidate_manifest_structure
@@ -61,7 +63,7 @@ def run_b2a_r3_qualification_coordinator(
     *,
     candidate_manifest: dict[str, Any],
     expected_config_sha256: str,
-    verified_authorization_context: VerifiedAuthorizationContext,
+    consumed_authorization_context: ConsumedAuthorizationContext,
     fullkv_worker_runner: Callable[[int, int], Any],
     clock: Callable[[], float],
     per_candidate_timeout_seconds: int,
@@ -112,11 +114,15 @@ def run_b2a_r3_qualification_coordinator(
     20. Returns the artifact dict to the caller.
     21. Never writes to any filesystem path itself.
     """
-    if not isinstance(verified_authorization_context, VerifiedAuthorizationContext):
+    if not isinstance(consumed_authorization_context, ConsumedAuthorizationContext):
         raise QualificationCoordinatorRefused(
-            "verified_authorization_context must be a VerifiedAuthorizationContext produced by "
-            "verify_authorization_preconditions"
+            "consumed_authorization_context must be a ConsumedAuthorizationContext returned by claim_authorization"
         )
+    if consumed_authorization_context._consumption_token is not _CONSUMED_CONTEXT_TOKEN:
+        raise QualificationCoordinatorRefused("authorization context was not produced by claim_authorization")
+    verified_authorization_context = consumed_authorization_context.verified_context
+    if not isinstance(verified_authorization_context, VerifiedAuthorizationContext):
+        raise QualificationCoordinatorRefused("consumed context does not carry a verified authorization context")
     if verified_authorization_context._verification_token is not _VERIFIED_CONTEXT_TOKEN:
         raise QualificationCoordinatorRefused(
             "verified_authorization_context was not produced by verify_authorization_preconditions"
@@ -177,7 +183,15 @@ def run_b2a_r3_qualification_coordinator(
         try:
             worker_result = fullkv_worker_runner(ordinal, effective_worker_timeout)
         except (CandidateWorkerTimeout, TimeoutError):
-            stopped_reason = "candidate_worker_timeout"
+            stopped_reason = (
+                "phase_wall_time_exhausted"
+                if effective_worker_timeout == remaining_phase_seconds
+                else "candidate_worker_timeout"
+            )
+            break
+
+        if (clock() - started_at) >= phase_wall_time_limit_seconds:
+            stopped_reason = "phase_wall_time_exhausted"
             break
 
         try:
@@ -219,6 +233,8 @@ def run_b2a_r3_qualification_coordinator(
         expected_config_sha256=expected_config_sha256,
         stopped_reason=stopped_reason,
         authorized_maximum_candidates=maximum_candidates,
+        authorized_phase_wall_time_limit_seconds=phase_wall_time_limit_seconds,
+        consumed_authorization_context=consumed_authorization_context,
         attempt_started_at_utc=_iso8601(started_at),
         attempt_completed_at_utc=_iso8601(completed_at),
     )

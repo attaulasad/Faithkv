@@ -145,6 +145,7 @@ class FullKVWorkerResult(BaseModel):
     prefill_call_count: int = Field(ge=0)
     decode_call_count: int = Field(ge=0)
     call_boundary_trace_hash: str
+    prefill_token_ids_sha256: str | None = None
 
     wall_seconds: float = Field(ge=0.0)
 
@@ -1147,6 +1148,8 @@ def run_fullkv_worker(
             prompt_token_count=len(prompt_token_ids),
         )
 
+        from kvcot.utils.hashing import sha256_int_ids
+
         return FullKVWorkerResult(
             role="fullkv",
             model_revision=config.model.revision,
@@ -1163,6 +1166,11 @@ def run_fullkv_worker(
             prefill_call_count=recorder.prefill_call_count,
             decode_call_count=recorder.decode_call_count,
             call_boundary_trace_hash=recorder.ordered_call_kinds_and_tokens_hash(),
+            prefill_token_ids_sha256=(
+                None
+                if recorder.prefill_call_count != 1
+                else sha256_int_ids(next(e.token_ids for e in recorder.events if e.kind == "prefill"))
+            ),
             wall_seconds=wall_seconds,
             determinism_policy=determinism_policy.__dict__,
             runtime_generation=runtime_generation.__dict__,
