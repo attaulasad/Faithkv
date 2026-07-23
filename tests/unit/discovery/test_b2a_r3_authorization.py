@@ -118,7 +118,7 @@ def _write_document(path, payload: dict) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def _verified_stage_b(tmp_path, **payload_overrides):
+def _verified_stage_b(tmp_path, *, document_overrides=None, **payload_overrides):
     import json
     from pathlib import Path
 
@@ -128,7 +128,7 @@ def _verified_stage_b(tmp_path, **payload_overrides):
     document_rel = "docs/B2A_R3_STAGE_B_QUALIFICATION_AUTHORIZATION_2026-08-01.md"
     document = tmp_path / document_rel
     candidate_manifest = json.loads(Path(CANDIDATE_MANIFEST_PATH).read_text(encoding="utf-8"))
-    _write_document(document, _document_payload(
+    document_fields = dict(
         authorization_id="stage-b-2026-08-01",
         authorization_stage=AUTHORIZATION_STAGE_FULLKV_QUALIFICATION,
         authorized_branch="research/b2a-r3-runtime-qualified-calibration",
@@ -138,7 +138,9 @@ def _verified_stage_b(tmp_path, **payload_overrides):
         candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],
         maximum_candidates=8,
         phase_wall_time_limit_seconds=3600,
-    ))
+    )
+    document_fields.update(document_overrides or {})
+    _write_document(document, _document_payload(**document_fields))
     payload = _stage_b_payload(
         authorization_document_sha256=sha256_file(document),
         candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],

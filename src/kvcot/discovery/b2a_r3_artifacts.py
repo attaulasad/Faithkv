@@ -17,8 +17,10 @@ Stage A exercises it only against synthetic/injected fixtures (protocol
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime
-from typing import Any
+from pathlib import Path
+from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
@@ -35,16 +37,18 @@ from kvcot.discovery.b2a_r3_contract import (
     MODEL_NAME,
     MODEL_REVISION,
     QUALIFICATION_ARTIFACT_SCHEMA_VERSION,
+    QUALIFICATION_CANDIDATE_LIMIT,
     QUALIFICATION_PROTOCOL_VERSION,
     RUNTIME_PREDICTOR_VERSION,
     RUNTIME_SOURCE_ARTIFACT_PATH,
     RUNTIME_SOURCE_ARTIFACT_SHA256,
     TOKENIZER_NAME,
     TOKENIZER_REVISION,
+    compute_canonical_sha256,
     require_lowercase_hex64,
     verify_canonical_sha256,
 )
-from kvcot.discovery.b2a_r3_candidates import verify_candidate_manifest_structure
+from kvcot.discovery.b2a_r3_candidates import atomic_write_json, verify_candidate_manifest_structure
 from kvcot.discovery.b2a_r3_qualification import (
     CandidateQualificationOutcomeR3,
     rederive_and_verify_qualification_outcome,
@@ -57,6 +61,15 @@ __all__ = [
     "SELECTION_STATUS_NONE_QUALIFIED",
     "QualificationArtifactR3",
     "verify_qualification_artifact",
+    "QualificationArtifactBuildRefused",
+    "QualificationArtifactWriteRefused",
+    "ALLOWED_QUALIFICATION_STOPPED_REASONS",
+    "STOPPED_REASON_FIRST_PASS",
+    "STOPPED_REASON_ALL_CANDIDATES_EXHAUSTED",
+    "STOPPED_REASON_PHASE_WALL_TIME_EXHAUSTED",
+    "STOPPED_REASON_CANDIDATE_WORKER_TIMEOUT",
+    "build_qualification_artifact",
+    "write_qualification_artifact_atomic",
 ]
 
 SELECTION_STATUS_SELECTED = "selected"
@@ -220,3 +233,182 @@ def verify_qualification_artifact(
                 f"qualification outcome ordinal={outcome.candidate_ordinal} failed semantic rederivation: {exc}"
             ) from exc
     return typed
+
+
+# --------------------------------------------------------------------------
+# Step 3R4 Finding 6: qualification artifact builder and atomic writer.
+# Neither function is ever called against the real
+# results/decisions/b2a_r3_qualification.json path by anything in this
+# repair round -- Stage A exercises both only against synthetic/injected
+# fixtures under tmp_path (protocol §14.1).
+# --------------------------------------------------------------------------
+
+
+class QualificationArtifactBuildRefused(ValueError):
+    """Any hard rejection while assembling a qualification artifact from a
+    sequence of attempted outcomes -- non-contiguous ordinals, an
+    over-authorized candidate count, a stopped_reason/selection
+    disagreement, or an outcome that fails semantic rederivation."""
+
+
+class QualificationArtifactWriteRefused(RuntimeError):
+    """Any hard rejection while atomically writing a qualification
+    artifact -- an invalid artifact, or an attempt to overwrite an
+    existing (and therefore immutable) artifact file."""
+
+
+STOPPED_REASON_FIRST_PASS: Final[str] = "first_pass"
+STOPPED_REASON_ALL_CANDIDATES_EXHAUSTED: Final[str] = "all_authorized_candidates_exhausted"
+STOPPED_REASON_PHASE_WALL_TIME_EXHAUSTED: Final[str] = "phase_wall_time_exhausted"
+STOPPED_REASON_CANDIDATE_WORKER_TIMEOUT: Final[str] = "candidate_worker_timeout"
+ALLOWED_QUALIFICATION_STOPPED_REASONS: Final[frozenset[str]] = frozenset({
+    STOPPED_REASON_FIRST_PASS,
+    STOPPED_REASON_ALL_CANDIDATES_EXHAUSTED,
+    STOPPED_REASON_PHASE_WALL_TIME_EXHAUSTED,
+    STOPPED_REASON_CANDIDATE_WORKER_TIMEOUT,
+})
+
+
+def build_qualification_artifact(
+    *,
+    attempted_outcomes: list[dict[str, Any] | CandidateQualificationOutcomeR3],
+    candidate_manifest: dict[str, Any],
+    expected_config_sha256: str,
+    stopped_reason: str,
+    attempt_started_at_utc: str,
+    attempt_completed_at_utc: str,
+) -> dict[str, Any]:
+    """Builds a complete, hash-verified, v2 qualification artifact
+    (protocol §12.6, Step 3R4 amendment §3.2) from a sequence of already-
+    produced attempted outcomes.
+
+    Every outcome is independently semantically re-derived (never trusted
+    as pre-validated); ordinals must be exactly `0..len(attempted)-1`
+    contiguous; the recorded selection must reproduce from the attempted
+    list via the same `select_first_qualified_r3` the artifact schema
+    itself replays; `stopped_reason` must be one of the four frozen
+    reasons and must agree with whether a candidate actually qualified.
+    No caller may supply an arbitrary top-level identity (dataset/model/
+    tokenizer/budget/version) -- every one of those is populated here from
+    the frozen contract constants and the independently-verified candidate
+    manifest, never from a parameter.
+    """
+    if stopped_reason not in ALLOWED_QUALIFICATION_STOPPED_REASONS:
+        raise QualificationArtifactBuildRefused(
+            f"stopped_reason must be one of {sorted(ALLOWED_QUALIFICATION_STOPPED_REASONS)}, got {stopped_reason!r}"
+        )
+    if len(attempted_outcomes) > QUALIFICATION_CANDIDATE_LIMIT:
+        raise QualificationArtifactBuildRefused(
+            f"attempted {len(attempted_outcomes)} candidates, exceeding the "
+            f"{QUALIFICATION_CANDIDATE_LIMIT}-candidate protocol limit"
+        )
+
+    manifest = verify_candidate_manifest_structure(
+        candidate_manifest, expected_config_sha256=expected_config_sha256
+    )
+
+    typed_outcomes: list[CandidateQualificationOutcomeR3] = []
+    for outcome in attempted_outcomes:
+        typed = (
+            outcome
+            if isinstance(outcome, CandidateQualificationOutcomeR3)
+            else CandidateQualificationOutcomeR3.model_validate(outcome)
+        )
+        try:
+            rederive_and_verify_qualification_outcome(typed, candidate_manifest, expected_config_sha256)
+        except Exception as exc:
+            raise QualificationArtifactBuildRefused(
+                f"candidate ordinal={typed.candidate_ordinal} failed semantic rederivation: {exc}"
+            ) from exc
+        typed_outcomes.append(typed)
+
+    ordinals = [outcome.candidate_ordinal for outcome in typed_outcomes]
+    if ordinals != list(range(len(ordinals))):
+        raise QualificationArtifactBuildRefused(
+            f"attempted candidate ordinals must be exactly 0..{len(ordinals) - 1} contiguous, got {ordinals}"
+        )
+
+    attempted_dicts = [outcome.model_dump(mode="json") for outcome in typed_outcomes]
+    try:
+        selection = select_first_qualified_r3(attempted_dicts)
+    except Exception as exc:
+        raise QualificationArtifactBuildRefused(f"attempted list fails first-pass selection replay: {exc}") from exc
+
+    if selection is None:
+        if stopped_reason == STOPPED_REASON_FIRST_PASS:
+            raise QualificationArtifactBuildRefused("stopped_reason='first_pass' but no candidate qualified")
+        selection_status = SELECTION_STATUS_NONE_QUALIFIED
+        first_ordinal = None
+        selected_unique_id = None
+    else:
+        if stopped_reason != STOPPED_REASON_FIRST_PASS:
+            raise QualificationArtifactBuildRefused(
+                f"a candidate qualified (ordinal={selection['candidate_ordinal']}) but "
+                f"stopped_reason={stopped_reason!r} != 'first_pass'"
+            )
+        selection_status = SELECTION_STATUS_SELECTED
+        first_ordinal = selection["candidate_ordinal"]
+        selected_unique_id = selection["unique_id"]
+
+    payload: dict[str, Any] = {
+        "artifact_schema_version": QUALIFICATION_ARTIFACT_SCHEMA_VERSION,
+        "candidate_order_protocol_version": CANDIDATE_ORDER_PROTOCOL_VERSION,
+        "qualification_protocol_version": QUALIFICATION_PROTOCOL_VERSION,
+        "runtime_predictor_version": RUNTIME_PREDICTOR_VERSION,
+        "candidate_manifest_path": CANDIDATE_MANIFEST_PATH,
+        "candidate_manifest_canonical_sha256": manifest.canonical_sha256,
+        "config_path": CONFIG_PATH,
+        "config_sha256": expected_config_sha256,
+        "generation_config_sha256": GENERATION_CONFIG_SHA256,
+        "dataset_repo": DATASET_REPO,
+        "dataset_config": DATASET_CONFIG,
+        "dataset_split": DATASET_SPLIT,
+        "dataset_revision": DATASET_REVISION,
+        "model_name": MODEL_NAME,
+        "model_revision": MODEL_REVISION,
+        "tokenizer_name": TOKENIZER_NAME,
+        "tokenizer_revision": TOKENIZER_REVISION,
+        "budget": BUDGET,
+        "runtime_source_artifact_path": RUNTIME_SOURCE_ARTIFACT_PATH,
+        "runtime_source_artifact_sha256": RUNTIME_SOURCE_ARTIFACT_SHA256,
+        "attempted": attempted_dicts,
+        "attempted_candidate_count": len(attempted_dicts),
+        "first_passing_candidate_ordinal": first_ordinal,
+        "selected_unique_id": selected_unique_id,
+        "selection_status": selection_status,
+        "qualification_stopped_reason": stopped_reason,
+        "attempt_started_at_utc": attempt_started_at_utc,
+        "attempt_completed_at_utc": attempt_completed_at_utc,
+    }
+    payload["canonical_sha256"] = compute_canonical_sha256(payload)
+    QualificationArtifactR3.model_validate(payload)  # construct-time self-check
+    return payload
+
+
+def write_qualification_artifact_atomic(artifact: dict[str, Any], *, output_path: str | Path) -> None:
+    """Atomic write, following the same discipline as
+    `kvcot.discovery.b2a_r3_candidates.atomic_write_json`, plus two
+    stricter rules specific to this immutable artifact: the artifact is
+    fully strictly re-validated before writing, and an existing file at
+    `output_path` is never overwritten -- the protocol treats a written
+    qualification artifact as immutable once it exists.
+
+    Never defaults to the real production path -- `output_path` is always
+    an explicit, caller-supplied argument; Stage-A tests always pass a
+    `tmp_path`-rooted path.
+    """
+    verify_canonical_sha256(artifact)
+    QualificationArtifactR3.model_validate(artifact)  # full schema verify before writing
+
+    target = Path(output_path)
+    if target.exists():
+        raise QualificationArtifactWriteRefused(
+            f"refusing to overwrite an existing qualification artifact at {target} -- "
+            "this artifact is immutable once written"
+        )
+
+    atomic_write_json(target, artifact)
+
+    written = json.loads(target.read_text(encoding="utf-8"))
+    verify_canonical_sha256(written)
+    QualificationArtifactR3.model_validate(written)
