@@ -30,7 +30,7 @@ per-candidate worker timeouts.
 ```json
 {
   "authorization_document_schema_version": "faithkv-b2a-r3-stage-authorization-document-v2",
-  "authorization_id": "stage-b-2026-07-23",
+  "authorization_id": "stage-b-2026-07-23-final",
   "authorization_stage": "fullkv_qualification",
   "authorized_repository": "asad073-ui/Faithkv",
   "authorized_branch": "research/b2a-r3-runtime-qualified-calibration",
