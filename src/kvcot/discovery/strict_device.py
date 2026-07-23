@@ -110,6 +110,48 @@ def verify_device_gate_from_raw_evidence(
     )
 
 
+def _single_worker_placement_ok(placement: Any, *, requested_device: str = "cuda:0") -> bool:
+    """The per-worker `ParameterPlacementEvidence` predicate, factored out
+    of `verify_placement_from_raw_evidence` (B2A-R3 Step 3 Stage-A) so a
+    single-worker caller (`kvcot.discovery.b2a_r3_qualification`, which has
+    only a FullKV-shaped placement evidence dict -- R-KV is never imported
+    during qualification) can reuse the EXACT same predicate the historical
+    two-worker FullKV/R-KV gate below already used, rather than
+    independently re-deriving it. Byte-for-byte the same logic as before
+    this factoring -- see the regression tests in
+    `tests/unit/discovery/test_strict_device.py` proving
+    `verify_placement_from_raw_evidence`'s historical behavior is
+    unchanged."""
+    if not isinstance(placement, dict):
+        return False
+    if placement.get("requested_device") != requested_device:
+        return False
+    if placement.get("every_parameter_on_cuda") is not True:
+        return False
+    if placement.get("no_offload_verified") is not True:
+        return False
+    count = placement.get("parameter_count")
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return False
+    unique_types = placement.get("unique_device_types")
+    if not isinstance(unique_types, (list, tuple)) or list(unique_types) != ["cuda"]:
+        return False
+    unique_devices = placement.get("unique_devices")
+    if not isinstance(unique_devices, (list, tuple)) or list(unique_devices) != [requested_device]:
+        return False
+    device_map = placement.get("hf_device_map")
+    if device_map is not None:
+        if not isinstance(device_map, dict):
+            return False
+        for value in device_map.values():
+            normalized = str(value).lower()
+            if normalized in ("cpu", "disk", "meta", "auto"):
+                return False
+            if normalized not in (requested_device, requested_device.split(":", 1)[-1], "cuda"):
+                return False
+    return True
+
+
 def verify_placement_from_raw_evidence(
     fullkv_placement: dict[str, Any],
     rkv_placement: dict[str, Any],
@@ -124,39 +166,12 @@ def verify_placement_from_raw_evidence(
     `{"cuda"}`; a per-parameter device walk of exactly `{"cuda:0"}` (no CPU,
     disk-offloaded, meta, or off-index parameter); and an `hf_device_map`
     that is either absent or maps every module to `cuda:0`/index `0` (no
-    cpu/disk/meta entry, no automatic/offloaded map)."""
-
-    def _ok(placement: Any) -> bool:
-        if not isinstance(placement, dict):
-            return False
-        if placement.get("requested_device") != requested_device:
-            return False
-        if placement.get("every_parameter_on_cuda") is not True:
-            return False
-        if placement.get("no_offload_verified") is not True:
-            return False
-        count = placement.get("parameter_count")
-        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
-            return False
-        unique_types = placement.get("unique_device_types")
-        if not isinstance(unique_types, (list, tuple)) or list(unique_types) != ["cuda"]:
-            return False
-        unique_devices = placement.get("unique_devices")
-        if not isinstance(unique_devices, (list, tuple)) or list(unique_devices) != [requested_device]:
-            return False
-        device_map = placement.get("hf_device_map")
-        if device_map is not None:
-            if not isinstance(device_map, dict):
-                return False
-            for value in device_map.values():
-                normalized = str(value).lower()
-                if normalized in ("cpu", "disk", "meta", "auto"):
-                    return False
-                if normalized not in (requested_device, requested_device.split(":", 1)[-1], "cuda"):
-                    return False
-        return True
-
-    return _ok(fullkv_placement) and _ok(rkv_placement)
+    cpu/disk/meta entry, no automatic/offloaded map). Delegates the
+    per-worker check to `_single_worker_placement_ok`, never a second,
+    independently-written predicate."""
+    return _single_worker_placement_ok(
+        fullkv_placement, requested_device=requested_device
+    ) and _single_worker_placement_ok(rkv_placement, requested_device=requested_device)
 
 
 @dataclass(frozen=True)

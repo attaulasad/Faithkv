@@ -214,3 +214,60 @@ def test_device_gate_still_fails_on_genuinely_different_length_sequences():
     fullkv = _valid_device_evidence(compute_capability=[8, 6])
     rkv = _valid_device_evidence(compute_capability=[8, 6, 0])
     assert verify_device_gate_from_raw_evidence(fullkv, rkv) is False
+
+
+# --------------------------------------------------------------------------
+# B2A-R3 Step 3 Stage-A regression: `_single_worker_placement_ok` was
+# factored out of `verify_placement_from_raw_evidence` so
+# `kvcot.discovery.b2a_r3_qualification` (a single-FullKV-worker caller,
+# never R-KV) can reuse the exact same predicate. These tests prove the
+# factoring changed no historical two-worker behavior and that the
+# single-worker helper agrees with it.
+# --------------------------------------------------------------------------
+
+
+def _valid_placement(**overrides):
+    base = {
+        "requested_device": "cuda:0",
+        "every_parameter_on_cuda": True,
+        "no_offload_verified": True,
+        "parameter_count": 100,
+        "unique_device_types": ["cuda"],
+        "unique_devices": ["cuda:0"],
+        "hf_device_map": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_single_worker_placement_ok_matches_two_worker_gate_for_valid_evidence():
+    from kvcot.discovery.strict_device import _single_worker_placement_ok, verify_placement_from_raw_evidence
+
+    placement = _valid_placement()
+    assert _single_worker_placement_ok(placement) is True
+    assert verify_placement_from_raw_evidence(placement, placement) is True
+
+
+def test_two_worker_gate_still_fails_if_either_worker_offloaded():
+    from kvcot.discovery.strict_device import _single_worker_placement_ok, verify_placement_from_raw_evidence
+
+    good = _valid_placement()
+    bad = _valid_placement(no_offload_verified=False)
+    assert _single_worker_placement_ok(good) is True
+    assert _single_worker_placement_ok(bad) is False
+    assert verify_placement_from_raw_evidence(good, bad) is False
+    assert verify_placement_from_raw_evidence(bad, good) is False
+
+
+def test_single_worker_placement_ok_rejects_non_dict():
+    from kvcot.discovery.strict_device import _single_worker_placement_ok
+
+    assert _single_worker_placement_ok(None) is False
+    assert _single_worker_placement_ok("not a dict") is False
+
+
+def test_single_worker_placement_ok_rejects_cpu_device_map_entry():
+    from kvcot.discovery.strict_device import _single_worker_placement_ok
+
+    placement = _valid_placement(hf_device_map={"layer.0": "cpu"})
+    assert _single_worker_placement_ok(placement) is False
