@@ -143,6 +143,49 @@ def test_candidate_ordinals_are_zero_indexed_and_sequential():
     assert ordinals == list(range(len(manifest["candidates"])))
 
 
+def test_ordering_hash_default_protocol_version_unchanged_after_r3_parameterization():
+    """B2A-R3 (kvcot.discovery.b2a_r3_candidates) reuses `_ordering_hash`
+    parameterized by its own protocol-version string (protocol §9) -- this
+    regression test locks down that the DEFAULT call shape (every existing
+    B2A-R2 caller) still reproduces the exact historical hash, byte for
+    byte, after that parameterization was added."""
+    from kvcot.discovery.b2a_r2_candidates import _ordering_hash
+    from kvcot.utils.hashing import sha256_text
+
+    kwargs = dict(
+        dataset_revision=DATASET_REVISION, model_revision=MODEL_REVISION, budget=BUDGET,
+        unique_id="test/precalculus/1.json",
+    )
+    expected = sha256_text(
+        f"{CANDIDATE_MANIFEST_PROTOCOL_VERSION}|{DATASET_REVISION}|{MODEL_REVISION}|budget={BUDGET}|"
+        "test/precalculus/1.json"
+    )
+    assert _ordering_hash(**kwargs) == expected
+
+
+def test_ordering_hash_explicit_protocol_version_changes_the_hash():
+    from kvcot.discovery.b2a_r2_candidates import _ordering_hash
+
+    kwargs = dict(
+        dataset_revision=DATASET_REVISION, model_revision=MODEL_REVISION, budget=BUDGET,
+        unique_id="test/precalculus/1.json",
+    )
+    default_hash = _ordering_hash(**kwargs)
+    r3_hash = _ordering_hash(protocol_version="faithkv-b2a-r3-row-order-v1", **kwargs)
+    assert default_hash != r3_hash
+
+
+def test_full_manifest_ordering_unchanged_by_r3_parameterization():
+    """End-to-end regression: `build_candidate_manifest` never passes
+    `protocol_version` to `_ordering_hash`, so its output must be
+    byte-identical to what it was before B2A-R3 added the parameter."""
+    rows = [_row(f"id-{i}") for i in range(20)]
+    manifest = _build(rows)
+    assert manifest["protocol_version"] == "faithkv-b2a-r2-row-order-v1"
+    for candidate in manifest["candidates"]:
+        assert candidate["protocol_version"] == "faithkv-b2a-r2-row-order-v1"
+
+
 def test_never_selects_by_observed_generation_length_no_such_input_exists():
     """The builder's signature accepts only raw dataset rows -- there is no
     generation-length/compaction-count parameter it could possibly sort by,

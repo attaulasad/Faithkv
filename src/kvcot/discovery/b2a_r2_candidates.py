@@ -41,15 +41,30 @@ CANDIDATE_LEVEL = 5
 CANDIDATE_COUNT = 12
 
 
-def _ordering_hash(*, dataset_revision: str, model_revision: str, budget: int, unique_id: str) -> str:
+def _ordering_hash(
+    *,
+    dataset_revision: str,
+    model_revision: str,
+    budget: int,
+    unique_id: str,
+    protocol_version: str = CANDIDATE_MANIFEST_PROTOCOL_VERSION,
+) -> str:
     """The frozen, pre-registered ordering key -- a fixed function of
     identity fields ONLY (dataset revision, model revision, budget,
     unique_id). Never a function of anything observed about generation
     (length, answer, compaction count): the whole point of pre-registration
-    is that this order is fixed BEFORE any qualification inference runs."""
-    payload = (
-        f"{CANDIDATE_MANIFEST_PROTOCOL_VERSION}|{dataset_revision}|{model_revision}|budget={budget}|{unique_id}"
-    )
+    is that this order is fixed BEFORE any qualification inference runs.
+
+    `protocol_version` defaults to this module's own
+    `CANDIDATE_MANIFEST_PROTOCOL_VERSION`, preserving B2A-R2's historical
+    byte-for-byte hash construction exactly for every existing caller
+    (`build_candidate_manifest` below never passes this argument).
+    B2A-R3 (`kvcot.discovery.b2a_r3_candidates`) reuses this SAME function,
+    parameterized with its own distinct
+    `"faithkv-b2a-r3-row-order-v1"` protocol-version string
+    (protocol §9), rather than reimplementing the payload construction
+    independently."""
+    payload = f"{protocol_version}|{dataset_revision}|{model_revision}|budget={budget}|{unique_id}"
     return sha256_text(payload)
 
 
