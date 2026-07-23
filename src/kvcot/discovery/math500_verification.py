@@ -86,9 +86,20 @@ class Math500AnswerVerifier:
         # identically to `\boxed{x}`) -- this is a general parsing-boundary
         # fix, not special-cased to tuples or to this specific problem's
         # answer.
-        verification = verify_math_equivalence(
-            f"\\boxed{{{extracted.normalized_value}}}", f"\\boxed{{{self.gold_answer}}}"
-        )
+        # Exact identity is already a conclusive equivalence proof and does
+        # not need the subprocess parser.  Besides avoiding needless work,
+        # this keeps a valid exact answer from becoming "unverifiable" only
+        # because a fresh symbolic-verifier process could not start within
+        # its frozen timeout under heavy CPU-suite load.  Every non-identical
+        # pair still follows the unchanged symbolic-verification path below.
+        if extracted.normalized_value == self.gold_answer.strip():
+            verification = MathVerificationResult(
+                is_equivalent=True, status="equivalent", failure_reason=None
+            )
+        else:
+            verification = verify_math_equivalence(
+                f"\\boxed{{{extracted.normalized_value}}}", f"\\boxed{{{self.gold_answer}}}"
+            )
         if verification.is_equivalent is True:
             status: NaturalAnswerStatus = "correct"
         elif verification.is_equivalent is False:

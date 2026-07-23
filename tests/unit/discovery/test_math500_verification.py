@@ -66,10 +66,17 @@ def test_actual_b2a_r1_observed_case_is_now_correct_not_unverifiable():
     assert verifier.last_result.verification.is_equivalent is True
 
 
-def test_exact_gold_against_itself_is_correct():
+def test_exact_gold_against_itself_is_correct(monkeypatch):
     gold = r"\left( 3, \frac{\pi}{2} \right)"
+    monkeypatch.setattr(
+        "kvcot.discovery.math500_verification.verify_math_equivalence",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("exact identity must not require a verifier subprocess")
+        ),
+    )
     verifier = _verify(decoded_text=f"\\boxed{{{gold}}}", gold_answer=gold)
     assert verifier.last_result.status == "correct"
+    assert verifier.last_result.verification.status == "equivalent"
 
 
 def test_whitespace_variant_is_correct():
