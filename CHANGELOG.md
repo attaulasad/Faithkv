@@ -1,5 +1,67 @@
 # Changelog
 
+## 2026-07-23 — B2A-R3 Step 3R4 independent re-audit repair, round 2 (READY FOR INDEPENDENT RE-AUDIT; STAGE B BLOCKED)
+
+Repairs seven blocking findings plus one report inconsistency identified by
+an independent re-audit of Step 3R4 SHA
+`187236426b5fb48321c18a91556cf0d560918494`
+(`docs/B2A_R3_STAGE_B_READINESS_REPAIR_2026-07-23.md`), on
+`research/b2a-r3-runtime-qualified-calibration`:
+
+- **Finding 1 (no real FullKV worker path produced R3 evidence)** — a new
+  `kvcot.discovery.b2a_r3_qualification_worker.run_fullkv_r3_qualification_worker`
+  reuses the canonical `run_fullkv_worker` body unmodified, renders the
+  candidate's prompt via a newly factored-out
+  `kvcot.discovery.manifest_prepare.render_with_loaded_tokenizer`, and
+  derives the think-span via `find_think_span` using the identical
+  tokenizer instance the worker itself ran with. Tested against the real
+  (injected, non-fake-shaped) worker body, feeding its actual output
+  through the existing adapter.
+- **Findings 2/3 (timing/memory validators rejected real worker output)** —
+  `fullkv_qualification_timing_complete`/`fullkv_qualification_memory_complete`
+  now use their own frozen vocabularies matching what the real worker
+  actually emits (`before_model_load`/`post_load_baseline` as genuine
+  timing phases; `tokenizer_load`/`post_load_validation` as genuine
+  additional memory phases; `answer_verification` nested before
+  `fullkv_complete_natural_generation`), independently reproduced against
+  a real (non-fake) `run_fullkv_worker` invocation. The historical
+  `FULLKV_REQUIRED_TIMING_PHASES`/`FULLKV_REQUIRED_MEMORY_PHASES`
+  two-worker gate is untouched.
+- **Finding 4 (phase-wide authorization time was not a hard limit)** — the
+  qualification coordinator now caps each worker's timeout at
+  `min(per_candidate_timeout, remaining_phase_seconds)` and rechecks
+  elapsed phase-wide time immediately after every worker completes, not
+  only before the next launch.
+- **Finding 5 (atomic writer performed only shallow verification)** —
+  `write_qualification_artifact_atomic` now requires
+  `candidate_manifest`/`expected_config_sha256` and calls the full
+  semantic verifier (`verify_qualification_artifact`) both before writing
+  and after reading the written bytes back.
+- **Finding 6 (stop reasons were not independently verified)** —
+  `QUALIFICATION_ARTIFACT_SCHEMA_VERSION` bumps v2 to v3;
+  `QualificationArtifactR3` gains a required `authorized_maximum_candidates`
+  field and a `qualification_stopped_reason` membership validator, with a
+  cross-field invariant binding attempted-candidate count to the
+  authorized limit.
+- **Finding 7 (claim path not bound to the Git provider's repository
+  root)** — `GitStateProvider` gains a required `repository_root`
+  property; `verify_authorization_preconditions`/`claim_authorization`
+  both bind it against the supplied `repository_root` before doing
+  anything else.
+- **Report inconsistency** — the v2 outcome field count is 53, not 37
+  (`6+8+3+4+9+8+4+7+1+3=53`, matching
+  `QUALIFICATION_OUTCOME_V2_FIELD_NAMES` exactly); no source changed for
+  this item.
+
+Full detail: `docs/B2A_R3_STEP3R4_REPAIR2_2026-07-23.md`. Full CPU suite:
+1835 passed, 1 skipped (pre-existing GPU-only skip).
+
+```text
+STEP 3R4 INDEPENDENT RE-AUDIT REPAIR ROUND 2 IMPLEMENTED —
+READY FOR INDEPENDENT RE-AUDIT;
+STAGE B FULLKV QUALIFICATION REMAINS BLOCKED
+```
+
 ## 2026-07-23 — B2A-R3 Step 3R4 CPU protocol alignment and Stage-B readiness repairs (READY FOR INDEPENDENT RE-AUDIT; STAGE B BLOCKED)
 
 Repairs six findings identified against Step 3 Stage-A implementation SHA

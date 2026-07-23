@@ -438,6 +438,62 @@ STAGE B FULLKV QUALIFICATION REMAINS BLOCKED
 - The next required action is an independent re-audit of the final
   Step 3R4 repair SHA.
 
+### Section 1k — B2A-R3 Step 3R4 independent re-audit repair, round 2 (dated 2026-07-23)
+
+Added by `docs/B2A_R3_STEP3R4_REPAIR2_2026-07-23.md`, superseding nothing
+above except the narrow `authorized_maximum_candidates`/qualification-
+outcome-version fields that document names explicitly. An independent
+re-audit of §1j's SHA (`187236426b5fb48321c18a91556cf0d560918494`) returned
+**FAIL**, with seven blocking findings plus one report-inconsistency: (1)
+no production path existed from a real FullKV worker result into
+`FullKVWorkerResultR3` — the adapter only ever converted a hand-built one;
+(2)/(3) the qualification-only timing/memory validators rejected the real
+worker's own output (`before_model_load`/`post_load_baseline` genuinely
+appear as timing phases, `tokenizer_load`/`post_load_validation`
+genuinely appear as memory phases, and `answer_verification` is genuinely
+nested before `fullkv_complete_natural_generation`); (4) the qualification
+coordinator always handed a worker the full frozen per-candidate timeout
+regardless of remaining authorized phase time, and never rechecked elapsed
+time after a worker completed; (5) the atomic qualification-artifact
+writer performed only shallow (self-hash/schema) verification, never full
+semantic re-derivation; (6) `qualification_stopped_reason` had no
+membership validator and the artifact carried no record of the
+authorization's actual `maximum_candidates`, so an exhaustion claim could
+not be independently checked; (7) `verify_authorization_preconditions`/
+`claim_authorization` accepted `git_state` and `repository_root` as two
+independent, unbound parameters. All seven are repaired, each with a
+dedicated regression suite exercising the real (injected, non-fake-shaped)
+worker path where applicable; the 37-vs-53 field-count report
+inconsistency is corrected (53 is, and always was, the correct count —
+`QUALIFICATION_OUTCOME_V2_FIELD_NAMES`, already contract-tested).
+
+```text
+STEP 3R4 INDEPENDENT RE-AUDIT REPAIR ROUND 2 IMPLEMENTED —
+READY FOR INDEPENDENT RE-AUDIT;
+STAGE B FULLKV QUALIFICATION REMAINS BLOCKED
+```
+
+- This is a CPU-only repair round. It does not self-certify its own work
+  and does not authorize Stage B or Stage C.
+- No GPU/CUDA initialization, real model or tokenizer weights, a real
+  FullKV or R-KV run, real qualification/freeze/claim/attempt, B2B
+  execution, or FaithKV method implementation is authorized or performed.
+  The new `kvcot.discovery.b2a_r3_qualification_worker` module reuses the
+  canonical `run_fullkv_worker` body unmodified and is exercised only
+  against injected fakes (a deterministic, torch-CPU-tensor model/
+  tokenizer/cuda backend) — no line in this repair round initializes real
+  CUDA or loads real weights.
+- Historical B2A-R1/R2 artifacts and verification semantics, the committed
+  B2A-R3 candidate-manifest content (canonical hash unchanged:
+  `b8148647698ca5ab5335ea28dc1416109b26f73dd05b87eed2fe9eca4b25ff42`),
+  `configs/lock.yaml`, and the R-KV gitlink remain unchanged.
+- `QUALIFICATION_ARTIFACT_SCHEMA_VERSION` is bumped v2 to v3 (a new
+  required `authorized_maximum_candidates` field) — no real qualification
+  artifact has ever been produced under v2 either, so this reinterprets
+  nothing historical.
+- The next required action is an independent re-audit of the final
+  repair SHA from this round.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.
