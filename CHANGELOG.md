@@ -41,23 +41,15 @@ Repair (test-only, `docs/B2A_R3_GPU_HOST_NEUTRAL_PREFLIGHT_TEST_REPAIR_2026-07-2
   longer equals current clean `HEAD`) and must never be executed. A
   byte-identical copy is preserved at
   `/workspace/faithkv-superseded-claims/faithkv-stage-b-claim-unconsumed-2026-07-23.json`.
+- Validated on the Vast.ai RTX 3090 host both with the GPU visible and
+  with `CUDA_VISIBLE_DEVICES=""`: 3/3 targeted tests pass either way; full
+  relevant modules 69 passed; complete non-GPU suite 1850 passed, 14
+  deselected, 0 failed (up from 1847 passed / 3 failed).
 
 ```text
-B2A-R3 GPU-HOST-NEUTRAL PREFLIGHT TEST REPAIR AUTHORIZED — CPU TESTS ONLY
-
-OLD CLAIM:
-UNCONSUMED; SUPERSEDED WHEN THE REPAIR BRANCH ADVANCES
-
-AUTHORIZED:
-DETERMINISTIC REPAIR OF THREE HOST-DEPENDENT NO-CUDA TESTS
-
-PROHIBITED:
-PRODUCTION SOURCE CHANGES
-SCIENTIFIC CONFIGURATION CHANGES
-MODEL INFERENCE
-FULLKV/R-KV EXECUTION
-CLAIM CONSUMPTION
-NEW STAGE-B AUTHORIZATION
+B2A-R3 GPU-HOST-NEUTRAL PREFLIGHT TEST REPAIR COMPLETE —
+LOCAL VALIDATION GREEN; READY FOR EXACT-SHA CI AND INDEPENDENT RE-AUDIT;
+STAGE B REMAINS BLOCKED
 ```
 
 ## 2026-07-23 - B2A-R3 authorization self-reference repair (READY FOR INDEPENDENT RE-AUDIT; STAGE B BLOCKED; REMOTE CI REQUIRED)

@@ -321,11 +321,24 @@ def test_cuda_availability_check_failure_produces_partial_evidence_rkv(monkeypat
     assert evidence.last_completed_stage is None
 
 
-def test_cuda_clean_refusal_is_not_wrapped_when_no_fake_backend_injected():
+def test_cuda_clean_refusal_is_not_wrapped_when_no_fake_backend_injected(monkeypatch):
     """The deliberate "no CUDA available" refusal (a clean `False` return,
     never an exception) must stay a plain, unwrapped `WorkerFailedError` --
-    unchanged by the new guard around the availability call itself."""
+    unchanged by the new guard around the availability call itself.
+    Host-neutral (repaired 2026-07-24, see
+    docs/B2A_R3_GPU_HOST_NEUTRAL_PREFLIGHT_TEST_REPAIR_2026-07-24.md): only
+    `torch.cuda.is_available` is monkeypatched to a deterministic `False`;
+    `_cuda` stays omitted so the worker still selects real `torch.cuda`,
+    exercising the actual production default-selection call shape rather
+    than a fake CUDA facade."""
     from kvcot.discovery.b2a_workers import WorkerFailedError
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    def _fail_if_reached(*args, **kwargs):
+        raise AssertionError("snapshot resolution must not be reached after clean no-CUDA refusal")
+
+    monkeypatch.setattr("kvcot.discovery.snapshot_boundary.resolve_local_snapshot", _fail_if_reached)
 
     with pytest.raises(WorkerFailedError, match="requires CUDA"):
         run_fullkv_worker(_build_fake_discovery_config(), _FakeManifest())

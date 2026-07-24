@@ -133,7 +133,61 @@ byte-identical copy is preserved for the record at
 `/workspace/faithkv-superseded-claims/faithkv-stage-b-claim-unconsumed-2026-07-23.json`
 (SHA-256 recorded alongside it) without modifying the original.
 
-## 6. Next required action
+## 6. Repair completed and locally validated (2026-07-24)
+
+All three tests now monkeypatch only `torch.cuda.is_available` to a
+deterministic `False`:
+
+```python
+monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+```
+
+`_cuda`, `_load_model`, `_load_tokenizer`, `_fresh_cache_factory`, and
+`_device` remain omitted in all three, so the production default-selection
+call shape (`cuda = _cuda if _cuda is not None else torch.cuda`) is
+exercised unchanged — no fake `_cuda` object is passed. Each test also
+monkeypatches `kvcot.discovery.snapshot_boundary.resolve_local_snapshot`
+to raise an explicit `AssertionError` if unexpectedly reached, as a
+narrowly-scoped host-neutrality guard beyond the pre-existing
+`WorkerFailedError`/`"requires CUDA"` assertions.
+
+Local validation on this Vast.ai RTX 3090 host:
+
+- Targeted 3 tests, GPU visible (no `CUDA_VISIBLE_DEVICES` override):
+  **3 passed, 0 failed, 0 skipped, 0 xfailed.**
+- Targeted 3 tests, `CUDA_VISIBLE_DEVICES=""` (CUDA hidden):
+  **3 passed, 0 failed.**
+- Full relevant modules
+  (`test_b2a_workers_real_bodies.py` + `test_final_audit_repairs.py`):
+  **69 passed, 0 failed.**
+- `python -m compileall -q src tests`: clean.
+- Complete non-GPU suite (`python -m pytest -m "not gpu" -q`):
+  **1850 passed, 14 deselected, 0 failed, 0 errors** (up from the
+  original 1847 passed / 3 failed — the 3 previously-failing tests now
+  pass, no other test count changed).
+- `pytest --collect-only -q`: 1864 tests collected; all three repaired
+  tests collected normally, none GPU-marked, skipped, xfailed, or
+  deselected by `-m "not gpu"`.
+- `git diff --check`: clean.
+- GPU identity unchanged throughout: `NVIDIA GeForce RTX 3090`, 24576 MiB.
+- Environment: Python 3.12.13, Torch `2.6.0+cu124`, Transformers `4.55.4`,
+  FlashAttention `2.7.4.post1` (all pre-existing on this host; nothing
+  reinstalled for this repair).
+
+No production source file changed (`src/` diff against
+`4d559070df95def18fe5b649e2a7523d32bdba95` is empty), no scientific
+setting changed (`configs/`, `third_party/R-KV/`, `results/` diffs are all
+empty), no `@pytest.mark.gpu`/`skip`/`xfail` was added, and
+`SnapshotBoundaryError` is not caught or accepted anywhere in the repair.
+The old claim (`/tmp/faithkv-stage-b-claim.json`,
+`authorization_id=stage-b-2026-07-23-final`) remains byte-identical to its
+original SHA-256
+(`062e830c1a1ea159fc7b6c5d64cfd99c86348046d039e642f815381a0841255f`) and
+unconsumed; no
+`results/decisions/b2a_r3_authorization_claims/stage-b-2026-07-23-final.json`
+or `results/decisions/b2a_r3_qualification.json` exists.
+
+## 7. Next required action
 
 ```text
 Exact-SHA GitHub Actions CPU CI on the final repair commit.
@@ -142,4 +196,4 @@ Independent re-audit of that exact final repair SHA.
 
 Stage B remains blocked until a new, separate, dated Stage-B authorization
 is produced against a newly audited code commit — this document does not
-create one.
+create one. The repairing author does not self-certify this repair.

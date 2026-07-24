@@ -41,23 +41,34 @@ CLAIM CONSUMPTION
 NEW STAGE-B AUTHORIZATION
 ```
 
-Authorized repair: monkeypatch only `torch.cuda.is_available` to `False`
-in the three named tests, continuing to omit `_cuda`/`_load_model`/
-`_load_tokenizer` so the production default-selection call shape is
-exercised unchanged. No file under `src/`, `configs/`,
-`third_party/R-KV/`, or `results/` may change; no scientific setting,
-model, tokenizer, dataset, cache budget, runtime threshold, VRAM limit,
-R-KV revision, or qualification condition may change; the three tests may
-not be marked `gpu`, skipped, or xfailed; `SnapshotBoundaryError` may not
-be accepted in place of the intended assertion.
+Repair applied: each test now monkeypatches only `torch.cuda.is_available`
+to `False`, continuing to omit `_cuda`/`_load_model`/`_load_tokenizer` so
+the production default-selection call shape is exercised unchanged, plus
+a narrow guard that fails loudly if snapshot resolution is unexpectedly
+reached. No file under `src/`, `configs/`, `third_party/R-KV/`, or
+`results/` changed; no scientific setting, model, tokenizer, dataset,
+cache budget, runtime threshold, VRAM limit, R-KV revision, or
+qualification condition changed; the three tests are not marked `gpu`,
+skipped, or xfailed; `SnapshotBoundaryError` is not accepted anywhere.
+
+Local validation on the Vast.ai RTX 3090 host: 3/3 targeted tests pass
+with the GPU visible and with `CUDA_VISIBLE_DEVICES=""`; full relevant
+modules 69 passed; complete non-GPU suite 1850 passed / 14 deselected / 0
+failed (up from 1847 passed / 3 failed); `compileall`, collection check,
+and `git diff --check` all clean.
+
+```text
+B2A-R3 GPU-HOST-NEUTRAL PREFLIGHT TEST REPAIR COMPLETE —
+LOCAL VALIDATION GREEN; READY FOR EXACT-SHA CI AND INDEPENDENT RE-AUDIT;
+STAGE B REMAINS BLOCKED
+```
 
 Next action:
 
 ```text
-Repair the three tests, validate on the Vast.ai host, commit, push,
-obtain exact-SHA GitHub Actions CPU CI, and hand off for independent
-re-audit. Stage B remains blocked until a new, separate, dated
-authorization is produced against a newly audited code commit.
+Push, obtain exact-SHA GitHub Actions CPU CI, and hand off for
+independent re-audit. Stage B remains blocked until a new, separate,
+dated authorization is produced against a newly audited code commit.
 ```
 
 ## Prior status: B2A-R3 Step 3R4 CPU protocol alignment and Stage-B readiness repairs implemented; ready for independent re-audit (2026-07-23)

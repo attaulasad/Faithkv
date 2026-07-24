@@ -635,6 +635,16 @@ NEW STAGE-B AUTHORIZATION
   byte-identical copy is preserved at
   `/workspace/faithkv-superseded-claims/faithkv-stage-b-claim-unconsumed-2026-07-23.json`
   without modifying the original.
+- Repair completed and locally validated same-day: each test now
+  monkeypatches only `torch.cuda.is_available` to `False` (no fake `_cuda`
+  passed), plus a narrow guard failing loudly if snapshot resolution is
+  unexpectedly reached. On this Vast.ai RTX 3090 host, the 3 targeted
+  tests pass both with the GPU visible and with `CUDA_VISIBLE_DEVICES=""`;
+  the two full relevant modules pass (69 passed); the complete non-GPU
+  suite passes (1850 passed, 14 deselected, 0 failed -- up from 1847
+  passed / 3 failed); `compileall`, collection, and `git diff --check` are
+  all clean. `src/`, `configs/`, `third_party/R-KV/`, and `results/` are
+  byte-identical to the pre-repair execution commit.
 - Stage B remains blocked. The next required actions are exact-SHA GitHub
   Actions CPU CI on the final repair commit, then an independent re-audit
   of that exact SHA, before any new, separate, dated Stage-B authorization

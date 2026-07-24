@@ -316,11 +316,25 @@ def test_run_fullkv_worker_executes_the_real_body_end_to_end():
     }
 
 
-def test_run_fullkv_worker_requires_cuda_when_no_fake_backend_injected():
+def test_run_fullkv_worker_requires_cuda_when_no_fake_backend_injected(monkeypatch):
     """Never silently uses a fake in production -- omitting the injection
     seams entirely (the production call shape) must still hard-require real
-    CUDA."""
+    CUDA. Host-neutral (repaired 2026-07-24, see
+    docs/B2A_R3_GPU_HOST_NEUTRAL_PREFLIGHT_TEST_REPAIR_2026-07-24.md):
+    only `torch.cuda.is_available` is monkeypatched to a deterministic
+    `False` so this passes identically whether the real physical host has
+    a visible CUDA device or not -- `_cuda` stays omitted, so the worker
+    still selects real `torch.cuda` (`cuda = _cuda if _cuda is not None
+    else torch.cuda`), exercising the actual production default-selection
+    call shape rather than a fake CUDA facade."""
     from kvcot.discovery.b2a_workers import WorkerFailedError
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    def _fail_if_reached(*args, **kwargs):
+        raise AssertionError("snapshot resolution must not be reached after clean no-CUDA refusal")
+
+    monkeypatch.setattr("kvcot.discovery.snapshot_boundary.resolve_local_snapshot", _fail_if_reached)
 
     config = _build_fake_discovery_config()
     manifest = _FakeManifest()
@@ -453,8 +467,21 @@ def test_run_rkv_worker_executes_complete_twelve_pair_success_path(monkeypatch):
     assert all(value > 0 for value in result.no_op_pair_wall_seconds)
 
 
-def test_run_rkv_worker_requires_cuda_when_no_fake_backend_injected():
+def test_run_rkv_worker_requires_cuda_when_no_fake_backend_injected(monkeypatch):
+    """Host-neutral (repaired 2026-07-24, see
+    docs/B2A_R3_GPU_HOST_NEUTRAL_PREFLIGHT_TEST_REPAIR_2026-07-24.md):
+    only `torch.cuda.is_available` is monkeypatched to a deterministic
+    `False`; `_cuda` stays omitted so the worker still selects real
+    `torch.cuda`, exercising the actual production default-selection call
+    shape rather than a fake CUDA facade."""
     from kvcot.discovery.b2a_workers import WorkerFailedError
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    def _fail_if_reached(*args, **kwargs):
+        raise AssertionError("snapshot resolution must not be reached after clean no-CUDA refusal")
+
+    monkeypatch.setattr("kvcot.discovery.snapshot_boundary.resolve_local_snapshot", _fail_if_reached)
 
     config = _build_fake_discovery_config()
     manifest = _FakeManifest()
