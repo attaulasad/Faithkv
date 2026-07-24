@@ -695,6 +695,22 @@ CHANGES TO THE SELECTED MANIFEST OR SELECTION PROVENANCE
   `docs/evidence/B2A_R3_STAGE_B_QUALIFICATION_ACCEPTANCE_2026-07-24.md`.
   Stage C remains blocked.
 
+### Section 1o -- B2A-R3 Stage-B evidence-acceptance test-assumption repair (dated 2026-07-24)
+
+Added by
+`docs/B2A_R3_STAGE_B_EVIDENCE_ACCEPTANCE_TEST_ASSUMPTION_REPAIR_2026-07-24.md`,
+superseding nothing above. Exact-SHA CI on the §1n evidence-acceptance
+commit failed 2 of 1850 non-GPU tests
+(`test_no_production_claims_directory_touched_by_dry_run`,
+`test_no_production_files_written`): both hard-asserted the real
+authorization-claims directory / qualification-artifact path must never
+exist in the repository, an assumption §1n's own committed evidence
+directly falsified. Repaired to assert the real invariant instead --
+before/after no-touch (existence and byte-content unchanged) -- rather
+than flat non-existence. Test files only; no change under `src/`,
+`configs/`, `third_party/R-KV/`, or `results/`. Full non-GPU suite: 1850
+passed / 14 deselected / 0 failed locally. Stage C remains blocked.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

@@ -1,28 +1,30 @@
 # Plan and status
 
-## Current status: B2A-R3 Stage-B qualification evidence accepted (2026-07-24)
+## Current status: B2A-R3 Stage-B qualification evidence accepted; test-assumption repair pushed for CI (2026-07-24)
 
 The audited, independently-verified B2A-R3 Stage-B FullKV qualification
 evidence produced under authorization ID `stage-b-2026-07-24-r2-final`
 (audited code SHA `4117baea139f745ceeff85039258445639e85049`, execution
-SHA `16d01ebe5c0659330bd78ccff96b9e64aea787ac`) is now committed to git
-history. This is a persistence step only: no R-KV execution, no Stage C,
-and no production selected-row freezer execution occurred or is
-authorized here.
+SHA `16d01ebe5c0659330bd78ccff96b9e64aea787ac`) is committed to git
+history (`be59ca97fe72ec8fe44b37495b9f13f849a2bcba`). This is a
+persistence step only: no R-KV execution, no Stage C, and no production
+selected-row freezer execution occurred or is authorized here.
 
-```text
-B2A-R3 STAGE-B EVIDENCE ACCEPTANCE COMPLETE —
-ACCEPTED CLAIM AND QUALIFICATION ARTIFACT COMMITTED;
-EXACT-SHA CI GREEN;
+Exact-SHA CI on `be59ca9` failed 2 of 1850 non-GPU tests: two pre-existing
+tests hard-asserted the real authorization-claims directory /
+qualification-artifact path must never exist in the repository, an
+assumption this same commit's required persistence directly falsified.
+Repaired (test files only, see
+`docs/B2A_R3_STAGE_B_EVIDENCE_ACCEPTANCE_TEST_ASSUMPTION_REPAIR_2026-07-24.md`)
+to assert the real invariant (before/after no-touch) instead of flat
+non-existence; full non-GPU suite passes locally (1850 passed, 14
+deselected, 0 failed). Pushed; exact-SHA CI on the repair commit pending
+confirmation.
 
-READY FOR FREEZER IMPLEMENTATION AUTHORIZATION;
-STAGE C REMAINS BLOCKED
-```
-
-- Committed exactly: the consumed claim
+- Committed in `be59ca9`: the consumed claim
   (`results/decisions/b2a_r3_authorization_claims/stage-b-2026-07-24-r2-final.json`),
   the qualification artifact
-  (`results/decisions/b2a_r3_qualification.json`), and the new acceptance
+  (`results/decisions/b2a_r3_qualification.json`), and the acceptance
   document `docs/evidence/B2A_R3_STAGE_B_QUALIFICATION_ACCEPTANCE_2026-07-24.md`.
 - Selected row: `test/number_theory/631.json` (candidate ordinal 1,
   answer `36`, 7 eligible compaction events, projected B2B runtime
@@ -38,10 +40,12 @@ STAGE C REMAINS BLOCKED
 Next action:
 
 ```text
-A fresh session authorizes and implements the CPU-only production
-selected-row freezer (Phase 2 of the B2A-R3 remaining workflow) against
-this accepted evidence, without executing it or changing the production
-selected manifest. Stage C remains blocked throughout.
+Confirm exact-SHA CI green on the test-assumption repair commit. Once
+green, Phase 1 is complete. A fresh session then authorizes and
+implements the CPU-only production selected-row freezer (Phase 2 of the
+B2A-R3 remaining workflow) against this accepted evidence, without
+executing it or changing the production selected manifest. Stage C
+remains blocked throughout.
 ```
 
 ## Prior status: B2A-R3 GPU-host-neutral Stage-B preflight test repair authorized (2026-07-24)

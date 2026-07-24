@@ -774,14 +774,18 @@ def test_dry_run_reports_invalid_payload():
 
 
 def test_no_production_claims_directory_touched_by_dry_run():
+    """Dry-run planning must not create, remove, or otherwise touch the
+    real authorization-claims directory. This does not assert the
+    directory is absent: a separately-committed, accepted Stage-B claim
+    (e.g. after a Stage-B evidence-acceptance commit) may legitimately
+    populate it outside this test."""
     from kvcot.discovery.b2a_r3_contract import AUTHORIZATION_CLAIMS_DIR
     import os
 
     before = os.path.exists(AUTHORIZATION_CLAIMS_DIR)
     plan_authorization_claim_dry_run(_stage_b_payload())
     after = os.path.exists(AUTHORIZATION_CLAIMS_DIR)
-    assert before == after
-    assert after is False, "the real authorization-claims directory must not exist in this repository"
+    assert before == after, "dry-run planning must not touch the real authorization-claims directory"
 
 
 # --------------------------------------------------------------------- mandatory concurrency test

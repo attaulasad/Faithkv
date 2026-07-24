@@ -1,5 +1,42 @@
 # Changelog
 
+## 2026-07-24 - B2A-R3 Stage-B evidence-acceptance test-assumption repair (TEST FILES ONLY; STAGE C BLOCKED)
+
+Exact-SHA CI on the Stage-B evidence-acceptance commit
+(`be59ca97fe72ec8fe44b37495b9f13f849a2bcba`, CI run `30075578177`) failed
+2 of 1850 non-GPU tests. Both failures were pre-existing tests that
+hard-asserted the real production authorization-claims directory and
+qualification-artifact path must never exist in the repository -- an
+assumption directly falsified by that same commit's explicit, required
+persistence of the audited consumed claim and qualification artifact to
+those exact paths. This is a test-environment/test-assumption defect
+exposed by an intended, authorized state change, not a production defect.
+
+- `test_no_production_claims_directory_touched_by_dry_run`
+  (`tests/unit/discovery/test_b2a_r3_authorization.py`): kept the real
+  invariant (`before == after` existence equality -- dry-run planning
+  must not touch the directory) and removed the now-false
+  `assert after is False` over-assertion.
+- `test_no_production_files_written`
+  (`tests/unit/discovery/test_b2a_r3_qualification_coordinator.py`):
+  replaced flat non-existence with a before/after snapshot of existence
+  and byte content, asserting the coordinator neither creates, deletes,
+  nor modifies whatever is (or is not) already at
+  `QUALIFICATION_ARTIFACT_PATH` -- strictly stronger than the assertion
+  it replaces.
+- No file under `src/`, `configs/`, `third_party/R-KV/`, or `results/`
+  changed; no evidence, claim, or qualification-artifact content changed.
+  Full non-GPU suite locally: 1850 passed, 14 deselected, 0 failed.
+
+Full detail:
+`docs/B2A_R3_STAGE_B_EVIDENCE_ACCEPTANCE_TEST_ASSUMPTION_REPAIR_2026-07-24.md`.
+
+```text
+B2A-R3 STAGE-B EVIDENCE-ACCEPTANCE TEST-ASSUMPTION REPAIR COMPLETE —
+LOCAL VALIDATION GREEN; PUSHED FOR EXACT-SHA CI;
+STAGE C REMAINS BLOCKED
+```
+
 ## 2026-07-24 - B2A-R3 Stage-B qualification evidence acceptance (PERSISTENCE ONLY; STAGE C BLOCKED)
 
 Persists the audited, independently-verified B2A-R3 Stage-B FullKV

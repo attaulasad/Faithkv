@@ -381,7 +381,17 @@ def test_post_worker_check_relabels_stop_reason_on_last_candidate(tmp_path):
 
 
 def test_no_production_files_written(tmp_path):
+    """The coordinator is a pure in-memory computation -- it must never
+    write to the real production qualification-artifact path, whether or
+    not that path is already populated by separately-committed, accepted
+    evidence (e.g. after a Stage-B evidence-acceptance commit). Compare
+    before/after content rather than asserting non-existence, since the
+    real path may legitimately hold committed evidence outside this test."""
     from kvcot.discovery.b2a_r3_contract import QUALIFICATION_ARTIFACT_PATH
+
+    path = Path(QUALIFICATION_ARTIFACT_PATH)
+    before_exists = path.exists()
+    before_bytes = path.read_bytes() if before_exists else None
 
     _payload, context, _document, candidate_manifest, _git_state = _verified_stage_b(tmp_path)
     run_b2a_r3_qualification_coordinator(
@@ -389,7 +399,11 @@ def test_no_production_files_written(tmp_path):
         consumed_authorization_context=context, fullkv_worker_runner=_runner(),
         clock=_FakeClock(), per_candidate_timeout_seconds=PER_CANDIDATE_WORKER_TIMEOUT_SECONDS,
     )
-    assert not Path(QUALIFICATION_ARTIFACT_PATH).exists()
+
+    after_exists = path.exists()
+    after_bytes = path.read_bytes() if after_exists else None
+    assert after_exists == before_exists, "coordinator must not create or delete the production qualification artifact"
+    assert after_bytes == before_bytes, "coordinator must not modify a pre-existing production qualification artifact"
 
 
 def test_wrong_per_candidate_timeout_refused(tmp_path):
