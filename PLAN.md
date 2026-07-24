@@ -1,6 +1,50 @@
 # Plan and status
 
-## Current status: B2A-R3 GPU-host-neutral Stage-B preflight test repair authorized (2026-07-24)
+## Current status: B2A-R3 Stage-B qualification evidence accepted (2026-07-24)
+
+The audited, independently-verified B2A-R3 Stage-B FullKV qualification
+evidence produced under authorization ID `stage-b-2026-07-24-r2-final`
+(audited code SHA `4117baea139f745ceeff85039258445639e85049`, execution
+SHA `16d01ebe5c0659330bd78ccff96b9e64aea787ac`) is now committed to git
+history. This is a persistence step only: no R-KV execution, no Stage C,
+and no production selected-row freezer execution occurred or is
+authorized here.
+
+```text
+B2A-R3 STAGE-B EVIDENCE ACCEPTANCE COMPLETE —
+ACCEPTED CLAIM AND QUALIFICATION ARTIFACT COMMITTED;
+EXACT-SHA CI GREEN;
+
+READY FOR FREEZER IMPLEMENTATION AUTHORIZATION;
+STAGE C REMAINS BLOCKED
+```
+
+- Committed exactly: the consumed claim
+  (`results/decisions/b2a_r3_authorization_claims/stage-b-2026-07-24-r2-final.json`),
+  the qualification artifact
+  (`results/decisions/b2a_r3_qualification.json`), and the new acceptance
+  document `docs/evidence/B2A_R3_STAGE_B_QUALIFICATION_ACCEPTANCE_2026-07-24.md`.
+- Selected row: `test/number_theory/631.json` (candidate ordinal 1,
+  answer `36`, 7 eligible compaction events, projected B2B runtime
+  ~2.7949 GPU-hours). Both artifacts' canonical hashes
+  (`68d055876a...af975` claim, `4349edc97a...ff02ff1d` qualification)
+  independently re-verify via the repository's own schema and hash
+  helpers, matching the accepted independent audit exactly.
+- The production selected manifest
+  (`configs/discovery/b2a_one_example_manifest.json`) still contains the
+  historical row (`test/number_theory/820.json`); no
+  `results/decisions/b2a_r3_selection_provenance.json` exists.
+
+Next action:
+
+```text
+A fresh session authorizes and implements the CPU-only production
+selected-row freezer (Phase 2 of the B2A-R3 remaining workflow) against
+this accepted evidence, without executing it or changing the production
+selected manifest. Stage C remains blocked throughout.
+```
+
+## Prior status: B2A-R3 GPU-host-neutral Stage-B preflight test repair authorized (2026-07-24)
 
 A Stage-B FullKV qualification preflight attempt on a rented Vast.ai RTX
 3090 host, against the `stage-b-2026-07-23-final` authorization

@@ -1,5 +1,65 @@
 # Changelog
 
+## 2026-07-24 - B2A-R3 Stage-B qualification evidence acceptance (PERSISTENCE ONLY; STAGE C BLOCKED)
+
+Persists the audited, independently-verified B2A-R3 Stage-B FullKV
+qualification evidence produced under authorization ID
+`stage-b-2026-07-24-r2-final` (audited code SHA
+`4117baea139f745ceeff85039258445639e85049`, execution SHA
+`16d01ebe5c0659330bd78ccff96b9e64aea787ac`). No R-KV execution, no Stage
+C, and no production selected-row freezer execution occurred or is
+authorized by this entry.
+
+- Committed the consumed authorization claim
+  (`results/decisions/b2a_r3_authorization_claims/stage-b-2026-07-24-r2-final.json`,
+  canonical SHA-256
+  `68d055876a2260b179681fb276b79c37b6d1f987ae1899658fc969fcd05af975`) and
+  the qualification artifact
+  (`results/decisions/b2a_r3_qualification.json`, canonical SHA-256
+  `4349edc97a273819d4f5a3e75812af80437971f584071b66b25c858ffa02ff1d`),
+  both previously produced and independently audited but not yet in git
+  history.
+- Both artifacts re-verify clean against the repository's own Pydantic
+  schemas and canonical-hash helpers:
+  `kvcot verify-b2a-r3-candidates` and
+  `kvcot verify-b2a-r3-qualification --artifact
+  results/decisions/b2a_r3_qualification.json` both PASS; the claim and
+  qualification artifact `canonical_sha256` fields both independently
+  re-verify via `verify_canonical_sha256`.
+- Selected row: `test/number_theory/631.json` (candidate ordinal 1,
+  extracted answer `36`, 7 eligible compaction events, projected B2B
+  runtime ~2.7949 GPU-hours), matching the accepted independent audit
+  exactly.
+- Evidence archive
+  (`/workspace/faithkv-stage-b-2026-07-24-r2-final-evidence.tar.gz`,
+  SHA-256
+  `ba3acfdb04087d540936f71abaf00c0a5ea17a03326bf503c26964af87af5c55`) and
+  independent audit report
+  (`/workspace/faithkv-stage-b-2026-07-24-r2-final-independent-audit.md`)
+  both re-verify with `sha256sum -c` against their `.sha256` sidecars.
+  CI run `30072509903` ("Authorize repaired B2A-R3 Stage-B qualification")
+  is green at head SHA `16d01ebe5c0659330bd78ccff96b9e64aea787ac`.
+- Full identity/hash binding recorded in
+  `docs/evidence/B2A_R3_STAGE_B_QUALIFICATION_ACCEPTANCE_2026-07-24.md`,
+  including the mandatory correction that `claimed_at_utc` is the
+  external claim payload timestamp, not the canonical atomic-consumption
+  timestamp (no protocol field represents that instant).
+- The production selected manifest
+  (`configs/discovery/b2a_one_example_manifest.json`) still contains the
+  historical row (`test/number_theory/820.json`); no
+  `results/decisions/b2a_r3_selection_provenance.json` exists. The
+  production selected-row freezer has not been implemented against this
+  accepted evidence.
+
+```text
+B2A-R3 STAGE-B EVIDENCE ACCEPTANCE COMPLETE —
+ACCEPTED CLAIM AND QUALIFICATION ARTIFACT COMMITTED;
+EXACT-SHA CI GREEN;
+
+READY FOR FREEZER IMPLEMENTATION AUTHORIZATION;
+STAGE C REMAINS BLOCKED
+```
+
 ## 2026-07-24 - B2A-R3 GPU-host-neutral Stage-B preflight test repair (CPU TESTS ONLY; STAGE B BLOCKED)
 
 A Stage-B FullKV qualification preflight attempt on a rented Vast.ai RTX

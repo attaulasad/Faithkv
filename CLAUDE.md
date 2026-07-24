@@ -650,6 +650,51 @@ NEW STAGE-B AUTHORIZATION
   of that exact SHA, before any new, separate, dated Stage-B authorization
   may be produced against a newly audited code commit.
 
+### Section 1n -- B2A-R3 Stage-B qualification evidence acceptance (dated 2026-07-24)
+
+Added by
+`docs/evidence/B2A_R3_STAGE_B_QUALIFICATION_ACCEPTANCE_2026-07-24.md`,
+superseding nothing above. This records persistence-only acceptance of the
+audited, independently-verified B2A-R3 Stage-B FullKV qualification
+evidence produced under authorization ID `stage-b-2026-07-24-r2-final`
+(audited code SHA `4117baea139f745ceeff85039258445639e85049`, execution
+SHA `16d01ebe5c0659330bd78ccff96b9e64aea787ac`).
+
+```text
+B2A-R3 STAGE-B EVIDENCE ACCEPTANCE COMPLETE — PERSISTENCE ONLY
+
+ACCEPTED:
+CONSUMED CLAIM (canonical_sha256 68d055876a2260b179681fb276b79c37b6d1f987ae1899658fc969fcd05af975)
+QUALIFICATION ARTIFACT (canonical_sha256 4349edc97a273819d4f5a3e75812af80437971f584071b66b25c858ffa02ff1d)
+
+SELECTED ROW:
+test/number_theory/631.json (ordinal 1, answer 36, 7 eligible compaction events,
+projected B2B runtime ~2.7949 GPU-hours)
+
+PROHIBITED:
+STAGE C
+R-KV EXECUTION
+PRODUCTION SELECTED-ROW FREEZER EXECUTION
+CHANGES TO THE SELECTED MANIFEST OR SELECTION PROVENANCE
+```
+
+- Both artifacts pass `kvcot verify-b2a-r3-candidates` and
+  `kvcot verify-b2a-r3-qualification`, and both `canonical_sha256` fields
+  independently re-verify via `verify_canonical_sha256` against the exact
+  values recorded in the accepted independent audit.
+- `claimed_at_utc` on the consumed claim is the external claim payload
+  timestamp only, **not** the canonical atomic-consumption timestamp — no
+  protocol field represents the exact atomic-consumption instant;
+  filesystem timestamps remain auxiliary evidence only.
+- The production selected manifest
+  (`configs/discovery/b2a_one_example_manifest.json`) still contains the
+  historical row (`test/number_theory/820.json`); no
+  `results/decisions/b2a_r3_selection_provenance.json` exists. Neither is
+  created, modified, or authorized by this acceptance.
+- Full identity, hash, and CI binding recorded in
+  `docs/evidence/B2A_R3_STAGE_B_QUALIFICATION_ACCEPTANCE_2026-07-24.md`.
+  Stage C remains blocked.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.
