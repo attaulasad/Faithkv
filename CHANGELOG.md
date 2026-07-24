@@ -1,5 +1,44 @@
 # Changelog
 
+## 2026-07-24 - B2A-R3 production freezer implementation: shallow-checkout CI test repair (TEST FILE ONLY; FREEZER NOT EXECUTED)
+
+Exact-SHA CI on the freezer implementation commit (`648b1068cc85c6b2ccef0282da78a6529d21286d`)
+failed 3 of 1886 non-GPU tests, all inside `tests/unit/test_cli_b2a_r3.py`:
+`test_freeze_dry_run_still_reports_no_write_or_tokenizer_action`,
+`test_freeze_dry_run_against_real_committed_artifact_never_imports_forbidden_modules`,
+and `test_real_committed_evidence_selects_ordinal_1_row_631_and_dry_run_would_freeze`.
+All three were the first tests in this repository to invoke
+`kvcot freeze-b2a-r3-selected-row --dry-run` end-to-end against the real
+committed evidence via `main(...)` -- which replays the committed Stage-B
+authorization claim and requires `authorized_code_commit_sha` (an ancestor
+commit, not the tip) to exist in the local git object database. On a full
+clone (verified locally) it always does; on GitHub Actions'
+`actions/checkout@v4` default (`fetch-depth: 1`, unchanged here --
+`.github` is out of scope for this phase) it does not, so
+`verify_persisted_stage_b_authorization_binding` correctly, but
+inconveniently, refuses with "persisted Stage-B authorized code commit
+does not exist."
+
+This is a pre-existing CI-environment property the three new tests simply
+exposed for the first time, not a defect in the freezer implementation
+(the exact same call already existed, unchanged, in
+`cmd_freeze_b2a_r3_selected_row`'s dry-run path before this phase).
+Repaired by adding `_skip_unless_full_git_history_available()` to
+`tests/unit/test_cli_b2a_r3.py`, which probes
+`git cat-file -e <authorized_code_commit_sha>^{commit}` and skips cleanly
+when it is absent -- verified against both a full local clone (all three
+tests pass, no skip) and a genuinely shallow `git clone --depth 1`
+reproduction (all three skip cleanly with a clear reason). Test file only;
+no change under `src/`, `configs/`, `third_party/R-KV/`, `.github/`, or
+`results/`. Full non-GPU suite: 1889 passed / 14 deselected / 0 failed
+locally.
+
+```text
+B2A-R3 PRODUCTION FREEZER SHALLOW-CHECKOUT CI TEST REPAIR COMPLETE —
+LOCAL VALIDATION GREEN; PUSHED FOR EXACT-SHA CI;
+FREEZER EXECUTION NOT PERFORMED; STAGE C REMAINS BLOCKED
+```
+
 ## 2026-07-24 - B2A-R3 production selected-row freezer implementation (CPU TESTS GREEN; FREEZER NOT EXECUTED)
 
 Implements the production B2A-R3 selected-row freezer within the scope the
