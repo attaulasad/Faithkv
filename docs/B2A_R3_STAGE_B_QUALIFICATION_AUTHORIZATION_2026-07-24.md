@@ -1,0 +1,71 @@
+# B2A-R3 Stage-B Qualification Authorization (dated 2026-07-24)
+
+This document authorizes exactly one B2A-R3 Stage-B FullKV qualification
+claim at the clean execution commit that contains this document.
+
+Authority is limited to the committed B2A-R3 Stage-B FullKV qualification
+path. This document does not authorize Stage-C B2A-R3 execution, B2B
+execution, any R-KV worker execution, CUDA activity outside the Stage-B
+FullKV qualification path, any model/config/dataset/manifest change, any
+claim JSON committed into the repository, or any FaithKV method
+implementation.
+
+The independently audited CPU implementation commit is:
+
+```text
+4117baea139f745ceeff85039258445639e85049
+```
+
+The authorization verifier must reject use unless the current clean `HEAD`
+is the later execution commit that contains this exact document, the audited
+code commit above is its ancestor, and the diff from that code commit to
+the execution commit contains only this file.
+
+The phase-wide Stage-B wall-time limit is frozen as 12,960 seconds. This is
+the B2A-R3 qualification target of 3.60 hours expressed in seconds; it is
+not the 57,600-second arithmetic envelope of eight per-candidate worker
+timeouts.
+
+Additional frozen Stage-B bindings:
+
+- Per-candidate worker timeout: 7,200 seconds.
+- Hardware: exactly one RTX 3090.
+- VRAM ceiling: peak tracked CUDA memory must be at most 22 GiB
+  (`22 * 1024**3` bytes), measured as the maximum of allocated and
+  reserved bytes.
+- Projected B2B qualification threshold: at most 3.60 GPU-hours.
+- Model: `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` at revision
+  `6a6f4aa4197940add57724a7707d069478df56b1`.
+- Tokenizer: `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` at revision
+  `6a6f4aa4197940add57724a7707d069478df56b1`.
+- Dataset: `HuggingFaceH4/MATH-500`, config `default`, split `test`, at
+  revision `6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be`.
+- Lifecycle: this document authorizes one Stage-B authorization claim
+  lifecycle only. The external claim input must remain outside the
+  repository until the Stage-B runner exclusively creates
+  `results/decisions/b2a_r3_authorization_claims/stage-b-2026-07-24-r2-final.json`;
+  that exclusive creation is the irreversible consumption event.
+- The superseded authorization ID `stage-b-2026-07-23-final` is not
+  authorized by this document and must never be executed.
+
+<!-- BEGIN B2A-R3 AUTHORIZATION JSON -->
+```json
+{
+  "authorization_document_schema_version": "faithkv-b2a-r3-stage-authorization-document-v2",
+  "authorization_id": "stage-b-2026-07-24-r2-final",
+  "authorization_stage": "fullkv_qualification",
+  "authorized_repository": "asad073-ui/Faithkv",
+  "authorized_branch": "research/b2a-r3-runtime-qualified-calibration",
+  "authorized_code_commit_sha": "4117baea139f745ceeff85039258445639e85049",
+  "required_ancestor_shas": [],
+  "required_rkv_sha": "45eaa7d69d20b7388321f077020a610d9afb65bd",
+  "candidate_manifest_canonical_sha256": "b8148647698ca5ab5335ea28dc1416109b26f73dd05b87eed2fe9eca4b25ff42",
+  "maximum_candidates": 8,
+  "phase_wall_time_limit_seconds": 12960,
+  "qualification_artifact_canonical_sha256": null,
+  "selected_manifest_sha256": null,
+  "selected_manifest_hash_algorithm": null,
+  "created_at_utc": "2026-07-24T06:30:05+00:00"
+}
+```
+<!-- END B2A-R3 AUTHORIZATION JSON -->
