@@ -1,6 +1,30 @@
 # Plan and status
 
-## Current status: B2A-R3 production selected-row freezer implementation authorized (2026-07-24)
+## Current status: B2A-R3 production selected-row freezer implemented; CPU tests green; freezer not executed (2026-07-24)
+
+The implementation authorized below is complete: a production tokenizer
+renderer, fixed-path freeze-plan construction, a guarded two-output
+publication state machine (States A-E), production CLI `--execute`
+wiring, Git/worktree safety guards, and CPU tests (50 new tests in
+`tests/unit/discovery/test_b2a_r3_freeze.py`, more in
+`tests/unit/test_cli_b2a_r3.py`) — see
+`docs/B2A_R3_PRODUCTION_SELECTED_ROW_FREEZER_IMPLEMENTATION_2026-07-24.md`.
+
+`--execute` was **not** invoked against the real repository. The
+production selected manifest still contains `test/number_theory/820.json`;
+`results/decisions/b2a_r3_selection_provenance.json` does not exist; Stage
+C, FullKV, R-KV, and B2B remain fully blocked.
+
+Next action:
+
+```text
+A fresh, independent session must audit the exact implementation SHA.
+Only after that audit passes may a separate task run
+`kvcot freeze-b2a-r3-selected-row --execute`. Stage C remains blocked
+throughout.
+```
+
+## Prior status: B2A-R3 production selected-row freezer implementation authorized (2026-07-24)
 
 The test-assumption repair (`be59ca9` -> repair commit) reached green
 exact-SHA CI, closing Phase 1 of the B2A-R3 remaining workflow. This

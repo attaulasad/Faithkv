@@ -1,5 +1,68 @@
 # Changelog
 
+## 2026-07-24 - B2A-R3 production selected-row freezer implementation (CPU TESTS GREEN; FREEZER NOT EXECUTED)
+
+Implements the production B2A-R3 selected-row freezer within the scope the
+same-day implementation authorization granted, against the accepted
+Stage-B evidence (selected candidate ordinal 1,
+`test/number_theory/631.json`).
+
+- New module `src/kvcot/discovery/b2a_r3_production_tokenizer.py`: the one
+  place a real tokenizer is loaded, kept out of `b2a_r3_freeze.py` because
+  that module's own AST-level import-safety test forbids
+  `transformers`/`torch` anywhere in its source. Exact local snapshot
+  resolution only (`resolve_local_snapshot`, `local_files_only=True`, no
+  network fallback), reuses the existing frozen prompt-rendering
+  convention (`render_with_loaded_tokenizer`) rather than inventing a
+  second one.
+- `src/kvcot/discovery/b2a_r3_freeze.py` gains
+  `construct_production_freeze_plan` (nine-step in-memory plan
+  construction, no filesystem write before all steps pass),
+  `classify_publication_state`/`publish_production_freeze` (States A-E: A
+  publishes both outputs in order, B is an idempotent no-op, C/D each
+  recover the single missing output, E refuses without touching either
+  target), and `verify_git_worktree_safety_for_freeze` (rejects any
+  worktree difference outside the two fixed output paths). Provenance
+  publication is genuinely no-clobber (`os.link`, never `os.replace`);
+  historical-manifest replacement verifies live bytes match the expected
+  committed historical bytes before an atomic `os.replace`.
+- A real bug was found and fixed during implementation: the historical
+  manifest bytes were first read from whatever was currently on disk,
+  which silently drifted to the wrong value once a freeze had already run
+  once (misclassifying State D as State A on rebuild). Fixed to always
+  read the historical bytes from git history at the current commit.
+- `src/kvcot/cli.py`: `kvcot freeze-b2a-r3-selected-row` now requires
+  exactly one of `--dry-run`/`--execute`; `--execute` uses fixed
+  production paths only (no `--candidates`/`--artifact`/`--config`
+  override accepted, even if the value would equal the fixed path; no
+  `--output`/`--force`-shaped flag exists).
+- 50 new tests in `tests/unit/discovery/test_b2a_r3_freeze.py` (plan
+  construction, all five publication states, atomic/no-clobber write unit
+  tests, a synchronous-failure-leaves-targets-unchanged test, Git/worktree
+  safety, evidence-chain tamper rejections, tokenizer-boundary tests that
+  skip cleanly when the local snapshot is not cached) and new tests in
+  `tests/unit/test_cli_b2a_r3.py` (mode exclusivity, alternate-path
+  rejection, delegation, and a read-only integration test against the real
+  committed evidence confirming ordinal 1 /
+  `test/number_theory/631.json` / `would_freeze=True` with no production
+  writes).
+- `--execute` was **not** invoked against the real repository at any point
+  during this implementation round. The production selected manifest
+  still contains `test/number_theory/820.json`; no
+  `results/decisions/b2a_r3_selection_provenance.json` exists.
+
+Full detail:
+`docs/B2A_R3_PRODUCTION_SELECTED_ROW_FREEZER_IMPLEMENTATION_2026-07-24.md`.
+
+```text
+B2A-R3 PRODUCTION SELECTED-ROW FREEZER IMPLEMENTATION COMPLETE —
+CPU TESTS GREEN;
+FREEZER EXECUTION NOT PERFORMED;
+SELECTED MANIFEST UNCHANGED;
+SELECTION PROVENANCE ABSENT;
+STAGE C REMAINS BLOCKED
+```
+
 ## 2026-07-24 - B2A-R3 production selected-row freezer implementation authorization (AUTHORIZATION ONLY; FREEZER NOT EXECUTED)
 
 Authorizes CPU-only implementation of the production B2A-R3 selected-row

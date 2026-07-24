@@ -740,6 +740,36 @@ MODEL LOADING / CUDA PROHIBITED
   change.
 - Full binding and scope detail: see the authorization document above.
 
+### Section 1q -- B2A-R3 production selected-row freezer implementation (dated 2026-07-24)
+
+Added by
+`docs/B2A_R3_PRODUCTION_SELECTED_ROW_FREEZER_IMPLEMENTATION_2026-07-24.md`,
+implementing exactly the scope §1p authorized: a production tokenizer
+renderer (`kvcot.discovery.b2a_r3_production_tokenizer`, exact local
+snapshot resolution, the existing frozen prompt-rendering convention,
+never a second one), fixed-path freeze-plan construction, a guarded
+two-output publication state machine (States A-E) with no-clobber
+provenance publication, production CLI `--execute` wiring with no
+alternate-path or output-override flags, Git/worktree safety guards, and
+CPU tests.
+
+```text
+B2A-R3 PRODUCTION SELECTED-ROW FREEZER IMPLEMENTATION COMPLETE --
+CPU-ONLY, CPU TESTS GREEN
+
+FREEZER EXECUTION NOT PERFORMED
+SELECTED MANIFEST UNCHANGED (test/number_theory/820.json)
+SELECTION PROVENANCE ABSENT
+STAGE C REMAINS BLOCKED
+```
+
+- `--execute` was not invoked against the real repository by this
+  implementation round -- see the implementation document for the full
+  ledger.
+- The next required action is an independent audit of the exact
+  implementation SHA before any separate task may run
+  `kvcot freeze-b2a-r3-selected-row --execute`.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

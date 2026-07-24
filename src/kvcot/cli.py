@@ -2923,8 +2923,21 @@ def cmd_freeze_b2a_r3_selected_row(args: argparse.Namespace) -> int:
     from kvcot.discovery.b2a_r3_freeze import plan_freeze_dry_run
     from kvcot.discovery.b2a_r3_provenance import SubprocessGitStateProvider
 
-    if not args.dry_run:
-        raise SystemExit("freeze-b2a-r3-selected-row only supports --dry-run -- no production freezer is exposed.")
+    if args.dry_run and args.execute:
+        raise SystemExit("freeze-b2a-r3-selected-row: pass exactly one of --dry-run or --execute, not both.")
+    if not args.dry_run and not args.execute:
+        raise SystemExit("freeze-b2a-r3-selected-row: pass exactly one of --dry-run or --execute.")
+
+    if args.execute:
+        # Execute mode uses fixed production paths only -- no caller-selected
+        # candidate/artifact/config path is ever accepted, even if it would
+        # happen to equal the fixed path.
+        if args.candidates or args.artifact or args.config:
+            raise SystemExit(
+                "freeze-b2a-r3-selected-row --execute does not accept --candidates/--artifact/--config -- "
+                "it always uses the fixed production paths."
+            )
+        return _cmd_freeze_b2a_r3_selected_row_execute()
 
     candidates_path = args.candidates or c.CANDIDATE_MANIFEST_PATH
     artifact_path = args.artifact or c.QUALIFICATION_ARTIFACT_PATH
@@ -2954,6 +2967,42 @@ def cmd_freeze_b2a_r3_selected_row(args: argparse.Namespace) -> int:
     for key, value in plan.items():
         print(f"  {key} = {value}")
     return 0 if plan["would_freeze"] else 1
+
+
+def _cmd_freeze_b2a_r3_selected_row_execute() -> int:
+    """The one production execute path -- fixed paths only, exact local
+    tokenizer resolution, complete in-memory plan construction, guarded
+    publication, immediate reload, and complete provenance verification."""
+    from kvcot.discovery import b2a_r3_contract as c
+    from kvcot.discovery.b2a_r3_freeze import construct_production_freeze_plan, publish_production_freeze
+    from kvcot.discovery.b2a_r3_production_tokenizer import resolve_production_tokenizer_snapshot
+
+    snapshot = resolve_production_tokenizer_snapshot()
+
+    def _tokenizer_renderer(row):
+        from kvcot.discovery.b2a_r3_production_tokenizer import render_production_prompt
+
+        return render_production_prompt(row, snapshot=snapshot)
+
+    plan = construct_production_freeze_plan(
+        repository_root=".",
+        config_path=c.CONFIG_PATH,
+        tokenizer_renderer=_tokenizer_renderer,
+        tokenizer_repository=c.TOKENIZER_NAME,
+        tokenizer_requested_revision=c.TOKENIZER_REVISION,
+        tokenizer_resolved_revision=snapshot.resolved_revision,
+        tokenizer_local_path=snapshot.local_path,
+    )
+    result = publish_production_freeze(plan)
+
+    print("freeze-b2a-r3-selected-row --execute result:")
+    for key in (
+        "selected_unique_id", "selected_ordinal", "selected_manifest_path", "selected_manifest_sha256",
+        "selection_provenance_path", "selection_provenance_canonical_sha256", "tokenizer_snapshot_revision",
+        "publication_state_before", "publication_state_after", "already_frozen", "verification_passed",
+    ):
+        print(f"  {key} = {result[key]}")
+    return 0 if result["verification_passed"] else 1
 
 
 def cmd_verify_b2a_r3_selection(args: argparse.Namespace) -> int:
@@ -3226,12 +3275,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser(
         "freeze-b2a-r3-selected-row",
-        help="B2A-R3: CPU-only freeze planning (dry-run only -- Stage A never writes the real selected manifest).",
+        help=(
+            "B2A-R3: freeze planning (--dry-run, CPU-only, read-only overrides accepted) or production "
+            "publication (--execute, fixed production paths only, exact one required)."
+        ),
     )
     p.add_argument("--candidates", default=None)
     p.add_argument("--artifact", default=None)
     p.add_argument("--config", default=None)
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--execute", action="store_true")
     p.set_defaults(func=cmd_freeze_b2a_r3_selected_row)
 
     p = sub.add_parser("verify-b2a-r3-selection", help="B2A-R3: verify a selection-provenance artifact.")

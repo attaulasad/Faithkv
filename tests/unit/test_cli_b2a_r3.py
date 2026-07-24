@@ -79,6 +79,109 @@ def test_freeze_b2a_r3_selected_row_refuses_without_dry_run():
         main(["freeze-b2a-r3-selected-row"])
 
 
+def test_freeze_b2a_r3_selected_row_rejects_both_dry_run_and_execute():
+    with pytest.raises(SystemExit):
+        main(["freeze-b2a-r3-selected-row", "--dry-run", "--execute"])
+
+
+def test_freeze_b2a_r3_selected_row_rejects_neither_dry_run_nor_execute():
+    with pytest.raises(SystemExit):
+        main(["freeze-b2a-r3-selected-row"])
+
+
+@pytest.mark.parametrize("flag,value", [("--candidates", "some/other/path.json"),
+                                         ("--artifact", "some/other/path.json"),
+                                         ("--config", "some/other/path.yaml")])
+def test_freeze_execute_rejects_alternate_paths(flag, value):
+    with pytest.raises(SystemExit):
+        main(["freeze-b2a-r3-selected-row", "--execute", flag, value])
+
+
+def test_freeze_execute_rejects_alternate_candidate_path_even_if_it_equals_the_fixed_path():
+    from kvcot.discovery.b2a_r3_contract import CANDIDATE_MANIFEST_PATH as FIXED_PATH
+
+    with pytest.raises(SystemExit):
+        main(["freeze-b2a-r3-selected-row", "--execute", "--candidates", FIXED_PATH])
+
+
+def test_freeze_execute_has_no_output_path_override_flags():
+    parser = build_parser()
+    freeze_parser = None
+    for action in parser._subparsers._group_actions:  # noqa: SLF001
+        freeze_parser = action.choices.get("freeze-b2a-r3-selected-row")
+        break
+    assert freeze_parser is not None
+    option_strings = {opt for action in freeze_parser._actions for opt in action.option_strings}  # noqa: SLF001
+    assert "--output" not in option_strings
+    assert "--manifest-output" not in option_strings
+    assert "--provenance-output" not in option_strings
+    assert "--force" not in option_strings
+
+
+def test_freeze_execute_delegates_to_production_function_and_prints_output(capsys, monkeypatch):
+    import kvcot.discovery.b2a_r3_freeze as freeze_module
+    import kvcot.discovery.b2a_r3_production_tokenizer as tokenizer_module
+
+    class _FakeSnapshot:
+        resolved_revision = "6a6f4aa4197940add57724a7707d069478df56b1"
+        local_path = "/fake/local/path"
+
+    fake_result = {
+        "selected_unique_id": "test/number_theory/631.json",
+        "selected_ordinal": 1,
+        "selected_manifest_path": "configs/discovery/b2a_one_example_manifest.json",
+        "selected_manifest_sha256": "a" * 64,
+        "selection_provenance_path": "results/decisions/b2a_r3_selection_provenance.json",
+        "selection_provenance_canonical_sha256": "b" * 64,
+        "tokenizer_snapshot_revision": "6a6f4aa4197940add57724a7707d069478df56b1",
+        "publication_state_before": "state_a_initial",
+        "publication_state_after": "state_b_complete",
+        "already_frozen": False,
+        "verification_passed": True,
+    }
+
+    monkeypatch.setattr(tokenizer_module, "resolve_production_tokenizer_snapshot", lambda **_kw: _FakeSnapshot())
+    monkeypatch.setattr(freeze_module, "construct_production_freeze_plan", lambda **_kw: object())
+    monkeypatch.setattr(freeze_module, "publish_production_freeze", lambda _plan: fake_result)
+
+    rc = main(["freeze-b2a-r3-selected-row", "--execute"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    for key, value in fake_result.items():
+        assert f"{key} = {value}" in out
+
+
+def test_freeze_execute_returns_nonzero_when_verification_fails(monkeypatch):
+    import kvcot.discovery.b2a_r3_freeze as freeze_module
+    import kvcot.discovery.b2a_r3_production_tokenizer as tokenizer_module
+
+    class _FakeSnapshot:
+        resolved_revision = "x"
+        local_path = "/fake"
+
+    fake_result = {
+        "selected_unique_id": "row", "selected_ordinal": 1,
+        "selected_manifest_path": "p1", "selected_manifest_sha256": "a" * 64,
+        "selection_provenance_path": "p2", "selection_provenance_canonical_sha256": "b" * 64,
+        "tokenizer_snapshot_revision": "x", "publication_state_before": "state_e_invalid",
+        "publication_state_after": "state_e_invalid", "already_frozen": False, "verification_passed": False,
+    }
+    monkeypatch.setattr(tokenizer_module, "resolve_production_tokenizer_snapshot", lambda **_kw: _FakeSnapshot())
+    monkeypatch.setattr(freeze_module, "construct_production_freeze_plan", lambda **_kw: object())
+    monkeypatch.setattr(freeze_module, "publish_production_freeze", lambda _plan: fake_result)
+
+    rc = main(["freeze-b2a-r3-selected-row", "--execute"])
+    assert rc != 0
+
+
+def test_freeze_dry_run_still_reports_no_write_or_tokenizer_action(capsys):
+    rc = main(["freeze-b2a-r3-selected-row", "--dry-run"])
+    out = capsys.readouterr().out
+    assert "would_load_tokenizer_for_execution = False" in out
+    assert "would_write_selected_manifest = False" in out
+    assert "would_write_selection_provenance = False" in out
+
+
 def test_verify_b2a_r3_authorization_end_to_end(tmp_path, capsys, monkeypatch):
     from kvcot.discovery.b2a_r3_contract import (
         AUTHORIZATION_CLAIM_ARTIFACT_SCHEMA_VERSION,
@@ -192,6 +295,7 @@ _FORBIDDEN_SUBMODULES = (
     "kvcot.discovery.schemas",
     "kvcot.discovery.scientific_summary",
     "kvcot.generation.policies",
+    "kvcot.discovery.b2a_r3_production_tokenizer",
 )
 
 class _Guard:
@@ -250,6 +354,59 @@ def test_freeze_dry_run_never_imports_forbidden_modules(tmp_path):
     )
     assert "FORBIDDEN_IMPORT" not in result.stdout
     assert "FORBIDDEN_IMPORT" not in result.stderr
+
+
+def test_freeze_dry_run_against_real_committed_artifact_never_imports_forbidden_modules():
+    """Same import-safety guarantee, but against the REAL committed
+    candidate/qualification artifacts (would_freeze=True) -- proves the
+    dry-run path never imports torch/transformers/the production tokenizer
+    module even on the happy path, not only when it fails closed on a
+    missing file."""
+    result = _run_guarded(["freeze-b2a-r3-selected-row", "--dry-run"])
+    assert "FORBIDDEN_IMPORT" not in result.stdout
+    assert "FORBIDDEN_IMPORT" not in result.stderr
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    assert "would_freeze = True" in result.stdout
+
+
+# --------------------------------------------------------------------- real-artifact read-only integration
+
+
+def test_real_committed_evidence_selects_ordinal_1_row_631_and_dry_run_would_freeze(capsys):
+    """Read-only integration test against the actual committed
+    `configs/discovery/b2a_r3_candidate_manifest.json` and
+    `results/decisions/b2a_r3_qualification.json` -- confirms the accepted
+    Stage-B evidence still selects candidate ordinal 1
+    (`test/number_theory/631.json`), that `--dry-run` reports
+    `would_freeze=True`, and that neither a tokenizer is loaded nor any
+    production path is written by this test."""
+    import os
+
+    from kvcot.discovery.b2a_r3_contract import QUALIFICATION_ARTIFACT_PATH, SELECTED_MANIFEST_PATH
+
+    with open(QUALIFICATION_ARTIFACT_PATH, "r", encoding="utf-8") as f:
+        qualification_artifact = json.load(f)
+    assert qualification_artifact["selection_status"] == "selected"
+    assert qualification_artifact["first_passing_candidate_ordinal"] == 1
+    assert qualification_artifact["selected_unique_id"] == "test/number_theory/631.json"
+
+    manifest_before = Path(SELECTED_MANIFEST_PATH).read_bytes()
+    provenance_exists_before = os.path.exists("results/decisions/b2a_r3_selection_provenance.json")
+
+    rc = main(["freeze-b2a-r3-selected-row", "--dry-run"])
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    assert "would_freeze = True" in out
+    assert "selected_ordinal = 1" in out
+    assert "selected_unique_id = test/number_theory/631.json" in out
+    assert "would_load_tokenizer_for_execution = False" in out
+    assert "would_write_selected_manifest = False" in out
+    assert "would_write_selection_provenance = False" in out
+
+    # No production writes occurred as a side effect of this test.
+    assert Path(SELECTED_MANIFEST_PATH).read_bytes() == manifest_before
+    assert os.path.exists("results/decisions/b2a_r3_selection_provenance.json") == provenance_exists_before
 
 
 # --------------------------------------------------------------------- source scan

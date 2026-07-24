@@ -21,6 +21,11 @@ never load `transformers`.
 """
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import tempfile
+from dataclasses import dataclass, replace as _dataclass_replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -36,16 +41,18 @@ from kvcot.discovery.b2a_r3_contract import (
     SELECTED_MANIFEST_PATH,
     SELECTION_PROTOCOL_VERSION,
     SELECTION_PROVENANCE_ARTIFACT_SCHEMA_VERSION,
+    SELECTION_PROVENANCE_PATH,
     PROMPT_ADD_GENERATION,
     PROMPT_MESSAGE_ROLES,
     PROMPT_SPECIAL_TOKENS_NOTE,
     PROMPT_TOKENIZE,
+    REQUIRED_REPOSITORY,
     compute_canonical_sha256,
     require_lowercase_hex64,
     verify_canonical_sha256,
 )
 from kvcot.discovery.manifest import B2AOneExampleManifest, ChatTemplateRenderingConfig
-from kvcot.utils.hashing import sha256_int_ids, sha256_json
+from kvcot.utils.hashing import sha256_bytes, sha256_int_ids, sha256_json
 
 __all__ = [
     "RowFreezeRefusedR3",
@@ -57,6 +64,17 @@ __all__ = [
     "write_selected_manifest_and_provenance",
     "verify_selection_provenance",
     "plan_freeze_dry_run",
+    "ProductionPublicationRefused",
+    "PUBLICATION_STATE_A_INITIAL",
+    "PUBLICATION_STATE_B_COMPLETE",
+    "PUBLICATION_STATE_C_PROVENANCE_FIRST_PARTIAL",
+    "PUBLICATION_STATE_D_MANIFEST_FIRST_PARTIAL",
+    "PUBLICATION_STATE_E_INVALID",
+    "ProductionFreezePlan",
+    "construct_production_freeze_plan",
+    "classify_publication_state",
+    "verify_git_worktree_safety_for_freeze",
+    "publish_production_freeze",
 ]
 
 
@@ -445,4 +463,425 @@ def plan_freeze_dry_run(
         "would_load_tokenizer_for_execution": False,
         "would_write_selected_manifest": False,
         "would_write_selection_provenance": False,
+    }
+
+
+# ==========================================================================
+# Phase 2 (freezer implementation authorization, dated 2026-07-24):
+# production freeze-plan construction and the guarded publication state
+# machine. Everything above this line is unchanged Stage-A code (pure
+# construction, synthetic-only). Everything below writes to the real fixed
+# production paths, but ONLY from `publish_production_freeze`, and ONLY
+# after `construct_production_freeze_plan` has completed all nine
+# construction-order steps entirely in memory.
+# ==========================================================================
+
+
+class ProductionPublicationRefused(RuntimeError):
+    """Any hard refusal before, during, or after production publication --
+    an invalid/ambiguous live output state, a worktree/Git safety failure,
+    a byte mismatch at any verification point, or a post-publication
+    full-chain verification failure. Never deletes or overwrites a target
+    it cannot first prove is safe to touch."""
+
+
+PUBLICATION_STATE_A_INITIAL = "state_a_initial"
+PUBLICATION_STATE_B_COMPLETE = "state_b_complete"
+PUBLICATION_STATE_C_PROVENANCE_FIRST_PARTIAL = "state_c_provenance_first_partial"
+PUBLICATION_STATE_D_MANIFEST_FIRST_PARTIAL = "state_d_manifest_first_partial"
+PUBLICATION_STATE_E_INVALID = "state_e_invalid"
+
+_PLAN_CONSTRUCTION_TOKEN = object()
+
+
+def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
+    """The one serialization every production write in this module uses --
+    identical to `kvcot.discovery.b2a_r3_candidates.atomic_write_json`'s own
+    convention (fixed field order, `ensure_ascii=True`, trailing newline) so
+    a byte comparison against a freshly-serialized expected payload is
+    exact, never merely semantic."""
+    return (json.dumps(payload, indent=2, ensure_ascii=True) + "\n").encode("utf-8")
+
+
+@dataclass(frozen=True)
+class ProductionFreezePlan:
+    """Everything a real freeze publication needs, constructed and
+    internally verified entirely in memory before
+    `publish_production_freeze` is ever called (protocol: construction
+    order steps 1-9). Every field here is immutable evidence, never a
+    caller-supplied override."""
+
+    repository_root: str
+    current_git_sha: str
+    candidate_manifest_path: str
+    candidate_manifest_canonical_sha256: str
+    qualification_artifact_path: str
+    qualification_artifact_canonical_sha256: str
+    selected_manifest_path: str
+    selection_provenance_path: str
+    selected_ordinal: int
+    selected_unique_id: str
+    historical_selected_manifest_git_blob_sha: str
+    historical_selected_manifest_bytes_sha256: str
+    historical_selected_manifest_bytes: bytes
+    expected_new_manifest_bytes: bytes
+    expected_new_manifest_sha256: str
+    expected_provenance_bytes: bytes
+    expected_provenance_canonical_sha256: str
+    tokenizer_repository: str
+    tokenizer_requested_revision: str
+    tokenizer_resolved_revision: str
+    tokenizer_local_path: str
+    publication_state_before: str
+    candidate_manifest: dict[str, Any]
+    qualification_artifact: dict[str, Any]
+    expected_config_sha256: str
+    stage_b_authorization_context: Any
+    _construction_token: object
+
+
+def construct_production_freeze_plan(
+    *,
+    repository_root: str | Path = ".",
+    config_path: str,
+    tokenizer_renderer: TokenizerRenderer,
+    tokenizer_repository: str,
+    tokenizer_requested_revision: str,
+    tokenizer_resolved_revision: str,
+    tokenizer_local_path: str,
+) -> ProductionFreezePlan:
+    """Construction order (steps 1-9), entirely in memory, no filesystem
+    publication:
+
+    1. Verify persisted Stage-B authorization binding.
+    2. Verify candidate manifest.
+    3. Verify qualification artifact.
+    4. Replay selected-row chain.
+    5. Resolve exact local tokenizer (already done by the caller --
+       `tokenizer_repository`/`tokenizer_resolved_revision`/
+       `tokenizer_local_path` are the already-verified snapshot identity;
+       see `kvcot.discovery.b2a_r3_production_tokenizer`).
+    6. Render exact prompt (via the injected `tokenizer_renderer`, inside
+       step 7/8's call into `construct_selected_manifest_and_provenance`).
+    7. Construct selected manifest.
+    8. Construct provenance.
+    9. Verify the expected complete chain in memory
+       (`verify_selection_provenance`, called here against the freshly
+       constructed manifest/provenance -- BEFORE any write).
+    """
+    from kvcot.config import config_identity
+    from kvcot.discovery.b2a_r3_authorization import verify_persisted_stage_b_authorization_binding
+    from kvcot.discovery.b2a_r3_provenance import SubprocessGitStateProvider
+
+    repository_root = str(repository_root)
+    candidate_manifest_path = Path(repository_root) / CANDIDATE_MANIFEST_PATH
+    qualification_artifact_path = Path(repository_root) / QUALIFICATION_ARTIFACT_PATH
+    selected_manifest_path = Path(repository_root) / SELECTED_MANIFEST_PATH
+
+    with open(candidate_manifest_path, "r", encoding="utf-8") as f:
+        candidate_manifest = json.load(f)
+    with open(qualification_artifact_path, "r", encoding="utf-8") as f:
+        qualification_artifact = json.load(f)
+    expected_config_sha256 = config_identity(Path(repository_root) / config_path)
+
+    git_state = SubprocessGitStateProvider(repository_root)
+
+    # Step 1: verify persisted Stage-B authorization binding.
+    stage_b_binding = verify_persisted_stage_b_authorization_binding(
+        authorization_id=qualification_artifact["stage_b_authorization_id"],
+        repository_root=repository_root,
+        git_state=git_state,
+        candidate_manifest=candidate_manifest,
+        expected_config_sha256=expected_config_sha256,
+    )
+
+    # Steps 2-4, 6-8: candidate/qualification verification, selected-row
+    # chain replay, prompt rendering, and construction -- all delegated to
+    # the exact same pure-construction function Stage A already exercises
+    # against synthetic fixtures. `tokenizer_renderer` performs step 5/6.
+    new_manifest, provenance = construct_selected_manifest_and_provenance(
+        candidate_manifest=candidate_manifest,
+        qualification_artifact=qualification_artifact,
+        expected_config_sha256=expected_config_sha256,
+        stage_b_authorization_context=stage_b_binding,
+        tokenizer_renderer=tokenizer_renderer,
+    )
+    if provenance["tokenizer_revision_used_for_prompt_hash"] != tokenizer_resolved_revision:
+        raise RowFreezeRefusedR3(
+            "constructed provenance tokenizer revision does not match the resolved production snapshot"
+        )
+
+    # Step 9: verify the expected complete chain in memory, BEFORE any
+    # write -- reuses the one authoritative full-chain verifier.
+    verify_selection_provenance(
+        provenance,
+        selected_manifest=new_manifest,
+        candidate_manifest=candidate_manifest,
+        qualification_artifact=qualification_artifact,
+        expected_config_sha256=expected_config_sha256,
+        stage_b_authorization_context=stage_b_binding,
+    )
+
+    current_git_sha = git_state.current_commit_sha()
+    # The "historical" manifest is always the committed bytes at the
+    # CURRENT git commit -- never whatever happens to be on disk right now.
+    # Publication never commits its own writes, so this stays stable across
+    # repeated plan construction (idempotent/recovery calls), but reading
+    # live disk bytes here instead would silently drift to whatever the
+    # last publish already wrote, making State A/B/C/D classification
+    # depend on execution order rather than committed Git history.
+    historical_bytes = git_state.file_text_at_commit(SELECTED_MANIFEST_PATH, current_git_sha).encode("utf-8")
+    blob_sha = subprocess.run(
+        ["git", "rev-parse", f"{current_git_sha}:{SELECTED_MANIFEST_PATH}"],
+        cwd=repository_root, text=True, capture_output=True, check=True,
+    ).stdout.strip()
+
+    expected_new_manifest_bytes = _canonical_json_bytes(new_manifest.model_dump(mode="json"))
+    expected_provenance_bytes = _canonical_json_bytes(provenance)
+
+    plan = ProductionFreezePlan(
+        repository_root=repository_root,
+        current_git_sha=current_git_sha,
+        candidate_manifest_path=str(candidate_manifest_path),
+        candidate_manifest_canonical_sha256=candidate_manifest["canonical_sha256"],
+        qualification_artifact_path=str(qualification_artifact_path),
+        qualification_artifact_canonical_sha256=qualification_artifact["canonical_sha256"],
+        selected_manifest_path=str(selected_manifest_path),
+        selection_provenance_path=str(Path(repository_root) / SELECTION_PROVENANCE_PATH),
+        selected_ordinal=provenance["selected_ordinal"],
+        selected_unique_id=provenance["selected_unique_id"],
+        historical_selected_manifest_git_blob_sha=blob_sha,
+        historical_selected_manifest_bytes_sha256=sha256_bytes(historical_bytes),
+        historical_selected_manifest_bytes=historical_bytes,
+        expected_new_manifest_bytes=expected_new_manifest_bytes,
+        expected_new_manifest_sha256=new_manifest.manifest_hash(),
+        expected_provenance_bytes=expected_provenance_bytes,
+        expected_provenance_canonical_sha256=provenance["canonical_sha256"],
+        tokenizer_repository=tokenizer_repository,
+        tokenizer_requested_revision=tokenizer_requested_revision,
+        tokenizer_resolved_revision=tokenizer_resolved_revision,
+        tokenizer_local_path=tokenizer_local_path,
+        publication_state_before=PUBLICATION_STATE_E_INVALID,  # placeholder, replaced below
+        candidate_manifest=candidate_manifest,
+        qualification_artifact=qualification_artifact,
+        expected_config_sha256=expected_config_sha256,
+        stage_b_authorization_context=stage_b_binding,
+        _construction_token=_PLAN_CONSTRUCTION_TOKEN,
+    )
+    # classify_publication_state only reads `plan`'s already-frozen fields
+    # (never re-derives anything), so it is safe to call once more, now
+    # that the plan object exists, to fill in the real starting state.
+    real_state = classify_publication_state(plan=plan)
+    return _dataclass_replace(plan, publication_state_before=real_state)
+
+
+def classify_publication_state(*, plan: ProductionFreezePlan) -> str:
+    """States A-E, classified purely from the plan's own frozen evidence and
+    the CURRENT bytes on disk at the two fixed production output paths --
+    never from any other signal."""
+    manifest_path = Path(plan.selected_manifest_path)
+    provenance_path = Path(plan.selection_provenance_path)
+
+    if not manifest_path.exists():
+        return PUBLICATION_STATE_E_INVALID
+    manifest_bytes = manifest_path.read_bytes()
+    provenance_exists = provenance_path.exists()
+    provenance_bytes = provenance_path.read_bytes() if provenance_exists else None
+
+    manifest_is_historical = manifest_bytes == plan.historical_selected_manifest_bytes
+    manifest_is_expected_new = manifest_bytes == plan.expected_new_manifest_bytes
+    provenance_is_expected = provenance_exists and provenance_bytes == plan.expected_provenance_bytes
+
+    if manifest_is_historical and not provenance_exists:
+        return PUBLICATION_STATE_A_INITIAL
+    if manifest_is_expected_new and provenance_is_expected:
+        return PUBLICATION_STATE_B_COMPLETE
+    if manifest_is_historical and provenance_is_expected:
+        return PUBLICATION_STATE_C_PROVENANCE_FIRST_PARTIAL
+    if manifest_is_expected_new and not provenance_exists:
+        return PUBLICATION_STATE_D_MANIFEST_FIRST_PARTIAL
+    return PUBLICATION_STATE_E_INVALID
+
+
+def verify_git_worktree_safety_for_freeze(plan: ProductionFreezePlan) -> None:
+    """Phase 2.9: refuses publication on anything but a worktree whose only
+    (possible) differences from a clean checkout are the two fixed
+    production output paths themselves. This structurally rejects an
+    altered candidate manifest, qualification artifact, consumed claim,
+    R-KV pin, or any unrelated tracked/untracked change -- any of those
+    would show up as an extra dirty/staged/untracked path and get caught
+    by the allowlist check below."""
+    from kvcot.discovery.b2a_r3_provenance import SubprocessGitStateProvider
+
+    git_state = SubprocessGitStateProvider(plan.repository_root)
+    if str(Path(git_state.repository_root).resolve()) != str(Path(plan.repository_root).resolve()):
+        raise ProductionPublicationRefused("git_state.repository_root does not match the plan's repository_root")
+    if git_state.current_repository() != REQUIRED_REPOSITORY:
+        raise ProductionPublicationRefused(
+            f"current repository does not match the required {REQUIRED_REPOSITORY!r}"
+        )
+    claim = plan.stage_b_authorization_context.claim
+    if git_state.current_branch() != claim.authorized_branch:
+        raise ProductionPublicationRefused(
+            f"current branch does not match the Stage-B authorized branch {claim.authorized_branch!r}"
+        )
+    if git_state.current_commit_sha() != plan.current_git_sha:
+        raise ProductionPublicationRefused("current commit SHA has changed since the plan was constructed")
+    observed_rkv_sha = git_state.rkv_submodule_sha()
+    if observed_rkv_sha != claim.required_rkv_sha:
+        raise ProductionPublicationRefused(
+            f"R-KV submodule SHA {observed_rkv_sha!r} does not match the required {claim.required_rkv_sha!r}"
+        )
+
+    allowed_paths = {SELECTED_MANIFEST_PATH, SELECTION_PROVENANCE_PATH}
+    status = git_state.worktree_status()
+    unexpected = sorted(status.dirty_paths - allowed_paths)
+    if unexpected:
+        raise ProductionPublicationRefused(
+            f"unrelated worktree change(s) detected, refusing publication: {unexpected}"
+        )
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        dir_fd = os.open(str(path), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except (OSError, AttributeError):
+        pass
+
+
+def _atomic_replace_verified_historical(target: Path, *, expected_current_bytes: bytes, new_bytes: bytes) -> None:
+    """Historical selected-manifest replacement: atomic `os.replace`, but
+    ONLY after the live bytes on disk exactly equal the expected committed
+    historical bytes -- never a blind overwrite."""
+    if not target.exists():
+        raise ProductionPublicationRefused(f"expected historical manifest at {target} does not exist")
+    current = target.read_bytes()
+    if current != expected_current_bytes:
+        raise ProductionPublicationRefused(
+            f"live bytes at {target} do not exactly match the expected committed historical bytes -- refusing replace"
+        )
+    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=".b2a-r3-freeze-manifest-", suffix=".json.tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(new_bytes)
+            f.flush()
+            os.fsync(f.fileno())
+        if Path(tmp_name).read_bytes() != new_bytes:
+            raise ProductionPublicationRefused("temporary manifest file bytes do not match the expected new bytes")
+        os.replace(tmp_name, target)
+    except BaseException:
+        if os.path.exists(tmp_name):
+            os.remove(tmp_name)
+        raise
+    _fsync_directory(target.parent)
+    if target.read_bytes() != new_bytes:
+        raise ProductionPublicationRefused(f"reload of {target} after publish does not match the expected new bytes")
+
+
+def _exclusive_publish_no_clobber(target: Path, payload_bytes: bytes) -> None:
+    """No-clobber provenance publication (protocol §2.8): write+fsync a
+    temp file, `os.link` it onto the target (never `os.replace`), fail on
+    `FileExistsError`, clean up the temp path either way, fsync the parent
+    directory, reload, and require exact byte equality. Identical idiom to
+    `b2a_r3_authorization._create_authorization_claim` and
+    `b2a_r3_artifacts._exclusive_write_json`."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=".b2a-r3-freeze-provenance-", suffix=".json.tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload_bytes)
+            f.flush()
+            os.fsync(f.fileno())
+        if Path(tmp_name).read_bytes() != payload_bytes:
+            raise ProductionPublicationRefused("temporary provenance file bytes do not match the expected payload")
+        try:
+            os.link(tmp_name, target)
+        except FileExistsError as exc:
+            raise ProductionPublicationRefused(
+                f"refusing to overwrite an existing file at {target} -- selection provenance is no-clobber"
+            ) from exc
+    except BaseException:
+        if os.path.exists(tmp_name):
+            os.remove(tmp_name)
+        raise
+    else:
+        os.remove(tmp_name)
+    _fsync_directory(target.parent)
+    if target.read_bytes() != payload_bytes:
+        raise ProductionPublicationRefused(f"reload of {target} after publish does not match the expected payload")
+
+
+def publish_production_freeze(plan: ProductionFreezePlan) -> dict[str, Any]:
+    """The guarded publication state machine (States A-E). Refuses on
+    State E without touching either target. From State A, publishes the
+    manifest first, then the no-clobber provenance, then runs full-chain
+    verification (the normal order) -- States C/D each publish only the
+    single missing output before that same final verification; State B is
+    an idempotent no-op. Full-chain verification is required once, only
+    after both outputs are confirmed present -- never while intentionally
+    in a one-file partial state."""
+    if plan._construction_token is not _PLAN_CONSTRUCTION_TOKEN:
+        raise ProductionPublicationRefused("plan was not produced by construct_production_freeze_plan")
+
+    verify_git_worktree_safety_for_freeze(plan)
+
+    manifest_path = Path(plan.selected_manifest_path)
+    provenance_path = Path(plan.selection_provenance_path)
+
+    state_before = classify_publication_state(plan=plan)
+    if state_before == PUBLICATION_STATE_E_INVALID:
+        raise ProductionPublicationRefused(
+            "live production output state is invalid/ambiguous (State E) -- refusing to publish or touch any target"
+        )
+
+    already_frozen = state_before == PUBLICATION_STATE_B_COMPLETE
+    if state_before == PUBLICATION_STATE_A_INITIAL:
+        _atomic_replace_verified_historical(
+            manifest_path,
+            expected_current_bytes=plan.historical_selected_manifest_bytes,
+            new_bytes=plan.expected_new_manifest_bytes,
+        )
+        _exclusive_publish_no_clobber(provenance_path, plan.expected_provenance_bytes)
+    elif state_before == PUBLICATION_STATE_C_PROVENANCE_FIRST_PARTIAL:
+        _atomic_replace_verified_historical(
+            manifest_path,
+            expected_current_bytes=plan.historical_selected_manifest_bytes,
+            new_bytes=plan.expected_new_manifest_bytes,
+        )
+    elif state_before == PUBLICATION_STATE_D_MANIFEST_FIRST_PARTIAL:
+        _exclusive_publish_no_clobber(provenance_path, plan.expected_provenance_bytes)
+    # State B: already_frozen -- no write of either kind.
+
+    reloaded_manifest = B2AOneExampleManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+    reloaded_provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+    verify_selection_provenance(
+        reloaded_provenance,
+        selected_manifest=reloaded_manifest,
+        candidate_manifest=plan.candidate_manifest,
+        qualification_artifact=plan.qualification_artifact,
+        expected_config_sha256=plan.expected_config_sha256,
+        stage_b_authorization_context=plan.stage_b_authorization_context,
+    )
+    state_after = classify_publication_state(plan=plan)
+    if state_after != PUBLICATION_STATE_B_COMPLETE:
+        raise ProductionPublicationRefused(
+            f"post-publication state is {state_after!r}, not State B complete -- full-chain verification failed"
+        )
+
+    return {
+        "selected_unique_id": plan.selected_unique_id,
+        "selected_ordinal": plan.selected_ordinal,
+        "selected_manifest_path": plan.selected_manifest_path,
+        "selected_manifest_sha256": plan.expected_new_manifest_sha256,
+        "selection_provenance_path": plan.selection_provenance_path,
+        "selection_provenance_canonical_sha256": plan.expected_provenance_canonical_sha256,
+        "tokenizer_snapshot_revision": plan.tokenizer_resolved_revision,
+        "publication_state_before": state_before,
+        "publication_state_after": state_after,
+        "already_frozen": already_frozen,
+        "verification_passed": True,
     }
