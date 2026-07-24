@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-07-24 - B2A-R3 production selected-row freezer implementation authorization (AUTHORIZATION ONLY; FREEZER NOT EXECUTED)
+
+Authorizes CPU-only implementation of the production B2A-R3 selected-row
+freezer against the accepted Stage-B evidence (authorization ID
+`stage-b-2026-07-24-r2-final`, candidate-manifest canonical SHA-256
+`b8148647698ca5ab5335ea28dc1416109b26f73dd05b87eed2fe9eca4b25ff42`,
+consumed-claim canonical SHA-256
+`68d055876a2260b179681fb276b79c37b6d1f987ae1899658fc969fcd05af975`,
+qualification-artifact canonical SHA-256
+`4349edc97a273819d4f5a3e75812af80437971f584071b66b25c858ffa02ff1d`;
+selected candidate ordinal 1, `test/number_theory/631.json`), starting
+from verified-green commit `87b995c90a317863b2d3b44bbc345018ae9356b6`
+(exact-SHA CI run `30076024867`, conclusion `success`).
+
+Authorizes: production tokenizer renderer (exact local snapshot
+resolution, existing prompt-rendering convention), fixed-path freeze-plan
+construction, a guarded two-output publication state machine (States
+A-E), production CLI `--execute` wiring with no alternate-path flags,
+Git/worktree safety guards, and CPU tests. Prohibits: executing the
+freezer, modifying the production selected manifest, creating selection
+provenance, model loading, CUDA, dataset fetching, Stage C, FullKV, R-KV,
+B2B, and any scientific-setting change.
+
+Full detail:
+`docs/B2A_R3_PRODUCTION_SELECTED_ROW_FREEZER_IMPLEMENTATION_AUTHORIZATION_2026-07-24.md`.
+
+```text
+B2A-R3 PRODUCTION SELECTED-ROW FREEZER IMPLEMENTATION AUTHORIZED —
+CPU-ONLY IMPLEMENTATION AND CPU TESTS;
+FREEZER EXECUTION REMAINS PROHIBITED;
+STAGE C REMAINS BLOCKED
+```
+
 ## 2026-07-24 - B2A-R3 Stage-B evidence-acceptance test-assumption repair (TEST FILES ONLY; STAGE C BLOCKED)
 
 Exact-SHA CI on the Stage-B evidence-acceptance commit

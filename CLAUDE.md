@@ -711,6 +711,35 @@ than flat non-existence. Test files only; no change under `src/`,
 `configs/`, `third_party/R-KV/`, or `results/`. Full non-GPU suite: 1850
 passed / 14 deselected / 0 failed locally. Stage C remains blocked.
 
+### Section 1p -- B2A-R3 production selected-row freezer implementation authorization (dated 2026-07-24)
+
+Added by
+`docs/B2A_R3_PRODUCTION_SELECTED_ROW_FREEZER_IMPLEMENTATION_AUTHORIZATION_2026-07-24.md`,
+superseding nothing above. Authorizes CPU-only implementation of the
+production B2A-R3 selected-row freezer against the accepted Stage-B
+evidence (§1n/§1o; authorization ID `stage-b-2026-07-24-r2-final`,
+selected row `test/number_theory/631.json`, candidate ordinal 1): a
+production tokenizer renderer using the existing snapshot-boundary and
+prompt-rendering conventions, fixed-path freeze-plan construction, a
+guarded two-output publication state machine (States A-E), production CLI
+`--execute` wiring with no alternate-path flags, Git/worktree safety
+guards, and CPU tests.
+
+```text
+B2A-R3 PRODUCTION SELECTED-ROW FREEZER IMPLEMENTATION AUTHORIZED --
+CPU-ONLY
+
+FREEZER EXECUTION PROHIBITED
+STAGE C / FULLKV / R-KV / B2B PROHIBITED
+MODEL LOADING / CUDA PROHIBITED
+```
+
+- Does **not** authorize executing the freezer, modifying the production
+  selected manifest, creating selection provenance, model loading, CUDA,
+  dataset fetching, Stage C, FullKV, R-KV, B2B, or any scientific-setting
+  change.
+- Full binding and scope detail: see the authorization document above.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

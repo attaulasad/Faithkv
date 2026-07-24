@@ -1,6 +1,35 @@
 # Plan and status
 
-## Current status: B2A-R3 Stage-B qualification evidence accepted; test-assumption repair pushed for CI (2026-07-24)
+## Current status: B2A-R3 production selected-row freezer implementation authorized (2026-07-24)
+
+The test-assumption repair (`be59ca9` -> repair commit) reached green
+exact-SHA CI, closing Phase 1 of the B2A-R3 remaining workflow. This
+status records Phase 2: authorization to implement (never execute) the
+production selected-row freezer against the accepted Stage-B evidence
+(authorization ID `stage-b-2026-07-24-r2-final`, selected row
+`test/number_theory/631.json`, candidate ordinal 1), starting from
+verified commit `87b995c90a317863b2d3b44bbc345018ae9356b6` (exact-SHA CI
+run `30076024867`, conclusion `success`).
+
+Authorized: production tokenizer renderer, fixed-path freeze-plan
+construction, a guarded two-output publication state machine, production
+CLI `--execute` wiring, Git/worktree safety guards, and CPU tests — see
+`docs/B2A_R3_PRODUCTION_SELECTED_ROW_FREEZER_IMPLEMENTATION_AUTHORIZATION_2026-07-24.md`.
+Not authorized: executing the freezer, modifying the production selected
+manifest, creating selection provenance, model loading, CUDA, Stage C,
+FullKV, R-KV, or B2B.
+
+Next action:
+
+```text
+Implement the production freezer strictly within the authorized scope,
+without executing it. A fresh, independent session must then audit the
+exact implementation SHA before any separate task may run
+`kvcot freeze-b2a-r3-selected-row --execute`. Stage C remains blocked
+throughout.
+```
+
+## Prior status: B2A-R3 Stage-B qualification evidence accepted; test-assumption repair pushed for CI (2026-07-24)
 
 The audited, independently-verified B2A-R3 Stage-B FullKV qualification
 evidence produced under authorization ID `stage-b-2026-07-24-r2-final`
