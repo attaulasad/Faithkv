@@ -1,6 +1,66 @@
 # Plan and status
 
-## Current status: B2A-R3 Step 3R4 CPU protocol alignment and Stage-B readiness repairs implemented; ready for independent re-audit (2026-07-23)
+## Current status: B2A-R3 GPU-host-neutral Stage-B preflight test repair authorized (2026-07-24)
+
+A Stage-B FullKV qualification preflight attempt on a rented Vast.ai RTX
+3090 host, against the `stage-b-2026-07-23-final` authorization
+(execution commit `4d559070df95def18fe5b649e2a7523d32bdba95`), was
+correctly blocked before claim consumption: every precondition passed
+except the mandatory CPU test suite, which reported 3 failures. No FullKV
+or R-KV inference started, no model weights were loaded for execution, no
+qualification artifact was produced
+(`results/decisions/b2a_r3_qualification.json` does not exist), and the
+external claim (`/tmp/faithkv-stage-b-claim.json`) was never consumed.
+
+Root cause: three CPU tests
+(`test_run_fullkv_worker_requires_cuda_when_no_fake_backend_injected`,
+`test_run_rkv_worker_requires_cuda_when_no_fake_backend_injected`,
+`test_cuda_clean_refusal_is_not_wrapped_when_no_fake_backend_injected`)
+called the production worker call shape without controlling the physical
+host's real `torch.cuda.is_available()` result. Frozen on a CPU-only
+machine where that call always returns `False`, they broke on this real
+GPU-visible host where it returns `True` -- a test-environment
+determinism defect, not a production worker defect. Full detail:
+`docs/B2A_R3_GPU_HOST_NEUTRAL_PREFLIGHT_TEST_REPAIR_2026-07-24.md`.
+
+```text
+B2A-R3 GPU-HOST-NEUTRAL PREFLIGHT TEST REPAIR AUTHORIZED — CPU TESTS ONLY
+
+OLD CLAIM:
+UNCONSUMED; SUPERSEDED WHEN THE REPAIR BRANCH ADVANCES
+
+AUTHORIZED:
+DETERMINISTIC REPAIR OF THREE HOST-DEPENDENT NO-CUDA TESTS
+
+PROHIBITED:
+PRODUCTION SOURCE CHANGES
+SCIENTIFIC CONFIGURATION CHANGES
+MODEL INFERENCE
+FULLKV/R-KV EXECUTION
+CLAIM CONSUMPTION
+NEW STAGE-B AUTHORIZATION
+```
+
+Authorized repair: monkeypatch only `torch.cuda.is_available` to `False`
+in the three named tests, continuing to omit `_cuda`/`_load_model`/
+`_load_tokenizer` so the production default-selection call shape is
+exercised unchanged. No file under `src/`, `configs/`,
+`third_party/R-KV/`, or `results/` may change; no scientific setting,
+model, tokenizer, dataset, cache budget, runtime threshold, VRAM limit,
+R-KV revision, or qualification condition may change; the three tests may
+not be marked `gpu`, skipped, or xfailed; `SnapshotBoundaryError` may not
+be accepted in place of the intended assertion.
+
+Next action:
+
+```text
+Repair the three tests, validate on the Vast.ai host, commit, push,
+obtain exact-SHA GitHub Actions CPU CI, and hand off for independent
+re-audit. Stage B remains blocked until a new, separate, dated
+authorization is produced against a newly audited code commit.
+```
+
+## Prior status: B2A-R3 Step 3R4 CPU protocol alignment and Stage-B readiness repairs implemented; ready for independent re-audit (2026-07-23)
 
 A re-audit of Step 3 Stage-A SHA `7062f3cb8a6f555d3b67cf9e9be3bd6710e78120`
 (on `research/b2a-r3-runtime-qualified-calibration`) found six findings,

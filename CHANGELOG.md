@@ -1,5 +1,65 @@
 # Changelog
 
+## 2026-07-24 - B2A-R3 GPU-host-neutral Stage-B preflight test repair (CPU TESTS ONLY; STAGE B BLOCKED)
+
+A Stage-B FullKV qualification preflight attempt on a rented Vast.ai RTX
+3090 host, against the `stage-b-2026-07-23-final` authorization
+(execution commit `4d559070df95def18fe5b649e2a7523d32bdba95`), was
+correctly blocked before claim consumption: every precondition passed
+except the mandatory CPU test suite, which reported 3 failures. No FullKV
+or R-KV inference started, no model weights were loaded for execution, no
+qualification artifact was produced, and the external claim was never
+consumed.
+
+Root cause: three CPU tests
+(`test_run_fullkv_worker_requires_cuda_when_no_fake_backend_injected`,
+`test_run_rkv_worker_requires_cuda_when_no_fake_backend_injected`,
+`test_cuda_clean_refusal_is_not_wrapped_when_no_fake_backend_injected`)
+called the production worker call shape without controlling the physical
+host's real `torch.cuda.is_available()` result -- frozen on a CPU-only
+machine where that call always returns `False`, they broke on a real
+GPU-visible host where it returns `True`, falling through into real
+snapshot resolution instead of the intended clean refusal. This is a
+test-environment determinism defect, not a production worker defect.
+
+Repair (test-only, `docs/B2A_R3_GPU_HOST_NEUTRAL_PREFLIGHT_TEST_REPAIR_2026-07-24.md`):
+
+- Each of the three tests now monkeypatches only
+  `torch.cuda.is_available` to `False`, forcing the deterministic clean
+  no-CUDA refusal regardless of physical hardware, while continuing to
+  omit `_cuda`/`_load_model`/`_load_tokenizer` so the production
+  default-selection call shape (`cuda = _cuda if _cuda is not None else
+  torch.cuda`) is exercised unchanged.
+- No file under `src/`, `configs/`, `third_party/R-KV/`, or `results/`
+  changed. No scientific setting, model, tokenizer, dataset, cache
+  budget, runtime threshold, VRAM limit, R-KV revision, or qualification
+  condition changed.
+- The existing external claim
+  (`authorization_id=stage-b-2026-07-23-final`) remains unconsumed. Once
+  this repair advances HEAD past `4d559070df95def18fe5b649e2a7523d32bdba95`,
+  the claim becomes superseded (its `observed_execution_commit_sha` no
+  longer equals current clean `HEAD`) and must never be executed. A
+  byte-identical copy is preserved at
+  `/workspace/faithkv-superseded-claims/faithkv-stage-b-claim-unconsumed-2026-07-23.json`.
+
+```text
+B2A-R3 GPU-HOST-NEUTRAL PREFLIGHT TEST REPAIR AUTHORIZED — CPU TESTS ONLY
+
+OLD CLAIM:
+UNCONSUMED; SUPERSEDED WHEN THE REPAIR BRANCH ADVANCES
+
+AUTHORIZED:
+DETERMINISTIC REPAIR OF THREE HOST-DEPENDENT NO-CUDA TESTS
+
+PROHIBITED:
+PRODUCTION SOURCE CHANGES
+SCIENTIFIC CONFIGURATION CHANGES
+MODEL INFERENCE
+FULLKV/R-KV EXECUTION
+CLAIM CONSUMPTION
+NEW STAGE-B AUTHORIZATION
+```
+
 ## 2026-07-23 - B2A-R3 authorization self-reference repair (READY FOR INDEPENDENT RE-AUDIT; STAGE B BLOCKED; REMOTE CI REQUIRED)
 
 Repairs the remaining authorization blocker identified against

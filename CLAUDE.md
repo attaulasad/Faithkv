@@ -564,6 +564,82 @@ normal Git workflow.
 - No real B2A-R3 claim exists under the v1 field semantics, so the schema
   bump reinterprets nothing historical.
 
+### Section 1m -- B2A-R3 GPU-host-neutral Stage-B preflight test repair (dated 2026-07-24)
+
+Added by
+`docs/B2A_R3_GPU_HOST_NEUTRAL_PREFLIGHT_TEST_REPAIR_2026-07-24.md`,
+superseding nothing above. A Stage-B FullKV qualification preflight
+attempt against the `stage-b-2026-07-23-final` authorization (execution
+commit `4d559070df95def18fe5b649e2a7523d32bdba95`) on a rented Vast.ai RTX
+3090 host was correctly **blocked before claim consumption**: every
+precondition passed except the mandatory CPU test suite, which reported 3
+failures. No FullKV or R-KV inference started, no model weights were
+loaded for execution, no qualification artifact was produced, and the
+external claim was never consumed.
+
+Root cause: three CPU tests
+(`test_run_fullkv_worker_requires_cuda_when_no_fake_backend_injected`,
+`test_run_rkv_worker_requires_cuda_when_no_fake_backend_injected`,
+`test_cuda_clean_refusal_is_not_wrapped_when_no_fake_backend_injected`)
+called the production worker call shape (`_cuda`/`_load_model`/
+`_load_tokenizer` all omitted) without controlling the physical host's
+real `torch.cuda.is_available()` result. Frozen on a CPU-only machine
+where that call always returns `False`, they observed the intended clean
+`WorkerFailedError("... requires CUDA ...")` refusal; on a real
+GPU-visible host it returns `True`, so they instead fell through into real
+snapshot resolution and failed on an unrelated `SnapshotBoundaryError`.
+This is a test-environment determinism defect, not a production worker
+defect -- `src/kvcot/discovery/b2a_workers.py`'s CUDA-availability guard
+and `WorkerFailedError` message are unchanged by this repair.
+
+```text
+B2A-R3 GPU-HOST-NEUTRAL PREFLIGHT TEST REPAIR AUTHORIZED — CPU TESTS ONLY
+
+OLD CLAIM:
+UNCONSUMED; SUPERSEDED WHEN THE REPAIR BRANCH ADVANCES
+
+AUTHORIZED:
+DETERMINISTIC REPAIR OF THREE HOST-DEPENDENT NO-CUDA TESTS
+
+PROHIBITED:
+PRODUCTION SOURCE CHANGES
+SCIENTIFIC CONFIGURATION CHANGES
+MODEL INFERENCE
+FULLKV/R-KV EXECUTION
+CLAIM CONSUMPTION
+NEW STAGE-B AUTHORIZATION
+```
+
+- Authorizes exactly: monkeypatching only `torch.cuda.is_available` to
+  `False` in the three named tests so they force the deterministic clean
+  no-CUDA refusal branch regardless of physical host hardware, while
+  continuing to omit `_cuda`/`_load_model`/`_load_tokenizer`/
+  `_fresh_cache_factory`/`_device` so the production default-selection
+  call shape is exercised unchanged; narrowly-scoped host-neutrality
+  assertions (e.g. failing loudly if snapshot/model resolution is
+  unexpectedly reached) may be added.
+- Does **not** authorize any change under `src/`, `configs/`,
+  `third_party/R-KV/`, or `results/`; any change to the model, tokenizer,
+  dataset, cache budget, runtime threshold, VRAM limit, R-KV revision, or
+  any of the 27 qualification conditions; marking the three tests
+  `@pytest.mark.gpu`, skipping them, xfailing them, weakening their
+  assertions, or accepting `SnapshotBoundaryError` in their place;
+  modifying the existing dated Stage-B authorization document; or
+  regenerating, editing, or consuming the existing external claim.
+- The existing external claim (`authorization_id=stage-b-2026-07-23-final`,
+  `canonical_sha256=992d7ebf68efcce14aca4bec49a932f8ba7d23517c9c7f0a1e5d11f5e46f5ec1`)
+  remains unconsumed. Once this repair advances branch HEAD past
+  `4d559070df95def18fe5b649e2a7523d32bdba95`, the claim's bound
+  `observed_execution_commit_sha` no longer equals current clean `HEAD`,
+  so it becomes **superseded** and must never be executed. A
+  byte-identical copy is preserved at
+  `/workspace/faithkv-superseded-claims/faithkv-stage-b-claim-unconsumed-2026-07-23.json`
+  without modifying the original.
+- Stage B remains blocked. The next required actions are exact-SHA GitHub
+  Actions CPU CI on the final repair commit, then an independent re-audit
+  of that exact SHA, before any new, separate, dated Stage-B authorization
+  may be produced against a newly audited code commit.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.
