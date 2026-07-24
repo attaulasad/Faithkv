@@ -770,6 +770,40 @@ STAGE C REMAINS BLOCKED
   implementation SHA before any separate task may run
   `kvcot freeze-b2a-r3-selected-row --execute`.
 
+### Section 1r -- B2A-R3 production freezer independent-audit repair authorization (dated 2026-07-24)
+
+Added by
+`docs/B2A_R3_PRODUCTION_SELECTED_ROW_FREEZER_AUDIT_REPAIR_AUTHORIZATION_2026-07-24.md`,
+superseding nothing above. The independent audit of implementation SHA
+`56d257236874d8947d5f127bf2074824cff62395` failed with four required
+repairs: exact-SHA CI skipped the three real-evidence freezer dry-run
+tests because the checkout was shallow; production freeze-plan
+construction accepted caller-supplied tokenizer identity metadata; the
+tokenizer rendering boundary allowed `torch`/`torch.cuda` into
+`sys.modules`; and a recognized crash-leftover freezer temp file could
+block idempotent recovery.
+
+```text
+B2A-R3 PRODUCTION SELECTED-ROW FREEZER AUDIT REPAIR AUTHORIZED --
+CPU-ONLY
+
+FREEZER EXECUTION PROHIBITED
+SELECTED MANIFEST MODIFICATION PROHIBITED
+SELECTION PROVENANCE CREATION PROHIBITED
+STAGE C / FULLKV / R-KV / B2B PROHIBITED
+MODEL LOADING / CUDA / DATASET ACCESS PROHIBITED
+```
+
+- Authorizes only full-history CPU CI, removal of the shallow-checkout skip
+  behavior, resolver-derived tokenizer identity, a no-Torch/no-CUDA
+  tokenizer rendering boundary with no model-weight file opens, safe
+  reconciliation of recognized freezer-owned crash leftovers, process
+  locking, CPU tests, and documentation.
+- Does **not** authorize executing the freezer, changing the production
+  selected manifest, creating selection provenance, Stage C, FullKV, R-KV,
+  B2B, model loading, CUDA, dataset access, scientific-setting changes,
+  accepted-evidence changes, R-KV pin changes, or branch merge.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

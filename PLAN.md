@@ -1,6 +1,33 @@
 # Plan and status
 
-## Current status: B2A-R3 production selected-row freezer implemented; CPU tests green; freezer not executed (2026-07-24)
+## Current status: B2A-R3 production freezer independent-audit repair authorized; freezer not executed (2026-07-24)
+
+The independent audit of implementation SHA
+`56d257236874d8947d5f127bf2074824cff62395` failed with four repair
+findings: shallow-checkout CI skipped the three real-evidence freezer
+dry-run tests, production freeze-plan construction accepted caller-supplied
+tokenizer identity metadata, tokenizer rendering allowed `torch`/`torch.cuda`
+into the boundary, and a crash-leftover freezer temporary file could block
+idempotent recovery.
+
+This status records authorization only. The bounded repair may change only
+the explicitly listed workflow/source/test/documentation paths in
+`docs/B2A_R3_PRODUCTION_SELECTED_ROW_FREEZER_AUDIT_REPAIR_AUTHORIZATION_2026-07-24.md`.
+It does not authorize freezer execution, selected-manifest modification,
+selection-provenance creation, Stage C, FullKV, R-KV, B2B, model loading,
+CUDA, dataset access, scientific-setting changes, evidence changes, or an
+R-KV pin change.
+
+Next action:
+
+```text
+Implement the audited freezer repairs under the bounded authorization,
+run CPU-only validation, push for exact-SHA full-history CI, and hand off
+for fresh independent re-audit. Do not run
+`kvcot freeze-b2a-r3-selected-row --execute`. Stage C remains blocked.
+```
+
+## Prior status: B2A-R3 production selected-row freezer implemented; CPU tests green; freezer not executed (2026-07-24)
 
 The implementation authorized below is complete: a production tokenizer
 renderer, fixed-path freeze-plan construction, a guarded two-output

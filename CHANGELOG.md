@@ -1,5 +1,34 @@
 # Changelog
 
+## 2026-07-24 - B2A-R3 production freezer independent-audit repair authorization (AUTHORIZATION ONLY; FREEZER NOT EXECUTED)
+
+Authorizes a bounded CPU-only repair of the failed independent audit at
+`/workspace/faithkv-b2a-r3-freezer-implementation-independent-audit.md`
+(SHA-256
+`dccd528c8bb10586f260962dba8a38b24750b5b9ee7dc3cc2e717af2f84cff7d`)
+against implementation SHA `56d257236874d8947d5f127bf2074824cff62395`.
+
+The repair is limited to the four audited defects: shallow-checkout CI
+skipping the three real-evidence dry-run tests, caller-controlled
+production tokenizer metadata in freeze-plan construction, a tokenizer
+rendering boundary that allowed `torch`/`torch.cuda` into `sys.modules`,
+and crash-leftover freezer temporary files that can block idempotent
+recovery. Authorized repairs are full-history CPU CI, removal of the skip
+helper, resolver-derived tokenizer identity, a no-Torch/no-CUDA
+subprocess tokenizer boundary with no model-weight file opens, narrowly
+scoped temporary-file reconciliation, process locking, CPU tests, and
+documentation.
+
+Full detail:
+`docs/B2A_R3_PRODUCTION_SELECTED_ROW_FREEZER_AUDIT_REPAIR_AUTHORIZATION_2026-07-24.md`.
+
+```text
+B2A-R3 PRODUCTION SELECTED-ROW FREEZER AUDIT REPAIR AUTHORIZED --
+CPU-ONLY REPAIR AND CPU TESTS;
+FREEZER EXECUTION REMAINS PROHIBITED;
+STAGE C REMAINS BLOCKED
+```
+
 ## 2026-07-24 - B2A-R3 production freezer implementation: shallow-checkout CI test repair (TEST FILE ONLY; FREEZER NOT EXECUTED)
 
 Exact-SHA CI on the freezer implementation commit (`648b1068cc85c6b2ccef0282da78a6529d21286d`)
