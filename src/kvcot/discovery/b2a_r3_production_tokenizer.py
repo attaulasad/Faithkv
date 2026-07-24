@@ -31,7 +31,11 @@ Boundary enforced here, never weakened:
 """
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 from typing import Any
 
 from kvcot.discovery.b2a_r3_contract import (
@@ -42,15 +46,14 @@ from kvcot.discovery.b2a_r3_contract import (
     TOKENIZER_NAME,
     TOKENIZER_REVISION,
 )
-from kvcot.discovery.b2a_r3_freeze import PromptRenderingResult, RowFreezeRefusedR3
-from kvcot.discovery.manifest import ChatTemplateRenderingConfig
+from kvcot.discovery.b2a_r3_freeze import PromptRenderingResult
 from kvcot.discovery.snapshot_boundary import SnapshotBoundaryError, VerifiedLocalSnapshot, resolve_local_snapshot
-from kvcot.utils.hashing import sha256_int_ids, sha256_json, sha256_text
 
 __all__ = [
     "ProductionTokenizerResolutionRefused",
     "resolve_production_tokenizer_snapshot",
     "render_production_prompt",
+    "render_production_prompt_with_audit",
     "build_production_tokenizer_renderer",
 ]
 
@@ -92,49 +95,92 @@ def resolve_production_tokenizer_snapshot(*, cache_dir: str | Path | None = None
 
 
 def render_production_prompt(row: dict[str, Any], *, snapshot: VerifiedLocalSnapshot) -> PromptRenderingResult:
-    """Load the tokenizer from the already-verified exact local snapshot
-    and render the frozen B2A prompt convention. Never called with an
-    unverified snapshot -- `build_production_tokenizer_renderer` below is
-    the only production entry point and always resolves+verifies the
-    snapshot first."""
-    from transformers import AutoTokenizer
+    """Render through the strict subprocess boundary and return only the
+    validated prompt identity."""
+    result, _audit = render_production_prompt_with_audit(row, snapshot=snapshot)
+    return result
 
-    from kvcot.discovery.manifest_prepare import render_with_loaded_tokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(snapshot.local_path, local_files_only=True, use_fast=True)
-    if not tokenizer.chat_template:
-        raise RowFreezeRefusedR3(
-            f"production tokenizer {TOKENIZER_NAME}@{snapshot.resolved_revision} has no (or an empty) "
-            "chat_template -- refusing to invent one."
-        )
-
-    user_message, messages, token_ids = render_with_loaded_tokenizer(tokenizer, row)
-    if len(token_ids) == 0:
-        raise RowFreezeRefusedR3("production prompt rendering produced zero tokens -- refusing an empty prompt.")
-
-    return PromptRenderingResult(
-        rendered_user_message_sha256=sha256_text(user_message),
-        chat_template_source_sha256=sha256_text(tokenizer.chat_template),
-        chat_message_payload_sha256=sha256_json(messages),
-        prompt_token_ids=tuple(token_ids),
-        prompt_token_ids_sha256=sha256_int_ids(token_ids),
-        prompt_token_count=len(token_ids),
-        tokenizer_revision_used_for_prompt_hash=snapshot.resolved_revision,
-        prompt_rendering_config=ChatTemplateRenderingConfig(
-            message_roles=PROMPT_MESSAGE_ROLES,
-            add_generation_prompt=PROMPT_ADD_GENERATION,
-            tokenize=PROMPT_TOKENIZE,
-            add_special_tokens_note=PROMPT_SPECIAL_TOKENS_NOTE,
-        ),
+def _worker_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.update(
+        {
+            "USE_TORCH": "0",
+            "USE_TF": "0",
+            "USE_FLAX": "0",
+            "CUDA_VISIBLE_DEVICES": "",
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+            "TOKENIZERS_PARALLELISM": "false",
+        }
     )
+    return env
 
 
-def build_production_tokenizer_renderer(*, cache_dir: str | Path | None = None):
+def render_production_prompt_with_audit(
+    row: dict[str, Any], *, snapshot: VerifiedLocalSnapshot
+) -> tuple[PromptRenderingResult, dict[str, Any]]:
+    """Render the selected row in a fresh Python subprocess.
+
+    The child process installs a Torch import guard before importing
+    Transformers, refuses to open model-weight/index files, and reports
+    proof fields that are validated here before the prompt identity is
+    accepted by the parent.
+    """
+    payload = {
+        "row": row,
+        "snapshot": {
+            "repository_id": snapshot.repository_id,
+            "requested_revision": snapshot.requested_revision,
+            "resolved_revision": snapshot.resolved_revision,
+            "asset_type": snapshot.asset_type,
+            "local_path": snapshot.local_path,
+            "local_files_only": snapshot.local_files_only,
+        },
+    }
+    completed = subprocess.run(
+        [sys.executable, "-m", "kvcot.discovery.b2a_r3_tokenizer_worker"],
+        input=json.dumps(payload, sort_keys=True),
+        text=True,
+        capture_output=True,
+        env=_worker_env(),
+        timeout=120,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise ProductionTokenizerResolutionRefused(
+            "production tokenizer subprocess refused rendering: "
+            f"stdout={completed.stdout!r} stderr={completed.stderr!r}"
+        )
+    try:
+        worker_payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ProductionTokenizerResolutionRefused(
+            f"production tokenizer subprocess returned non-JSON output: {completed.stdout!r}"
+        ) from exc
+    audit = worker_payload.get("audit")
+    if not isinstance(audit, dict):
+        raise ProductionTokenizerResolutionRefused("production tokenizer subprocess omitted audit evidence")
+    if audit.get("torch_modules_at_start") != [] or audit.get("torch_modules_at_exit") != []:
+        raise ProductionTokenizerResolutionRefused("torch modules entered the production tokenizer subprocess")
+    if audit.get("cuda_visible_devices") != "":
+        raise ProductionTokenizerResolutionRefused("production tokenizer subprocess had CUDA_VISIBLE_DEVICES set")
+    if audit.get("model_weight_open_attempts") != []:
+        raise ProductionTokenizerResolutionRefused("production tokenizer subprocess opened a model-weight file")
+    result_payload = dict(worker_payload["result"])
+    result_payload["prompt_token_ids"] = tuple(result_payload["prompt_token_ids"])
+    return PromptRenderingResult.model_validate(result_payload), audit
+
+
+def build_production_tokenizer_renderer(
+    *, cache_dir: str | Path | None = None, snapshot: VerifiedLocalSnapshot | None = None
+):
     """Returns a `TokenizerRenderer` callable (resolves the exact local
     snapshot once, eagerly, before returning -- so a caller building a
     freeze plan learns immediately if the snapshot is unavailable, never
     only at first prompt-rendering call) bound to that verified snapshot."""
-    snapshot = resolve_production_tokenizer_snapshot(cache_dir=cache_dir)
+    if snapshot is None:
+        snapshot = resolve_production_tokenizer_snapshot(cache_dir=cache_dir)
 
     def _renderer(row: dict[str, Any]) -> PromptRenderingResult:
         return render_production_prompt(row, snapshot=snapshot)

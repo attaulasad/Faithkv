@@ -13,10 +13,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           submodules: false
 
       - name: Initialize pinned R-KV submodule
         run: git submodule update --init --recursive
+
+      - name: Verify full git history for B2A-R3 real-evidence tests
+        run: |
+          test "$(git rev-parse --is-shallow-repository)" = "false"
+          git cat-file -e 4117baea139f745ceeff85039258445639e85049^{commit}
+          git cat-file -e 87b995c90a317863b2d3b44bbc345018ae9356b6^{commit}
+          git cat-file -e 56d257236874d8947d5f127bf2074824cff62395^{commit}
 
       - uses: actions/setup-python@v5
         with:

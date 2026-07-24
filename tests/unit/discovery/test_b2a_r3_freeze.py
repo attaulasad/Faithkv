@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import itertools
 import json as _json
+import multiprocessing as _multiprocessing
 import subprocess
 from pathlib import Path as _Path
 
@@ -681,7 +682,8 @@ from kvcot.discovery.b2a_r3_freeze import (
     PUBLICATION_STATE_D_MANIFEST_FIRST_PARTIAL,
     PUBLICATION_STATE_E_INVALID,
     classify_publication_state,
-    construct_production_freeze_plan,
+    _construct_production_freeze_plan_with_binding,
+    _create_verified_production_tokenizer_binding,
     publish_production_freeze,
     verify_git_worktree_safety_for_freeze,
 )
@@ -824,15 +826,28 @@ def _build_production_shaped_repo(tmp_path: _Path):
 
 
 def _build_prod_plan(tmp_path: _Path):
-    return construct_production_freeze_plan(
+    class _FakeSnapshot:
+        repository_id = MODEL_NAME
+        requested_revision = MODEL_REVISION
+        resolved_revision = MODEL_REVISION
+        asset_type = "tokenizer"
+        local_path = "/fake/local/tokenizer/path"
+        local_files_only = True
+
+    binding = _create_verified_production_tokenizer_binding(snapshot=_FakeSnapshot(), renderer=_fake_renderer)
+    return _construct_production_freeze_plan_with_binding(
         repository_root=str(tmp_path),
         config_path=REAL_CONFIG_PATH_REL,
-        tokenizer_renderer=_fake_renderer,
-        tokenizer_repository=MODEL_NAME,
-        tokenizer_requested_revision=MODEL_REVISION,
-        tokenizer_resolved_revision=MODEL_REVISION,
-        tokenizer_local_path="/fake/local/tokenizer/path",
+        tokenizer_binding=binding,
     )
+
+
+def _publish_in_child(plan, queue):
+    try:
+        result = publish_production_freeze(plan)
+        queue.put(("ok", result["publication_state_before"], result["publication_state_after"]))
+    except Exception as exc:  # pragma: no cover - asserted by parent process
+        queue.put(("err", type(exc).__name__, str(exc)))
 
 
 @pytest.fixture
@@ -849,6 +864,43 @@ def test_construct_production_freeze_plan_state_a_initial(production_repo):
     assert plan.candidate_manifest_canonical_sha256 == candidate_manifest["canonical_sha256"]
     assert plan.qualification_artifact_canonical_sha256 == qualification_artifact["canonical_sha256"]
     assert plan.tokenizer_resolved_revision == MODEL_REVISION
+
+
+def test_public_production_freeze_plan_constructor_exposes_no_tokenizer_metadata_parameters():
+    import inspect
+
+    from kvcot.discovery.b2a_r3_freeze import construct_production_freeze_plan
+
+    params = inspect.signature(construct_production_freeze_plan).parameters
+    assert set(params) == {"repository_root", "cache_dir"}
+    assert "tokenizer_repository" not in params
+    assert "tokenizer_requested_revision" not in params
+    assert "tokenizer_resolved_revision" not in params
+    assert "tokenizer_local_path" not in params
+    assert "tokenizer_renderer" not in params
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("repository_id", "invalid/repository"),
+        ("requested_revision", "0" * 40),
+        ("resolved_revision", "0" * 40),
+        ("local_path", ""),
+    ],
+)
+def test_false_tokenizer_metadata_cannot_enter_verified_production_binding(field, value):
+    class _FakeSnapshot:
+        repository_id = MODEL_NAME
+        requested_revision = MODEL_REVISION
+        resolved_revision = MODEL_REVISION
+        asset_type = "tokenizer"
+        local_path = "/fake/local/tokenizer/path"
+        local_files_only = True
+
+    setattr(_FakeSnapshot, field, value)
+    with pytest.raises(Exception):
+        _create_verified_production_tokenizer_binding(snapshot=_FakeSnapshot(), renderer=_fake_renderer)
 
 
 def test_publish_production_freeze_state_a_completes(production_repo):
@@ -905,6 +957,45 @@ def test_publish_production_freeze_state_d_recovers(production_repo):
     assert result["publication_state_after"] == PUBLICATION_STATE_B_COMPLETE
     assert manifest_path.read_bytes() == manifest_bytes_before  # manifest untouched
     assert provenance_path.read_bytes() == provenance_bytes
+
+
+def test_two_concurrent_state_a_publications_converge(production_repo):
+    tmp_path, _cm, _qa = production_repo
+    plan1 = _build_prod_plan(tmp_path)
+    plan2 = _build_prod_plan(tmp_path)
+    queue = _multiprocessing.Queue()
+    p1 = _multiprocessing.Process(target=_publish_in_child, args=(plan1, queue))
+    p2 = _multiprocessing.Process(target=_publish_in_child, args=(plan2, queue))
+    p1.start()
+    p2.start()
+    p1.join(20)
+    p2.join(20)
+    assert p1.exitcode == 0
+    assert p2.exitcode == 0
+    results = [queue.get(timeout=5), queue.get(timeout=5)]
+    assert all(item[0] == "ok" for item in results)
+    assert classify_publication_state(plan=_build_prod_plan(tmp_path)) == PUBLICATION_STATE_B_COMPLETE
+
+
+def test_two_concurrent_state_d_publications_converge(production_repo):
+    tmp_path, _cm, _qa = production_repo
+    publish_production_freeze(_build_prod_plan(tmp_path))
+    provenance_path = tmp_path / "results/decisions/b2a_r3_selection_provenance.json"
+    provenance_path.unlink()
+    plan1 = _build_prod_plan(tmp_path)
+    plan2 = _build_prod_plan(tmp_path)
+    queue = _multiprocessing.Queue()
+    p1 = _multiprocessing.Process(target=_publish_in_child, args=(plan1, queue))
+    p2 = _multiprocessing.Process(target=_publish_in_child, args=(plan2, queue))
+    p1.start()
+    p2.start()
+    p1.join(20)
+    p2.join(20)
+    assert p1.exitcode == 0
+    assert p2.exitcode == 0
+    results = [queue.get(timeout=5), queue.get(timeout=5)]
+    assert all(item[0] == "ok" for item in results)
+    assert classify_publication_state(plan=_build_prod_plan(tmp_path)) == PUBLICATION_STATE_B_COMPLETE
 
 
 def test_publish_production_freeze_state_c_recovers(production_repo):
@@ -1013,6 +1104,85 @@ def test_temporary_write_failure_leaves_targets_unchanged(tmp_path, monkeypatch)
     assert target.read_bytes() == historical  # unchanged
     leftovers = [p for p in tmp_path.iterdir() if p != target]
     assert leftovers == []  # temp file cleaned up after the synchronous exception
+
+
+def test_known_manifest_residual_temp_recovery_before_manifest_replace(production_repo):
+    tmp_path, _cm, _qa = production_repo
+    plan = _build_prod_plan(tmp_path)
+    temp = tmp_path / "configs/discovery/.b2a-r3-freeze-manifest-left.json.tmp"
+    temp.write_bytes(plan.expected_new_manifest_bytes)
+    result = publish_production_freeze(plan)
+    assert result["publication_state_after"] == PUBLICATION_STATE_B_COMPLETE
+    assert not temp.exists()
+
+
+def test_known_manifest_residual_temp_recovery_after_manifest_replace(production_repo):
+    tmp_path, _cm, _qa = production_repo
+    plan = _build_prod_plan(tmp_path)
+    manifest_path = tmp_path / "configs/discovery/b2a_one_example_manifest.json"
+    manifest_path.write_bytes(plan.expected_new_manifest_bytes)
+    temp = tmp_path / "configs/discovery/.b2a-r3-freeze-manifest-left.json.tmp"
+    temp.write_bytes(plan.expected_new_manifest_bytes)
+    result = publish_production_freeze(plan)
+    assert result["publication_state_before"] == PUBLICATION_STATE_D_MANIFEST_FIRST_PARTIAL
+    assert not temp.exists()
+
+
+def test_known_provenance_residual_temp_recovery_before_provenance_link(production_repo):
+    tmp_path, _cm, _qa = production_repo
+    publish_production_freeze(_build_prod_plan(tmp_path))
+    provenance_path = tmp_path / "results/decisions/b2a_r3_selection_provenance.json"
+    provenance_path.unlink()
+    plan = _build_prod_plan(tmp_path)
+    temp = tmp_path / "results/decisions/.b2a-r3-freeze-provenance-left.json.tmp"
+    temp.write_bytes(plan.expected_provenance_bytes)
+    result = publish_production_freeze(plan)
+    assert result["publication_state_after"] == PUBLICATION_STATE_B_COMPLETE
+    assert not temp.exists()
+
+
+def test_known_provenance_hardlink_residual_recovery_after_provenance_link(production_repo):
+    tmp_path, _cm, _qa = production_repo
+    publish_production_freeze(_build_prod_plan(tmp_path))
+    plan = _build_prod_plan(tmp_path)
+    provenance_path = tmp_path / "results/decisions/b2a_r3_selection_provenance.json"
+    temp = tmp_path / "results/decisions/.b2a-r3-freeze-provenance-left.json.tmp"
+    os_link = __import__("os").link
+    os_link(provenance_path, temp)
+    result = publish_production_freeze(plan)
+    assert result["already_frozen"] is True
+    assert not temp.exists()
+
+
+def test_after_both_outputs_before_final_verification_retries_state_b(production_repo):
+    tmp_path, _cm, _qa = production_repo
+    publish_production_freeze(_build_prod_plan(tmp_path))
+    result = publish_production_freeze(_build_prod_plan(tmp_path))
+    assert result["publication_state_before"] == PUBLICATION_STATE_B_COMPLETE
+    assert result["already_frozen"] is True
+
+
+def test_unknown_residual_temp_refuses_without_deletion(production_repo):
+    tmp_path, _cm, _qa = production_repo
+    plan = _build_prod_plan(tmp_path)
+    bad = tmp_path / "results/decisions/.b2a-r3-freeze-provenance-left.json.tmp"
+    bad.write_bytes(b"unknown data")
+    with pytest.raises(ProductionPublicationRefused):
+        publish_production_freeze(plan)
+    assert bad.read_bytes() == b"unknown data"
+
+
+def test_symlink_residual_temp_refuses_without_target_deletion(production_repo):
+    tmp_path, _cm, _qa = production_repo
+    plan = _build_prod_plan(tmp_path)
+    target = tmp_path / "do-not-delete.txt"
+    target.write_text("keep me")
+    bad = tmp_path / "results/decisions/.b2a-r3-freeze-provenance-left.json.tmp"
+    bad.symlink_to(target)
+    with pytest.raises(ProductionPublicationRefused):
+        publish_production_freeze(plan)
+    assert target.read_text() == "keep me"
+    assert bad.is_symlink()
 
 
 def test_classify_publication_state_requires_manifest_to_exist(production_repo):
@@ -1137,6 +1307,7 @@ from kvcot.discovery.b2a_r3_production_tokenizer import (
     ProductionTokenizerResolutionRefused,
     build_production_tokenizer_renderer,
     render_production_prompt,
+    render_production_prompt_with_audit,
     resolve_production_tokenizer_snapshot,
 )
 from kvcot.discovery.snapshot_boundary import SnapshotBoundaryError
@@ -1182,6 +1353,22 @@ def test_build_production_tokenizer_renderer_returns_a_valid_tokenizer_renderer(
     assert result.prompt_token_count > 0
 
 
+def test_real_selected_row_tokenizer_subprocess_is_no_torch_no_cuda_and_no_weight_open():
+    snapshot = _real_snapshot_or_skip()
+    candidate_manifest = _json.loads(_Path("configs/discovery/b2a_r3_candidate_manifest.json").read_text())
+    qualification = _json.loads(_Path("results/decisions/b2a_r3_qualification.json").read_text())
+    selected_ordinal = qualification["first_passing_candidate_ordinal"]
+    candidate = next(c for c in candidate_manifest["candidates"] if c["candidate_ordinal"] == selected_ordinal)
+    result, audit = render_production_prompt_with_audit(candidate["row"], snapshot=snapshot)
+    outcome = next(o for o in qualification["attempted"] if o["candidate_ordinal"] == selected_ordinal)
+    expected_hash = outcome["expected_prompt_token_ids_sha256"]
+    assert result.prompt_token_ids_sha256 == expected_hash
+    assert audit["torch_modules_at_start"] == []
+    assert audit["torch_modules_at_exit"] == []
+    assert audit["cuda_visible_devices"] == ""
+    assert audit["model_weight_open_attempts"] == []
+
+
 def test_resolve_production_tokenizer_snapshot_rejects_revision_mismatch(monkeypatch):
     import kvcot.discovery.b2a_r3_production_tokenizer as tok_module
 
@@ -1211,54 +1398,26 @@ def test_resolve_production_tokenizer_snapshot_never_falls_back_to_network(monke
 
 
 def test_render_production_prompt_rejects_missing_chat_template(monkeypatch):
-    import kvcot.discovery.b2a_r3_production_tokenizer as tok_module
     from kvcot.discovery.snapshot_boundary import VerifiedLocalSnapshot
-
-    class _FakeTokenizer:
-        chat_template = None
-
-    class _FakeAutoTokenizer:
-        @staticmethod
-        def from_pretrained(*_args, **_kwargs):
-            return _FakeTokenizer()
-
-    fake_transformers = type("_m", (), {"AutoTokenizer": _FakeAutoTokenizer})
-    monkeypatch.setitem(__import__("sys").modules, "transformers", fake_transformers)
 
     snapshot = VerifiedLocalSnapshot(
         repository_id=TOKENIZER_NAME, requested_revision=TOKENIZER_REVISION,
         resolved_revision=TOKENIZER_REVISION, asset_type="tokenizer", local_path="/fake",
         files=(), total_bytes=0, required_free_bytes=0, free_bytes=0, local_files_only=True,
     )
-    with pytest.raises(RowFreezeRefusedR3):
+    with pytest.raises(ProductionTokenizerResolutionRefused):
         render_production_prompt({"problem": "x"}, snapshot=snapshot)
 
 
 def test_render_production_prompt_rejects_empty_prompt(monkeypatch):
-    import kvcot.discovery.b2a_r3_production_tokenizer as tok_module
     from kvcot.discovery.snapshot_boundary import VerifiedLocalSnapshot
-
-    class _FakeTokenizer:
-        chat_template = "not empty"
-
-    class _FakeAutoTokenizer:
-        @staticmethod
-        def from_pretrained(*_args, **_kwargs):
-            return _FakeTokenizer()
-
-    fake_transformers = type("_m", (), {"AutoTokenizer": _FakeAutoTokenizer})
-    monkeypatch.setitem(__import__("sys").modules, "transformers", fake_transformers)
-    monkeypatch.setattr(
-        "kvcot.discovery.manifest_prepare.render_with_loaded_tokenizer",
-        lambda _tokenizer, _row: ("user message", [{"role": "user", "content": "user message"}], []),
-    )
 
     snapshot = VerifiedLocalSnapshot(
         repository_id=TOKENIZER_NAME, requested_revision=TOKENIZER_REVISION,
         resolved_revision=TOKENIZER_REVISION, asset_type="tokenizer", local_path="/fake",
         files=(), total_bytes=0, required_free_bytes=0, free_bytes=0, local_files_only=True,
     )
-    with pytest.raises(RowFreezeRefusedR3):
+    with pytest.raises(ProductionTokenizerResolutionRefused):
         render_production_prompt({"problem": "x"}, snapshot=snapshot)
 
 

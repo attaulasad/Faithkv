@@ -1,6 +1,30 @@
 # Plan and status
 
-## Current status: B2A-R3 production freezer independent-audit repair authorized; freezer not executed (2026-07-24)
+## Current status: B2A-R3 production freezer independent-audit defects repaired locally; CPU tests green; freezer not executed (2026-07-24)
+
+The bounded repair authorized at
+`e5fbee6a1b8da9d7c36bf1caaf39128477083eb3` has been implemented locally:
+full-history CI coverage, removal of the real-evidence skip helper,
+resolver-derived tokenizer identity, strict subprocess tokenizer
+rendering, no model-weight-open proof, safe temp-leftover reconciliation,
+and `.git` process locking for publication.
+
+Validation is green: compileall, collect-only (`1918 tests collected`),
+the required real-evidence trio (`3 passed`, zero skipped), hostile
+false-metadata tests, the real selected-row no-Torch tokenizer subprocess
+test, crash/concurrency tests, and the full CPU-safe suite (`1904 passed,
+14 deselected, 0 skipped`). The production freezer was not executed; the
+selected manifest still contains `test/number_theory/820.json`; selection
+provenance remains absent.
+
+Next action:
+
+```text
+Commit the repair, push normally, and inspect exact-SHA full-history CI
+logs. Stage C remains blocked.
+```
+
+## Prior status: B2A-R3 production freezer independent-audit repair authorized; freezer not executed (2026-07-24)
 
 The independent audit of implementation SHA
 `56d257236874d8947d5f127bf2074824cff62395` failed with four repair

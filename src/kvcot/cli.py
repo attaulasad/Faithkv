@@ -2973,25 +2973,10 @@ def _cmd_freeze_b2a_r3_selected_row_execute() -> int:
     """The one production execute path -- fixed paths only, exact local
     tokenizer resolution, complete in-memory plan construction, guarded
     publication, immediate reload, and complete provenance verification."""
-    from kvcot.discovery import b2a_r3_contract as c
     from kvcot.discovery.b2a_r3_freeze import construct_production_freeze_plan, publish_production_freeze
-    from kvcot.discovery.b2a_r3_production_tokenizer import resolve_production_tokenizer_snapshot
-
-    snapshot = resolve_production_tokenizer_snapshot()
-
-    def _tokenizer_renderer(row):
-        from kvcot.discovery.b2a_r3_production_tokenizer import render_production_prompt
-
-        return render_production_prompt(row, snapshot=snapshot)
 
     plan = construct_production_freeze_plan(
         repository_root=".",
-        config_path=c.CONFIG_PATH,
-        tokenizer_renderer=_tokenizer_renderer,
-        tokenizer_repository=c.TOKENIZER_NAME,
-        tokenizer_requested_revision=c.TOKENIZER_REVISION,
-        tokenizer_resolved_revision=snapshot.resolved_revision,
-        tokenizer_local_path=snapshot.local_path,
     )
     result = publish_production_freeze(plan)
 

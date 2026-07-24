@@ -804,6 +804,34 @@ MODEL LOADING / CUDA / DATASET ACCESS PROHIBITED
   B2B, model loading, CUDA, dataset access, scientific-setting changes,
   accepted-evidence changes, R-KV pin changes, or branch merge.
 
+### Section 1s -- B2A-R3 production freezer independent-audit repair implementation (dated 2026-07-24)
+
+Added by
+`docs/B2A_R3_PRODUCTION_SELECTED_ROW_FREEZER_AUDIT_REPAIR_2026-07-24.md`,
+implementing the bounded scope §1r authorized. The repair provides
+full-history CI for real-evidence tests, removes the shallow-checkout skip
+helper, derives production tokenizer metadata internally from the verified
+resolver boundary, renders production prompts in a no-Torch/no-CUDA
+subprocess with model-weight open guards, reconciles only recognized
+freezer-owned crash leftovers, and holds an exclusive `.git` lock across
+publication.
+
+```text
+B2A-R3 PRODUCTION SELECTED-ROW FREEZER AUDIT REPAIR IMPLEMENTED --
+CPU-ONLY LOCAL TESTS GREEN
+
+FREEZER EXECUTION NOT PERFORMED
+SELECTED MANIFEST UNCHANGED (test/number_theory/820.json)
+SELECTION PROVENANCE ABSENT
+STAGE C REMAINS BLOCKED
+```
+
+- The public `construct_production_freeze_plan` API accepts only
+  `repository_root` and `cache_dir`; callers cannot supply tokenizer
+  repository, revision, local path, or renderer metadata.
+- Fresh exact-SHA CI and independent re-audit remain required before any
+  separate task may run `kvcot freeze-b2a-r3-selected-row --execute`.
+
 ## Section 4 — Frozen settings
 
 Fixed unless a dated `CHANGELOG.md` entry is added **before** the run.

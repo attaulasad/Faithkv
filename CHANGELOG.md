@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-07-24 - B2A-R3 production freezer independent-audit defects repaired (CPU TESTS GREEN; FREEZER NOT EXECUTED)
+
+Repairs the four blocking/high findings from the failed independent audit
+bound to SHA-256
+`dccd528c8bb10586f260962dba8a38b24750b5b9ee7dc3cc2e717af2f84cff7d`:
+full-history CI now uses `fetch-depth: 0` and asserts required ancestor
+commits; the shallow-checkout skip helper was removed so the three
+real-evidence freezer dry-run tests execute; the public production
+freeze-plan constructor no longer accepts caller-supplied tokenizer
+metadata; tokenizer rendering now runs in a no-Torch/no-CUDA subprocess
+with model-weight open guards; and publication now holds an `.git` lock
+while safely reconciling recognized freezer temp leftovers before normal
+States A-D recovery.
+
+Validation is green: collect-only found 1918 tests; the required
+real-evidence trio passed with zero skipped; hostile false-metadata tests,
+the real selected-row no-Torch tokenizer subprocess test, and
+crash/concurrency tests passed; the full CPU-safe suite reported
+`1904 passed, 14 deselected, 0 skipped`. The production freezer was
+**not** executed; the selected manifest still contains
+`test/number_theory/820.json`; selection provenance remains absent; Stage
+C remains blocked.
+
+Full detail:
+`docs/B2A_R3_PRODUCTION_SELECTED_ROW_FREEZER_AUDIT_REPAIR_2026-07-24.md`.
+
 ## 2026-07-24 - B2A-R3 production freezer independent-audit repair authorization (AUTHORIZATION ONLY; FREEZER NOT EXECUTED)
 
 Authorizes a bounded CPU-only repair of the failed independent audit at

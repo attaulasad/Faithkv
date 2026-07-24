@@ -21,6 +21,8 @@ never load `transformers`.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 import subprocess
@@ -35,6 +37,7 @@ from kvcot.discovery.b2a_r3_artifacts import SELECTION_STATUS_SELECTED, verify_q
 from kvcot.discovery.b2a_r3_candidates import verify_candidate_manifest_structure
 from kvcot.discovery.b2a_r3_contract import (
     CANDIDATE_MANIFEST_PATH,
+    CONFIG_PATH,
     EMBEDDED_ROW_COLUMNS,
     QUALIFICATION_ARTIFACT_PATH,
     SELECTED_MANIFEST_HASH_ALGORITHM,
@@ -47,6 +50,8 @@ from kvcot.discovery.b2a_r3_contract import (
     PROMPT_SPECIAL_TOKENS_NOTE,
     PROMPT_TOKENIZE,
     REQUIRED_REPOSITORY,
+    TOKENIZER_NAME,
+    TOKENIZER_REVISION,
     compute_canonical_sha256,
     require_lowercase_hex64,
     verify_canonical_sha256,
@@ -492,6 +497,7 @@ PUBLICATION_STATE_D_MANIFEST_FIRST_PARTIAL = "state_d_manifest_first_partial"
 PUBLICATION_STATE_E_INVALID = "state_e_invalid"
 
 _PLAN_CONSTRUCTION_TOKEN = object()
+_TOKENIZER_BINDING_TOKEN = object()
 
 
 def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
@@ -501,6 +507,60 @@ def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
     a byte comparison against a freshly-serialized expected payload is
     exact, never merely semantic."""
     return (json.dumps(payload, indent=2, ensure_ascii=True) + "\n").encode("utf-8")
+
+
+@dataclass(frozen=True)
+class _VerifiedProductionTokenizerBinding:
+    repository: str
+    requested_revision: str
+    resolved_revision: str
+    local_path: str
+    renderer: TokenizerRenderer
+    _verification_token: object
+
+
+def _create_verified_production_tokenizer_binding(*, snapshot: Any, renderer: TokenizerRenderer) -> _VerifiedProductionTokenizerBinding:
+    """Bind tokenizer identity only from the resolver-returned snapshot.
+
+    Production callers never pass raw tokenizer identity strings into the
+    public freeze-plan constructor. Tests may monkeypatch the resolver
+    boundary, but the accepted plan still carries this module-private
+    token rather than caller-authored metadata.
+    """
+    if snapshot.repository_id != TOKENIZER_NAME:
+        raise RowFreezeRefusedR3("resolved tokenizer repository does not match TOKENIZER_NAME")
+    if snapshot.requested_revision != TOKENIZER_REVISION:
+        raise RowFreezeRefusedR3("resolved tokenizer requested revision does not match TOKENIZER_REVISION")
+    if snapshot.resolved_revision != TOKENIZER_REVISION:
+        raise RowFreezeRefusedR3("resolved tokenizer revision does not match TOKENIZER_REVISION")
+    if snapshot.asset_type != "tokenizer":
+        raise RowFreezeRefusedR3("resolved production asset is not a tokenizer snapshot")
+    if snapshot.local_files_only is not True:
+        raise RowFreezeRefusedR3("resolved tokenizer snapshot did not enforce local_files_only")
+    local_path = Path(snapshot.local_path)
+    if not snapshot.local_path or (local_path.exists() and not local_path.is_dir()):
+        raise RowFreezeRefusedR3("resolved tokenizer local path is invalid")
+    return _VerifiedProductionTokenizerBinding(
+        repository=snapshot.repository_id,
+        requested_revision=snapshot.requested_revision,
+        resolved_revision=snapshot.resolved_revision,
+        local_path=str(snapshot.local_path),
+        renderer=renderer,
+        _verification_token=_TOKENIZER_BINDING_TOKEN,
+    )
+
+
+def _resolve_verified_production_tokenizer_binding(
+    *, cache_dir: str | Path | None = None
+) -> _VerifiedProductionTokenizerBinding:
+    from kvcot.discovery.b2a_r3_production_tokenizer import (
+        build_production_tokenizer_renderer,
+        resolve_production_tokenizer_snapshot,
+    )
+
+    snapshot = resolve_production_tokenizer_snapshot(cache_dir=cache_dir)
+    renderer = build_production_tokenizer_renderer(cache_dir=cache_dir, snapshot=snapshot)
+    return _create_verified_production_tokenizer_binding(snapshot=snapshot, renderer=renderer)
 
 
 @dataclass(frozen=True)
@@ -543,12 +603,21 @@ class ProductionFreezePlan:
 def construct_production_freeze_plan(
     *,
     repository_root: str | Path = ".",
-    config_path: str,
-    tokenizer_renderer: TokenizerRenderer,
-    tokenizer_repository: str,
-    tokenizer_requested_revision: str,
-    tokenizer_resolved_revision: str,
-    tokenizer_local_path: str,
+    cache_dir: str | Path | None = None,
+) -> ProductionFreezePlan:
+    tokenizer_binding = _resolve_verified_production_tokenizer_binding(cache_dir=cache_dir)
+    return _construct_production_freeze_plan_with_binding(
+        repository_root=repository_root,
+        config_path=CONFIG_PATH,
+        tokenizer_binding=tokenizer_binding,
+    )
+
+
+def _construct_production_freeze_plan_with_binding(
+    *,
+    repository_root: str | Path = ".",
+    config_path: str = CONFIG_PATH,
+    tokenizer_binding: _VerifiedProductionTokenizerBinding,
 ) -> ProductionFreezePlan:
     """Construction order (steps 1-9), entirely in memory, no filesystem
     publication:
@@ -557,10 +626,7 @@ def construct_production_freeze_plan(
     2. Verify candidate manifest.
     3. Verify qualification artifact.
     4. Replay selected-row chain.
-    5. Resolve exact local tokenizer (already done by the caller --
-       `tokenizer_repository`/`tokenizer_resolved_revision`/
-       `tokenizer_local_path` are the already-verified snapshot identity;
-       see `kvcot.discovery.b2a_r3_production_tokenizer`).
+    5. Resolve exact local tokenizer via the production resolver boundary.
     6. Render exact prompt (via the injected `tokenizer_renderer`, inside
        step 7/8's call into `construct_selected_manifest_and_provenance`).
     7. Construct selected manifest.
@@ -572,6 +638,9 @@ def construct_production_freeze_plan(
     from kvcot.config import config_identity
     from kvcot.discovery.b2a_r3_authorization import verify_persisted_stage_b_authorization_binding
     from kvcot.discovery.b2a_r3_provenance import SubprocessGitStateProvider
+
+    if tokenizer_binding._verification_token is not _TOKENIZER_BINDING_TOKEN:
+        raise RowFreezeRefusedR3("tokenizer binding was not produced by the verified production resolver boundary")
 
     repository_root = str(repository_root)
     candidate_manifest_path = Path(repository_root) / CANDIDATE_MANIFEST_PATH
@@ -604,9 +673,9 @@ def construct_production_freeze_plan(
         qualification_artifact=qualification_artifact,
         expected_config_sha256=expected_config_sha256,
         stage_b_authorization_context=stage_b_binding,
-        tokenizer_renderer=tokenizer_renderer,
+        tokenizer_renderer=tokenizer_binding.renderer,
     )
-    if provenance["tokenizer_revision_used_for_prompt_hash"] != tokenizer_resolved_revision:
+    if provenance["tokenizer_revision_used_for_prompt_hash"] != tokenizer_binding.resolved_revision:
         raise RowFreezeRefusedR3(
             "constructed provenance tokenizer revision does not match the resolved production snapshot"
         )
@@ -657,10 +726,10 @@ def construct_production_freeze_plan(
         expected_new_manifest_sha256=new_manifest.manifest_hash(),
         expected_provenance_bytes=expected_provenance_bytes,
         expected_provenance_canonical_sha256=provenance["canonical_sha256"],
-        tokenizer_repository=tokenizer_repository,
-        tokenizer_requested_revision=tokenizer_requested_revision,
-        tokenizer_resolved_revision=tokenizer_resolved_revision,
-        tokenizer_local_path=tokenizer_local_path,
+        tokenizer_repository=tokenizer_binding.repository,
+        tokenizer_requested_revision=tokenizer_binding.requested_revision,
+        tokenizer_resolved_revision=tokenizer_binding.resolved_revision,
+        tokenizer_local_path=tokenizer_binding.local_path,
         publication_state_before=PUBLICATION_STATE_E_INVALID,  # placeholder, replaced below
         candidate_manifest=candidate_manifest,
         qualification_artifact=qualification_artifact,
@@ -753,6 +822,93 @@ def _fsync_directory(path: Path) -> None:
         pass
 
 
+@contextmanager
+def _production_freeze_lock(plan: ProductionFreezePlan):
+    git_dir = Path(plan.repository_root) / ".git"
+    if not git_dir.is_dir():
+        raise ProductionPublicationRefused(f"expected .git directory under repository root {plan.repository_root!r}")
+    lock_path = git_dir / "b2a-r3-freeze.lock"
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        with os.fdopen(fd, "w") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+        pass
+
+
+def _is_regular_non_symlink(path: Path) -> bool:
+    return path.exists() and path.is_file() and not path.is_symlink()
+
+
+def _safe_unlink_residual(path: Path) -> None:
+    path.unlink()
+    _fsync_directory(path.parent)
+
+
+def _reconcile_manifest_temp(plan: ProductionFreezePlan, path: Path, state: str) -> None:
+    manifest_dir = Path(plan.selected_manifest_path).parent.resolve()
+    if path.parent.resolve() != manifest_dir:
+        raise ProductionPublicationRefused(f"manifest temp file is outside the selected-manifest directory: {path}")
+    if not _is_regular_non_symlink(path):
+        raise ProductionPublicationRefused(f"manifest temp file is not a regular non-symlink file: {path}")
+    if path.read_bytes() != plan.expected_new_manifest_bytes:
+        raise ProductionPublicationRefused(f"manifest temp file bytes are not the expected freezer payload: {path}")
+    if state not in {
+        PUBLICATION_STATE_A_INITIAL,
+        PUBLICATION_STATE_B_COMPLETE,
+        PUBLICATION_STATE_C_PROVENANCE_FIRST_PARTIAL,
+        PUBLICATION_STATE_D_MANIFEST_FIRST_PARTIAL,
+    }:
+        raise ProductionPublicationRefused("refusing to reconcile manifest temp file in invalid output state")
+    _safe_unlink_residual(path)
+
+
+def _reconcile_provenance_temp(plan: ProductionFreezePlan, path: Path, state: str) -> None:
+    provenance_path = Path(plan.selection_provenance_path)
+    provenance_dir = provenance_path.parent.resolve()
+    if path.parent.resolve() != provenance_dir:
+        raise ProductionPublicationRefused(f"provenance temp file is outside the provenance directory: {path}")
+    if not _is_regular_non_symlink(path):
+        raise ProductionPublicationRefused(f"provenance temp file is not a regular non-symlink file: {path}")
+    if path.read_bytes() != plan.expected_provenance_bytes:
+        raise ProductionPublicationRefused(f"provenance temp file bytes are not the expected freezer payload: {path}")
+    if state not in {
+        PUBLICATION_STATE_A_INITIAL,
+        PUBLICATION_STATE_B_COMPLETE,
+        PUBLICATION_STATE_C_PROVENANCE_FIRST_PARTIAL,
+        PUBLICATION_STATE_D_MANIFEST_FIRST_PARTIAL,
+    }:
+        raise ProductionPublicationRefused("refusing to reconcile provenance temp file in invalid output state")
+    if provenance_path.exists():
+        if provenance_path.read_bytes() != plan.expected_provenance_bytes:
+            raise ProductionPublicationRefused("final provenance target conflicts with recognized temp payload")
+        temp_stat = path.stat()
+        target_stat = provenance_path.stat()
+        if (temp_stat.st_dev, temp_stat.st_ino) != (target_stat.st_dev, target_stat.st_ino):
+            raise ProductionPublicationRefused("provenance temp is not the hard-link alias left by freezer publication")
+    _safe_unlink_residual(path)
+
+
+def _reconcile_residual_freezer_temp_files(plan: ProductionFreezePlan) -> None:
+    manifest_dir = Path(plan.selected_manifest_path).parent
+    provenance_dir = Path(plan.selection_provenance_path).parent
+    manifest_temps = sorted(manifest_dir.glob(".b2a-r3-freeze-manifest-*.json.tmp"))
+    provenance_temps = sorted(provenance_dir.glob(".b2a-r3-freeze-provenance-*.json.tmp"))
+    if len(manifest_temps) > 1 or len(provenance_temps) > 1:
+        raise ProductionPublicationRefused("multiple freezer temp leftovers are ambiguous; refusing cleanup")
+    state = classify_publication_state(plan=plan)
+    if state == PUBLICATION_STATE_E_INVALID and (manifest_temps or provenance_temps):
+        raise ProductionPublicationRefused("refusing to reconcile freezer temp leftovers in invalid output state")
+    for path in manifest_temps:
+        _reconcile_manifest_temp(plan, path, state)
+    for path in provenance_temps:
+        _reconcile_provenance_temp(plan, path, state)
+
+
 def _atomic_replace_verified_historical(target: Path, *, expected_current_bytes: bytes, new_bytes: bytes) -> None:
     """Historical selected-manifest replacement: atomic `os.replace`, but
     ONLY after the live bytes on disk exactly equal the expected committed
@@ -827,61 +983,63 @@ def publish_production_freeze(plan: ProductionFreezePlan) -> dict[str, Any]:
     if plan._construction_token is not _PLAN_CONSTRUCTION_TOKEN:
         raise ProductionPublicationRefused("plan was not produced by construct_production_freeze_plan")
 
-    verify_git_worktree_safety_for_freeze(plan)
+    with _production_freeze_lock(plan):
+        _reconcile_residual_freezer_temp_files(plan)
+        verify_git_worktree_safety_for_freeze(plan)
 
-    manifest_path = Path(plan.selected_manifest_path)
-    provenance_path = Path(plan.selection_provenance_path)
+        manifest_path = Path(plan.selected_manifest_path)
+        provenance_path = Path(plan.selection_provenance_path)
 
-    state_before = classify_publication_state(plan=plan)
-    if state_before == PUBLICATION_STATE_E_INVALID:
-        raise ProductionPublicationRefused(
-            "live production output state is invalid/ambiguous (State E) -- refusing to publish or touch any target"
+        state_before = classify_publication_state(plan=plan)
+        if state_before == PUBLICATION_STATE_E_INVALID:
+            raise ProductionPublicationRefused(
+                "live production output state is invalid/ambiguous (State E) -- refusing to publish or touch any target"
+            )
+
+        already_frozen = state_before == PUBLICATION_STATE_B_COMPLETE
+        if state_before == PUBLICATION_STATE_A_INITIAL:
+            _atomic_replace_verified_historical(
+                manifest_path,
+                expected_current_bytes=plan.historical_selected_manifest_bytes,
+                new_bytes=plan.expected_new_manifest_bytes,
+            )
+            _exclusive_publish_no_clobber(provenance_path, plan.expected_provenance_bytes)
+        elif state_before == PUBLICATION_STATE_C_PROVENANCE_FIRST_PARTIAL:
+            _atomic_replace_verified_historical(
+                manifest_path,
+                expected_current_bytes=plan.historical_selected_manifest_bytes,
+                new_bytes=plan.expected_new_manifest_bytes,
+            )
+        elif state_before == PUBLICATION_STATE_D_MANIFEST_FIRST_PARTIAL:
+            _exclusive_publish_no_clobber(provenance_path, plan.expected_provenance_bytes)
+        # State B: already_frozen -- no write of either kind.
+
+        reloaded_manifest = B2AOneExampleManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
+        reloaded_provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
+        verify_selection_provenance(
+            reloaded_provenance,
+            selected_manifest=reloaded_manifest,
+            candidate_manifest=plan.candidate_manifest,
+            qualification_artifact=plan.qualification_artifact,
+            expected_config_sha256=plan.expected_config_sha256,
+            stage_b_authorization_context=plan.stage_b_authorization_context,
         )
+        state_after = classify_publication_state(plan=plan)
+        if state_after != PUBLICATION_STATE_B_COMPLETE:
+            raise ProductionPublicationRefused(
+                f"post-publication state is {state_after!r}, not State B complete -- full-chain verification failed"
+            )
 
-    already_frozen = state_before == PUBLICATION_STATE_B_COMPLETE
-    if state_before == PUBLICATION_STATE_A_INITIAL:
-        _atomic_replace_verified_historical(
-            manifest_path,
-            expected_current_bytes=plan.historical_selected_manifest_bytes,
-            new_bytes=plan.expected_new_manifest_bytes,
-        )
-        _exclusive_publish_no_clobber(provenance_path, plan.expected_provenance_bytes)
-    elif state_before == PUBLICATION_STATE_C_PROVENANCE_FIRST_PARTIAL:
-        _atomic_replace_verified_historical(
-            manifest_path,
-            expected_current_bytes=plan.historical_selected_manifest_bytes,
-            new_bytes=plan.expected_new_manifest_bytes,
-        )
-    elif state_before == PUBLICATION_STATE_D_MANIFEST_FIRST_PARTIAL:
-        _exclusive_publish_no_clobber(provenance_path, plan.expected_provenance_bytes)
-    # State B: already_frozen -- no write of either kind.
-
-    reloaded_manifest = B2AOneExampleManifest.model_validate_json(manifest_path.read_text(encoding="utf-8"))
-    reloaded_provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
-    verify_selection_provenance(
-        reloaded_provenance,
-        selected_manifest=reloaded_manifest,
-        candidate_manifest=plan.candidate_manifest,
-        qualification_artifact=plan.qualification_artifact,
-        expected_config_sha256=plan.expected_config_sha256,
-        stage_b_authorization_context=plan.stage_b_authorization_context,
-    )
-    state_after = classify_publication_state(plan=plan)
-    if state_after != PUBLICATION_STATE_B_COMPLETE:
-        raise ProductionPublicationRefused(
-            f"post-publication state is {state_after!r}, not State B complete -- full-chain verification failed"
-        )
-
-    return {
-        "selected_unique_id": plan.selected_unique_id,
-        "selected_ordinal": plan.selected_ordinal,
-        "selected_manifest_path": plan.selected_manifest_path,
-        "selected_manifest_sha256": plan.expected_new_manifest_sha256,
-        "selection_provenance_path": plan.selection_provenance_path,
-        "selection_provenance_canonical_sha256": plan.expected_provenance_canonical_sha256,
-        "tokenizer_snapshot_revision": plan.tokenizer_resolved_revision,
-        "publication_state_before": state_before,
-        "publication_state_after": state_after,
-        "already_frozen": already_frozen,
-        "verification_passed": True,
-    }
+        return {
+            "selected_unique_id": plan.selected_unique_id,
+            "selected_ordinal": plan.selected_ordinal,
+            "selected_manifest_path": plan.selected_manifest_path,
+            "selected_manifest_sha256": plan.expected_new_manifest_sha256,
+            "selection_provenance_path": plan.selection_provenance_path,
+            "selection_provenance_canonical_sha256": plan.expected_provenance_canonical_sha256,
+            "tokenizer_snapshot_revision": plan.tokenizer_resolved_revision,
+            "publication_state_before": state_before,
+            "publication_state_after": state_after,
+            "already_frozen": already_frozen,
+            "verification_passed": True,
+        }

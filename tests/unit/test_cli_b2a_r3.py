@@ -174,34 +174,7 @@ def test_freeze_execute_returns_nonzero_when_verification_fails(monkeypatch):
     assert rc != 0
 
 
-def _skip_unless_full_git_history_available():
-    """The real dry-run path replays the committed Stage-B authorization
-    claim, which requires `authorized_code_commit_sha` (an ancestor commit,
-    not necessarily the tip) to exist in the local git object database.
-    On a full clone (any normal local checkout) it always does; on a
-    shallow CI checkout (`actions/checkout@v4`'s default `fetch-depth: 1`,
-    unchanged by this phase -- `.github` is out of scope) it does not.
-    Skip cleanly rather than fail on an environment property this test
-    cannot control and this phase is not authorized to fix."""
-    from kvcot.discovery.b2a_r3_contract import QUALIFICATION_ARTIFACT_PATH
-
-    with open(QUALIFICATION_ARTIFACT_PATH, "r", encoding="utf-8") as f:
-        qualification_artifact = json.load(f)
-    claim_path = Path(
-        f"results/decisions/b2a_r3_authorization_claims/{qualification_artifact['stage_b_authorization_id']}.json"
-    )
-    with open(claim_path, "r", encoding="utf-8") as f:
-        claim = json.load(f)
-    result = subprocess.run(
-        ["git", "cat-file", "-e", f"{claim['authorized_code_commit_sha']}^{{commit}}"],
-        cwd=REPO_ROOT, capture_output=True,
-    )
-    if result.returncode != 0:
-        pytest.skip("full git history for the Stage-B authorized code commit is unavailable (shallow checkout)")
-
-
 def test_freeze_dry_run_still_reports_no_write_or_tokenizer_action(capsys):
-    _skip_unless_full_git_history_available()
     rc = main(["freeze-b2a-r3-selected-row", "--dry-run"])
     out = capsys.readouterr().out
     assert "would_load_tokenizer_for_execution = False" in out
@@ -389,7 +362,6 @@ def test_freeze_dry_run_against_real_committed_artifact_never_imports_forbidden_
     dry-run path never imports torch/transformers/the production tokenizer
     module even on the happy path, not only when it fails closed on a
     missing file."""
-    _skip_unless_full_git_history_available()
     result = _run_guarded(["freeze-b2a-r3-selected-row", "--dry-run"])
     assert "FORBIDDEN_IMPORT" not in result.stdout
     assert "FORBIDDEN_IMPORT" not in result.stderr
@@ -411,8 +383,6 @@ def test_real_committed_evidence_selects_ordinal_1_row_631_and_dry_run_would_fre
     import os
 
     from kvcot.discovery.b2a_r3_contract import QUALIFICATION_ARTIFACT_PATH, SELECTED_MANIFEST_PATH
-
-    _skip_unless_full_git_history_available()
 
     with open(QUALIFICATION_ARTIFACT_PATH, "r", encoding="utf-8") as f:
         qualification_artifact = json.load(f)
